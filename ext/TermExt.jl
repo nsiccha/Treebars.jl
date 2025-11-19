@@ -1,5 +1,50 @@
 module TermExt
-import Term, Baumkuchen
+import Term
+import Term.Progress: ProgressBar, ProgressJob, AbstractColumn, DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn
+import Baumkuchen: initialize_progress!, finalize_progress!, update_progress!, IncrementBy, ProgressNode, propagates_finalization
+
+
+TermProgressNode{I,M} = ProgressNode{:term,I,M}
+TermProgressNode(args...; kwargs...) = ProgressNode(:term, args...; kwargs...)
+ProgressBarNode{M} = TermProgressNode{ProgressBar,M}
+ProgressJobNode{M} = TermProgressNode{ProgressJob,M}
+
+function renderloop(pbar, lock)
+    # @info "Starting renderloop"
+    while pbar.running
+        Base.lock(lock) do 
+            Term.Progress.render(pbar)
+        end
+        sleep(pbar.Δt)
+    end
+    # @info "Exiting renderloop"
+end
+
+initialize_progress!(::Val{:term}; kwargs...) = begin
+    width = 120
+    bar = ProgressBar(;width, columns=[DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn])
+    Term.Progress.start!(bar)
+    lock = ReentrantLock()
+    thread = Threads.@spawn renderloop(bar, lock)
+    TermProgressNode(bar, (;lock, thread))
+end
+initialize_progress!(pbar::ProgressBar, N; description="Running...", transient=false, propagates=false) = begin 
+    pjob = ProgressJob(1, N, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
+    pjob.columns = [DescriptionColumn(pjob), CompletedColumn(pjob), SeparatorColumn(pjob), ProgressColumn(pjob)]
+    Term.Progress.render(pjob, pbar)
+    push!(pbar.jobs, pjob)
+    pjob, (;propagates)
+end
+update_progress!(pjob::ProgressJob, i::Int) = begin 
+    pjob.i = clamp(i, 0, pjob.N)
+end
+update_progress!(pjob::ProgressJob, ::IncrementBy{di}) where {di} = update_progress!(pjob, pjob.i + di)
+
+finalize_progress!(pbar::ProgressBar) = Term.Progress.stop!(pbar)
+finalize_progress!(pjob::ProgressJob) = Term.Progress.stop!(pjob)
+propagates_finalization(::ProgressBarNode) = false
+
+    # error((;args, kwargs))
 
 # ProgressBar{I} = WarmupHMC.Progress{Term.Progress.ProgressBar, I}
 # ProgressJob{I} = WarmupHMC.Progress{Term.Progress.ProgressJob, I}
