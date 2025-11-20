@@ -1,6 +1,10 @@
 module Baumkuchen
 
+const BACKEND = Ref{Union{Nothing,Symbol}}(nothing)
+
+
 abstract type AbstractProgress end
+
 
 struct Progress{P,I}
     parent::P
@@ -14,7 +18,6 @@ initialize_progress!(kind::Symbol, args...; kwargs...) = initialize_progress!(Va
 initialize_progress!(kind::Val, N; description="Running...", transient=false, kwargs...) = initialize_progress!(
     initialize_progress!(kind; kwargs...), N; description, transient, propagates=true
 )
-# initialize_progress!(kind::Val, N; kwargs...)
 
 update_progress!(::Nothing, args...; kwargs...) = nothing
 update_progress!(f::Function, ::Nothing, args...; kwargs...) = nothing
@@ -39,12 +42,10 @@ end
 struct IncrementBy{di}
     IncrementBy(di) = new{di}()
 end
-# initialize_iterable_progress!(kind::Symbol, args...; kwargs...) = initialize_iterable_progress!(Val(kind), args...; kwargs...)
 struct IterableProgress{P,W}
     progress::P
     wrapped::W
 end
-initialize_iterable_progress!(::Nothing, it; kwargs...) = it
 initialize_iterable_progress!(progress, it; kwargs...) = IterableProgress(
     initialize_progress!(progress, length(it); kwargs...),
     it
@@ -72,26 +73,35 @@ struct ProgressNode{K,I,M}
         rv
     end
 end
+root(node::ProgressNode) = isnothing(node.parent) ? node : root(node.parent)
 kind(::ProgressNode{K}) where {K} = K
 initialize_progress!(node::ProgressNode, args...; kwargs...) = ProgressNode(
     kind(node), initialize_progress!(node.impl, args...; kwargs...)...; parent=node
 )
 update_progress!(node::ProgressNode, args...; kwargs...) = update_progress!(node.impl, args...; kwargs...)
+update_progress!(node::ProgressNode; transient=false, kwargs...) = update_progress!(node, pairs(kwargs)...; transient)
 finalize_progress!(node::ProgressNode) = begin 
     finalize_progress!(node.impl)
+    isnothing(node.parent) || pop!(node.parent.children, node)
+    for child in node.children
+        finalize_progress!(child)
+    end
     propagates_finalization(node) && finalize_progress!(node.parent)
 end
 propagates_finalization(node::ProgressNode) = node.meta.propagates
 
-progress_expr(x) = x
-progress_expr(x::Expr; progress) = if x.head == :for
+progress_expr(x; kwargs...) = x
+progress_expr(x::Symbol; progress, kwargs...) = x == :__progress__ ? progress : x
+progress_expr(x::Expr; progress, transient=false) = if x.head == :for
+    subprogress = gensym(:subprogress)
     @assert length(x.args) == 2
     head, body = x.args
+    body = progress_expr(body; progress=:($subprogress.progress), transient=true)
     @assert Meta.isexpr(head, :(=))
     lhs, rhs = head.args
-    subprogress = gensym(:subprogress)
+    description = "for $lhs in ..."
     quote 
-        $subprogress = $initialize_iterable_progress!($progress, $rhs)
+        $subprogress = $initialize_iterable_progress!($progress, $rhs; description=$description, transient=$transient)
         try 
             for $lhs in $subprogress
                 $body
@@ -103,11 +113,13 @@ progress_expr(x::Expr; progress) = if x.head == :for
             $finalize_progress!($subprogress)
         end
     end
-    # Expr(:for, head, progress_expr(body))
 else
-    Expr(x.head, progress_expr.(x.args)...)
+    Expr(x.head, progress_expr.(x.args; progress, transient)...)
 end
 
+macro progress(body)
+    esc(progress_expr(body; progress=:($BACKEND[])))
+end
 macro progress(args...)
     @assert length(args) == 2
     progress, body = args

@@ -1,8 +1,21 @@
 module TermExt
 import Term
 import Term.Progress: ProgressBar, ProgressJob, AbstractColumn, DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn
-import Baumkuchen: initialize_progress!, finalize_progress!, update_progress!, IncrementBy, ProgressNode, propagates_finalization
+import Baumkuchen: initialize_progress!, finalize_progress!, update_progress!, IncrementBy, ProgressNode, propagates_finalization, kind, root
 
+
+struct StringColumn <: AbstractColumn
+    parent::Term.Progress.ProgressJob
+    msg::Ref{String}
+    StringColumn(job::Term.Progress.ProgressJob, msg::AbstractString="             ") = new(job, Ref(msg))
+end 
+Base.getproperty(x::StringColumn, k::Symbol) = if hasfield(typeof(x), k)
+    getfield(x, k)
+else
+    @assert k == :measure
+    Term.Progress.Measure(x.msg[])
+end
+Term.Progress.update!(col::StringColumn, color::String) = Term.Segment(col.msg[], color).text
 
 TermProgressNode{I,M} = ProgressNode{:term,I,M}
 TermProgressNode(args...; kwargs...) = ProgressNode(:term, args...; kwargs...)
@@ -28,17 +41,60 @@ initialize_progress!(::Val{:term}; kwargs...) = begin
     thread = Threads.@spawn renderloop(bar, lock)
     TermProgressNode(bar, (;lock, thread))
 end
-initialize_progress!(pbar::ProgressBar, N; description="Running...", transient=false, propagates=false) = begin 
-    pjob = ProgressJob(1, N, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
-    pjob.columns = [DescriptionColumn(pjob), CompletedColumn(pjob), SeparatorColumn(pjob), ProgressColumn(pjob)]
+# initialize_progress!(pbar::ProgressBar, N; description="Running...", transient=false, propagates=false) = begin 
+#     pjob = ProgressJob(1, N, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
+#     pjob.columns = [DescriptionColumn(pjob), CompletedColumn(pjob), SeparatorColumn(pjob), ProgressColumn(pjob)]
+#     Term.Progress.render(pjob, pbar)
+#     push!(pbar.jobs, pjob)
+#     pjob, (;propagates)
+# end
+initialize_progress!(node::TermProgressNode, N::Int; description="Running...", transient=false, propagates=false) = begin 
+    pbar = root(node).impl
+    pjob = ProgressJob(rand(Int), N, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
+    pjob.columns = [DescriptionColumn(pjob), CompletedColumn(pjob), SeparatorColumn(pjob), ProgressColumn(pjob), StringColumn(pjob, "ETA: N/A")]
+    # update_progress!(pjob, 0)
+    # Term.Progress.setwidth!(pjob.columns[end], pjob.width-length(pjob.columns) - sum(c -> isa(c, Term.Progress.ProgressColumn) ? 0 : c.measure.w, pjob.columns))
+    pjob.startime = Term.Progress.now()
     Term.Progress.render(pjob, pbar)
     push!(pbar.jobs, pjob)
-    pjob, (;propagates)
+    ProgressNode(kind(node), pjob, (;propagates); parent=node)
 end
-update_progress!(pjob::ProgressJob, i::Int) = begin 
+
+update_progress!(pjob::ProgressJob, i::Int) = begin
     pjob.i = clamp(i, 0, pjob.N)
+    dt = Term.Progress.now() - pjob.startime
+    eta = (1 - pjob.i / pjob.N) / ((pjob.i / pjob.N) / (dt).value)
+    pjob.columns[end].msg[] = if eta == 0
+        "Took $(Term.Progress.canonicalize(dt))"
+    elseif !isfinite(eta)
+        "ETA: N/A"
+    else
+        "ETA: $(Term.Progress.canonicalize(Term.Progress.Millisecond(round(Int, eta))))"
+    end
+    Term.Progress.setwidth!(pjob.columns[end-1], pjob.width-length(pjob.columns) - sum(c -> isa(c, Term.Progress.ProgressColumn) ? 0 : c.measure.w, pjob.columns))
 end
 update_progress!(pjob::ProgressJob, ::IncrementBy{di}) where {di} = update_progress!(pjob, pjob.i + di)
+getfirst(f, itr) = begin
+    for it in itr
+        f(it) && return it
+    end 
+    return nothing
+end
+update_progress!(node::TermProgressNode, (key, value)::Pair; transient=false, propagates=false, kwargs...) = begin 
+    pbar = root(node).impl
+    description = "$key:"
+    job = getfirst(child->child.impl.description == description, node.children)
+    if isnothing(job)
+        pjob = ProgressJob(rand(Int), nothing, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
+        pjob.columns = [DescriptionColumn(pjob), StringColumn(pjob, string(value))]
+        Term.Progress.render(pjob, pbar)
+        push!(pbar.jobs, pjob)
+        ProgressNode(kind(node), pjob, (;propagates); parent=node)
+    else
+        job.impl.columns[end].msg[] = string(value)
+        job
+    end
+end
 
 finalize_progress!(pbar::ProgressBar) = Term.Progress.stop!(pbar)
 finalize_progress!(pjob::ProgressJob) = Term.Progress.stop!(pjob)
