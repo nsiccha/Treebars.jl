@@ -21,7 +21,7 @@ initialize_progress!(::Val{:term}; width=120, kwargs...) = begin
     bar = ProgressBar(;width, columns=[DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn])
     Term.Progress.start!(bar)
     lock = ReentrantLock()
-    thread = Threads.@spawn renderloop(bar, lock)
+    thread = nothing#Threads.@spawn renderloop(bar, lock)
     ProgressNode(bar, (;lock, thread, propagates=false))
 end
 initialize_progress!(node::TermProgressNode, N::Int; description="Running...", transient=false, propagates=false) = begin 
