@@ -1,3 +1,5 @@
 [deps]
-Baumkuchen = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
+Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
 Term = "22787eb5-b846-44ae-b979-8e399b8463ab"
+Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"

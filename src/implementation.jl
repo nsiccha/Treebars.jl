@@ -20,7 +20,8 @@ update_progress!(node::ProgressNode, args...; kwargs...) = update_progress!(node
 fail_progress!(node::ProgressNode, args...; kwargs...) = fail_progress!(node.impl, args...; kwargs...)
 finalize_progress!(node::ProgressNode) = begin 
     finalize_progress!(node.impl)
-    (istransient(node) && !isnothing(node.parent)) && pop!(node.parent.children, node)
+    # (istransient(node) && !isnothing(node.parent)) && pop!(node.parent.children, node)
+    isnothing(node.parent) || pop!(node.parent.children, node) 
     for child in node.children
         finalize_progress!(child)
     end
