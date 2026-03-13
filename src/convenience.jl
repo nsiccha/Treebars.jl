@@ -10,9 +10,6 @@ with_progress(f, args...; kwargs...) = begin
     end
 end
 
-struct IncrementBy{di}
-    IncrementBy(di) = new{di}()
-end
 struct IterableProgress{P,W}
     progress::P
     wrapped::W
