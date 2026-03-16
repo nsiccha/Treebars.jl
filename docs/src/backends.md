@@ -37,9 +37,26 @@ child.impl.message  # ""
 ```
 
 `StateProgress` stores all state in mutable fields protected by a `ReentrantLock`, making it suitable for:
-- Web apps that poll progress via HTTP
+- Web apps that poll progress via HTTP or WebSocket
 - Remote/distributed progress tracking
 - Any scenario where progress state needs to be read from a different thread
+
+### JSON-serializable snapshots
+
+Use `progress_state()` to get the full progress tree as a `Dict{String,Any}`:
+
+```julia
+root = initialize_progress!(:state; description="Sampling")
+child = initialize_progress!(root, 100; description="MCMC")
+update_progress!(child, 42; stepsize="0.1")
+
+state = progress_state(root)
+# Dict("description" => "Sampling", "N" => nothing, "i" => 0,
+#      "running" => true, "failed" => false, "message" => "",
+#      "children" => [Dict("description" => "MCMC", "N" => 100, "i" => 42, ...)])
+```
+
+This is thread-safe and ready for JSON serialization in web polling endpoints.
 
 ## HTMXObjects.jl
 

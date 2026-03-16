@@ -22,8 +22,10 @@ propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
 
 # Initialize a child progress node
-initialize_progress!(node::ProgressNode, args...; kwargs...) = ProgressNode(
-    initialize_progress!(node.impl, args...; kwargs...); parent=node
+initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, kwargs...) = ProgressNode(
+    initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
+    (; propagates, transient, labels=Dict{Symbol,Any}());
+    parent=node
 )
 
 # Update: forward to impl, then handle kwargs as labeled sub-nodes
@@ -122,3 +124,36 @@ end
 finalize_progress!(sp::StateProgress) = lock(sp.lock) do
     sp.running = false
 end
+
+# JSON-serializable snapshot of a StateProgress node
+progress_state(sp::StateProgress) = lock(sp.lock) do
+    Dict{String,Any}(
+        "description" => sp.description,
+        "N" => sp.N,
+        "i" => sp.i,
+        "message" => sp.message,
+        "running" => sp.running,
+        "failed" => sp.failed,
+    )
+end
+
+# Snapshot of a full ProgressNode tree (StateProgress backend)
+progress_state(node::ProgressNode{<:StateProgress}) = begin
+    d = progress_state(node.impl)
+    if !isempty(node.children)
+        d["children"] = [progress_state(child) for child in node.children]
+    end
+    d
+end
+
+# Generic fallback: just report children
+progress_state(node::ProgressNode) = begin
+    d = Dict{String,Any}("type" => string(typeof(node.impl)))
+    if !isempty(node.children)
+        d["children"] = [progress_state(child) for child in node.children]
+    end
+    d
+end
+
+# Nothing fallback
+progress_state(::Nothing) = nothing

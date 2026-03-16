@@ -99,6 +99,32 @@ update_progress!(p, nothing; k=v)   # Labels only (no counter change)
 update_progress!(p, "message")      # String message
 ```
 
+## Formatting utilities
+
+Treebars includes generic display helpers for progress labels:
+
+```julia
+round2(3.14159)          # 3.1
+round2(0.00123)          # 0.0012
+short_string(1_500_000)  # "1.5M"
+short_string(42)         # "42"
+short_string([1, 2, 3])  # "[1, 2, 3]"
+short_string(:a => 1)    # "a => 1"
+
+Fraction(0.95) |> short_string  # "95%"
+```
+
+These are useful for formatting metadata in `update_progress!` kwargs:
+
+```julia
+update_progress!(p, i;
+    stepsize = short_string(ε),
+    acceptance = short_string(Fraction(acc_rate)),
+)
+```
+
+Domain-specific `short_string` methods (e.g. for custom matrix types) can be added in the consuming package.
+
 ## Disabled progress
 
 Passing `nothing` as the progress backend is a no-op — all functions silently return `nothing`.
