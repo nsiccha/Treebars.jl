@@ -6,7 +6,9 @@ import HTTP.WebSockets: send
 using TestModules
 using Random
 
-include(joinpath(dirname(dirname(@__DIR__)), "test", "TreebarsTests.jl"))
+module TreebarsTests
+    using Test, Treebars, Random, TestModules
+end
 using .TreebarsTests
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
@@ -220,6 +222,12 @@ end
 end
 
 function __init__()
+    test_file = joinpath(dirname(dirname(@__DIR__)), "test", "TreebarsTests.jl")
+    if isdefined(Main, :Revise)
+        Main.Revise.includet(TreebarsTests, test_file)
+    else
+        Base.include(TreebarsTests, test_file)
+    end
     route!(AppContext())
 end
 
