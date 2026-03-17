@@ -4,25 +4,27 @@ authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
 version = "0.1.0"
 
 [deps]
+TestModules = "63c02187-99fd-4e5c-aaf0-4d6bfebc181c"
 
 [weakdeps]
-HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 Term = "22787eb5-b846-44ae-b979-8e399b8463ab"
 WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
-HTTPExt = "HTTP"
 HTMXObjectsExt = ["HTMXObjects", "HTTP"]
+HTTPExt = "HTTP"
 TermExt = "Term"
 WarmupHMCExt = "WarmupHMC"
-
-[extras]
-Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
-
-[targets]
-test = ["Test"]
 
 [compat]
 Term = "2"
 julia = "1.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestModules = "63c02187-99fd-4e5c-aaf0-4d6bfebc181c"
+
+[targets]
+test = ["Test", "TestModules"]
