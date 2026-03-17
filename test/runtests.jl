@@ -1,5 +1,7 @@
-using TestModules
+module TreebarsTests
+using Test, Treebars, Random, TestModules
 include("TreebarsTests.jl")
-using .TreebarsTests
+end
 
+using TestModules
 runtests!(TreebarsTests)

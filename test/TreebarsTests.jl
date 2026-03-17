@@ -1,10 +1,4 @@
-using TestModules
-
-@testmodule module TreebarsTests
-
-using Test
-using Treebars
-using Random
+@testmodule begin
 
 @testset "nothing backend (no-ops)" begin
     @test initialize_progress!(nothing) === nothing
