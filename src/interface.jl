@@ -26,8 +26,8 @@ finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for
 # htmx_render fallback
 htmx_render(p; kwargs...) = @error "No implementation loaded for htmx_render($(typeof(p)); kwargs...)"
 
-# htmx_render_children fallback
-htmx_render_children(state) = @error "No implementation loaded for htmx_render_children. Load HTMXObjects to enable."
+# htmx_render_children — implemented in HTMXObjectsExt
+function htmx_render_children end
 
 # ws_progress fallback
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
