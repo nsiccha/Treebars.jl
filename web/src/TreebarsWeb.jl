@@ -55,22 +55,14 @@ progress_html(state) = begin
     h.div(parts...)
 end
 
-# --- Polling example state ---
-_tasks = Dict{String, Task}()
-_progress = Dict{String, Any}()
-_results = Dict{String, Any}()
-
-function start_computation(key)
-    haskey(_results, key) && return
-    haskey(_tasks, key) && !istaskdone(_tasks[key]) && return
-    p = initialize_progress!(:state; description="Running '$key'")
-    _progress[key] = p
-    _tasks[key] = Threads.@spawn begin
-        result = fake_sampling(p)
-        _results[key] = result
-        result
-    end
+# --- Async computation state (fetchindex + __substatus__ pattern) ---
+@dynamicstruct struct AsyncComputations
+    __status__ = initialize_progress!(:state; description="Treebars Demo")
+    __substatus__(name, args...; kwargs...) =
+        initialize_progress!(__status__; description="$name[$(join(args, ","))]")
+    results[key] = fake_sampling(__status__)
 end
+_async = AsyncComputations(; cache_type=:parallel)
 
 function _ws_send_result(key, task)
     rv = istaskfailed(task) ? nothing : fetch(task)
@@ -103,22 +95,17 @@ end
     # --- Test routes via @include ---
     @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
-    # --- Polling route ---
-    @get compute(key) = begin
-        start_computation(key)
-        task = _tasks[key]
-        if !istaskdone(task)
-            state = progress_state(_progress[key])
+    # --- Polling route (using fetchindex + __substatus__) ---
+    @get compute(key) = fetchindex(_async.results, key) do rv, status
+        if rv isa Task
+            state = progress_state(status)
             h.div(; hx_get="/compute/$key", hx_trigger="every 200ms", hx_swap="outerHTML")(
                 h.article(
                     h.header("Computing '$key'..."),
                     progress_html(state),
                 )
             )
-        elseif istaskfailed(task)
-            h.article(h.header("Failed"), h.pre(sprint(showerror, task.result)))
         else
-            rv = _results[key]
             h.article(
                 h.header("Result for '$key'"),
                 h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
