@@ -31,29 +31,6 @@ function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
     result
 end
 
-progress_html(state) = begin
-    children = get(state, "children", [])
-    parts = []
-    for cs in children
-        N = cs["N"]
-        i = cs["i"]
-        desc = cs["description"]
-        push!(parts, h.div(; style="margin-bottom:8px")(
-            h.strong("$(desc): "),
-            isnothing(N) ? h.span(cs["message"]) :
-                h.span("$(i) / $(N)"),
-            isnothing(N) ? "" :
-                h.progress(; value=string(i), max=string(N), style="margin-top:4px"),
-        ))
-        for sc in get(cs, "children", [])
-            push!(parts, h.div(; style="margin-left:1rem;font-size:0.9em;color:var(--pico-muted-color)")(
-                h.span("$(sc["description"]) "),
-                h.span(sc["message"]),
-            ))
-        end
-    end
-    h.div(parts...)
-end
 
 # --- Async computation state (fetchindex + __substatus__ pattern) ---
 @dynamicstruct struct AsyncComputations
@@ -104,7 +81,7 @@ end
             h.div(; hx_get=query_url("/compute/$key"), hx_trigger="every 200ms", hx_swap="outerHTML")(
                 h.article(
                     h.header("Computing '$key'..."),
-                    progress_html(state),
+                    htmx_render_children(state),
                 )
             )
         else

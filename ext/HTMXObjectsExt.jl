@@ -1,6 +1,6 @@
 module HTMXObjectsExt
 import HTMXObjects: h, Node
-import Treebars: htmx_render, ws_progress, ProgressNode, StateProgress, root
+import Treebars: htmx_render, htmx_render_children, ws_progress, ProgressNode, StateProgress, root
 
 # Render a StateProgress node as HTML
 htmx_render(node::ProgressNode{<:StateProgress}; kwargs...) = begin
@@ -41,6 +41,45 @@ htmx_render(node::ProgressNode; kwargs...) = begin
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
+
+# Render a progress_state() Dict tree as HTML (for polling pattern)
+htmx_render(state::Dict; depth=0) = begin
+    children = get(state, "children", [])
+    N = get(state, "N", nothing)
+    i = get(state, "i", 0)
+    desc = get(state, "description", "")
+    msg = get(state, "message", "")
+
+    parts = []
+    if !isempty(desc)
+        push!(parts, h.div(class="treebar-node", style="margin-left:$(depth)rem")(
+            h.div(class="treebar-header")(
+                h.strong(desc, ": "),
+                isnothing(N) ? h.span(class="treebar-message")(msg) : h.span(class="treebar-count")(string(i), " / ", string(N)),
+            ),
+            isnothing(N) ? "" : h.progress(value=string(i), max=string(N), class="treebar-progress")(),
+        ))
+    end
+    for child in children
+        push!(parts, htmx_render(child; depth=depth+1))
+    end
+    h.div(parts...)
+end
+
+# Render just the children of a progress_state() Dict (for top-level substatus nodes)
+htmx_render_children(state) = begin
+    isnothing(state) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
+    children = get(state, "children", [])
+    root_msg = get(state, "message", "")
+    if isempty(children) && !isempty(root_msg)
+        return h.div(
+            h.span(root_msg; style="color:var(--pico-muted-color)"),
+            h.span(" "; aria_busy="true"),
+        )
+    end
+    isempty(children) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
+    h.div([htmx_render(cs) for cs in children]...)
+end
 
 """
     htmx_ws_render(node; id="treebar-progress")
