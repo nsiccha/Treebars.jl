@@ -11,6 +11,8 @@ BACKEND = Ref{Any}(nothing)
 include("threadsafe.jl")
 include("interface.jl")
 include("implementation.jl")
+function round2 end
+function short_string end
 include("formatting.jl")
 include("convenience.jl")
 
