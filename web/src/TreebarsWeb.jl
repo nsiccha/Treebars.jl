@@ -6,10 +6,10 @@ import HTTP.WebSockets: send
 using TestModules
 using Random
 
-module TreebarsTests
-    using Test, Treebars, Random, TestModules
-end
-using .TreebarsTests
+# Include tests — defer so they register but don't run on load
+TestModules.defer!()
+include("runtests.jl")
+TestModules.undefer!()
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
@@ -95,13 +95,13 @@ end
     md = wants_markdown(req)
 
     # --- Test routes (via HTMXObjects TestModulesExt) ---
-    @get tests = test_list(TreebarsTests, md)
-    @post tests_run(name) = test_run!(TreebarsTests, name, md)
-    @post tests_run_all = test_run_all!(TreebarsTests, md)
-    @post tests_run_missing = test_run_missing!(TreebarsTests, md)
-    @post tests_run_failed = test_run_failed!(TreebarsTests, md)
-    @post tests_run_batch(; names="") = test_run_batch!(TreebarsTests, names, md)
-    @post tests_clear_cache = test_clear_cache!(TreebarsTests, md)
+    @get tests = test_list(@__MODULE__, md)
+    @post tests_run(name) = test_run!(@__MODULE__, name, md)
+    @post tests_run_all = test_run_all!(@__MODULE__, md)
+    @post tests_run_missing = test_run_missing!(@__MODULE__, md)
+    @post tests_run_failed = test_run_failed!(@__MODULE__, md)
+    @post tests_run_batch(; names="") = test_run_batch!(@__MODULE__, names, md)
+    @post tests_clear_cache = test_clear_cache!(@__MODULE__, md)
 
     # --- Polling route ---
     @get compute(key) = begin
@@ -222,12 +222,6 @@ end
 end
 
 function __init__()
-    test_file = joinpath(dirname(dirname(@__DIR__)), "test", "TreebarsTests.jl")
-    if isdefined(Main, :Revise)
-        Main.Revise.includet(TreebarsTests, test_file)
-    else
-        Base.include(TreebarsTests, test_file)
-    end
     route!(AppContext())
 end
 
