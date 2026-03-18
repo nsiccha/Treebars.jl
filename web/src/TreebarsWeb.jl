@@ -8,7 +8,7 @@ using Random
 
 # Include tests — defer so they register but don't run on load
 TestModules.defer!()
-include("runtests.jl")
+include("test/runtests.jl")
 TestModules.undefer!()
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
@@ -94,14 +94,14 @@ end
     req = nothing
     md = wants_markdown(req)
 
-    # --- Test routes (via HTMXObjects TestModulesExt) ---
-    @get tests = test_list(@__MODULE__, md)
-    @post tests_run(name) = test_run!(@__MODULE__, name, md)
-    @post tests_run_all = test_run_all!(@__MODULE__, md)
-    @post tests_run_missing = test_run_missing!(@__MODULE__, md)
-    @post tests_run_failed = test_run_failed!(@__MODULE__, md)
-    @post tests_run_batch(; names="") = test_run_batch!(@__MODULE__, names, md)
-    @post tests_clear_cache = test_clear_cache!(@__MODULE__, md)
+    page(content) = htmx(
+        h.main(class="container")(content);
+        pico_version="2",
+        extra_head=(h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"),),
+    )
+
+    # --- Test routes via @include ---
+    @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
     # --- Polling route ---
     @get compute(key) = begin
@@ -131,7 +131,9 @@ end
     # __ws__ is the WebSocket, injected by @htmx's @ws handling
     @ws ws = begin
         for msg in __ws__
-            key = "ws-" * msg
+            # HTMX WS sends JSON with form fields + HEADERS; extract just the key
+            m = match(r"\"key\"\s*:\s*\"([^\"]+)\"", msg)
+            key = isnothing(m) ? msg : m.captures[1]
             p = initialize_progress!(:state; description="Running '$key'")
             task = Threads.@spawn fake_sampling(p)
             ws_progress(__ws__, p; render=node -> node_to_html(
@@ -166,58 +168,54 @@ end
     end
 
     # --- Index page with both examples ---
-    @get index = htmx(
-        h.main(class="container")(
-            h.h1("Treebars Web Demo"),
-            h.p(h.a(href="/tests")("Tests"), " | Two approaches to live progress: HTTP polling and WebSockets."),
+    @get index = h.div(
+        h.h1("Treebars Web Demo"),
+        h.p(h.a(href="/tests")("Tests"), " | Two approaches to live progress: HTTP polling and WebSockets."),
 
-            h.hr(),
-            h.h3("1. HTTP Polling"),
-            h.p("Client polls every 200ms via hx-get + hx-trigger. Simple and stateless."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-            h.form(; hx_get="/compute/poll-demo", hx_target="#poll-result", hx_swap="innerHTML")(
-                h.fieldset(; role="group")(
-                    h.input(; type="text", name="key", value="poll-demo", placeholder="Key",
-                        _="on input set @hx-get of closest <form/> to '/compute/' + my value"),
-                    h.button("Run (polling)"; type="submit"),
-                ),
+        h.hr(),
+        h.h3("1. HTTP Polling"),
+        h.p("Client polls every 200ms via hx-get + hx-trigger. Simple and stateless."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.form(; hx_get="/compute/poll-demo", hx_target="#poll-result", hx_swap="innerHTML")(
+            h.fieldset(; role="group")(
+                h.input(; type="text", name="key", value="poll-demo", placeholder="Key",
+                    _="on input set @hx-get of closest <form/> to '/compute/' + my value"),
+                h.button("Run (polling)"; type="submit"),
             ),
-            h.div(; id="poll-result"),
-
-            h.hr(),
-            h.h3("2. WebSocket (server push)"),
-            h.p("Server pushes HTML updates over a persistent connection. Lower latency, no polling overhead."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-            h.div(; hx_ext="ws", ws_connect="/ws")(
-                h.form(; ws_send="true")(
-                    h.fieldset(; role="group")(
-                        h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
-                        h.button("Run (websocket)"; type="submit"),
-                    ),
-                ),
-            ),
-            h.div(; id="ws-result"),
-
-            h.hr(),
-            h.h3("3. WebSocket with path params + kwargs"),
-            h.p("Kwargs from query string: /ws_run?key=...&n_steps=...&speed=..."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-            h.form(; _="on submit halt the event
-                set key to #param-key.value
-                set steps to #param-steps.value
-                set spd to #param-speed.value
-                set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd
-                set #param-ws-container @ws-connect to url
-                js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
-                h.fieldset(; role="group")(
-                    h.input(; type="text", id="param-key", value="param-demo", placeholder="Key"),
-                    h.input(; type="number", id="param-steps", value="100", placeholder="Steps", style="max-width:6rem"),
-                    h.input(; type="number", id="param-speed", value="20", placeholder="Speed (ms)", style="max-width:7rem"),
-                    h.button("Run"; type="submit"),
-                ),
-            ),
-            h.div(; id="param-ws-container", hx_ext="ws"),
-            h.div(; id="ws-param-result"),
         ),
-        h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js");
-        pico_version="2",
+        h.div(; id="poll-result"),
+
+        h.hr(),
+        h.h3("2. WebSocket (server push)"),
+        h.p("Server pushes HTML updates over a persistent connection. Lower latency, no polling overhead."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.div(; hx_ext="ws", ws_connect="/ws")(
+            h.form(; ws_send="true")(
+                h.fieldset(; role="group")(
+                    h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
+                    h.button("Run (websocket)"; type="submit"),
+                ),
+            ),
+        ),
+        h.div(; id="ws-result"),
+
+        h.hr(),
+        h.h3("3. WebSocket with path params + kwargs"),
+        h.p("Kwargs from query string: /ws_run?key=...&n_steps=...&speed=..."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.form(; _="on submit halt the event
+            set key to #param-key.value
+            set steps to #param-steps.value
+            set spd to #param-speed.value
+            set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd
+            set #param-ws-container @ws-connect to url
+            js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
+            h.fieldset(; role="group")(
+                h.input(; type="text", id="param-key", value="param-demo", placeholder="Key"),
+                h.input(; type="number", id="param-steps", value="100", placeholder="Steps", style="max-width:6rem"),
+                h.input(; type="number", id="param-speed", value="20", placeholder="Speed (ms)", style="max-width:7rem"),
+                h.button("Run"; type="submit"),
+            ),
+        ),
+        h.div(; id="param-ws-container", hx_ext="ws"),
+        h.div(; id="ws-param-result"),
     )
 end
 
