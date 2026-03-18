@@ -4,19 +4,19 @@ authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
 version = "0.1.0"
 
 [deps]
-TestModules = "63c02187-99fd-4e5c-aaf0-4d6bfebc181c"
 
 [weakdeps]
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
 Term = "22787eb5-b846-44ae-b979-8e399b8463ab"
-WarmupHMC = "60658175-6863-4866-a322-ab51a11c0cfe"
 
 [extensions]
 HTMXObjectsExt = ["HTMXObjects", "HTTP"]
 HTTPExt = "HTTP"
 TermExt = "Term"
-WarmupHMCExt = "WarmupHMC"
+
+[sources]
+TestModules = {url = "https://github.com/nsiccha/TestModules.jl"}
 
 [compat]
 Term = "2"
