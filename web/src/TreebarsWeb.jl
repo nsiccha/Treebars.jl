@@ -96,10 +96,12 @@ end
     @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
     # --- Polling route (using fetchindex + __substatus__) ---
-    @get compute(key) = fetchindex(_async.results, key) do rv, status
-        if rv isa Task
+    @get compute(key; rerun="") = fetchindex(_async.results, key; force=!isempty(rerun)) do rv, status
+        if rv isa Task && istaskfailed(rv)
+            h.article(h.header("Failed"), h.pre(sprint(showerror, rv.result)))
+        elseif rv isa Task
             state = progress_state(status)
-            h.div(; hx_get="/compute/$key", hx_trigger="every 200ms", hx_swap="outerHTML")(
+            h.div(; hx_get=query_url("/compute/$key"), hx_trigger="every 200ms", hx_swap="outerHTML")(
                 h.article(
                     h.header("Computing '$key'..."),
                     progress_html(state),
@@ -110,6 +112,7 @@ end
                 h.header("Result for '$key'"),
                 h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
                 h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
+                h.button("Rerun"; hx_get=query_url("/compute/$key"; rerun="1"), hx_target="closest article", hx_swap="outerHTML"),
             )
         end
     end
@@ -162,11 +165,11 @@ end
         h.hr(),
         h.h3("1. HTTP Polling"),
         h.p("Client polls every 200ms via hx-get + hx-trigger. Simple and stateless."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-        h.form(; hx_get="/compute/poll-demo", hx_target="#poll-result", hx_swap="innerHTML")(
+        h.div(
             h.fieldset(; role="group")(
-                h.input(; type="text", name="key", value="poll-demo", placeholder="Key",
-                    _="on input set @hx-get of closest <form/> to '/compute/' + my value"),
-                h.button("Run (polling)"; type="submit"),
+                h.input(; type="text", id="poll-key", value="poll-demo", placeholder="Key"),
+                h.button("Run (polling)"; hx_get="/compute/poll-demo", hx_target="#poll-result", hx_swap="innerHTML",
+                    _="on click set my @hx-get to '/compute/' + #poll-key.value"),
             ),
         ),
         h.div(; id="poll-result"),
@@ -187,13 +190,7 @@ end
         h.hr(),
         h.h3("3. WebSocket with path params + kwargs"),
         h.p("Kwargs from query string: /ws_run?key=...&n_steps=...&speed=..."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-        h.form(; _="on submit halt the event
-            set key to #param-key.value
-            set steps to #param-steps.value
-            set spd to #param-speed.value
-            set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd
-            set #param-ws-container @ws-connect to url
-            js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
+        h.form(; _="on submit halt the event then set key to #param-key.value then set steps to #param-steps.value then set spd to #param-speed.value then set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd then set #param-ws-container @ws-connect to url then js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
             h.fieldset(; role="group")(
                 h.input(; type="text", id="param-key", value="param-demo", placeholder="Key"),
                 h.input(; type="number", id="param-steps", value="100", placeholder="Steps", style="max-width:6rem"),
