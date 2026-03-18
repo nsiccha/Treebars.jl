@@ -8,6 +8,7 @@ export @progress, with_progress,
 
 BACKEND = Ref{Any}(nothing)
 
+include("threadsafe.jl")
 include("interface.jl")
 include("implementation.jl")
 include("formatting.jl")

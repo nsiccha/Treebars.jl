@@ -222,3 +222,45 @@ end
     @test startswith(s, "[1, 2, 3,")
     @test endswith(s, "8, 9, 10]")
 end
+
+@testset "Concurrency stress test" begin
+    root = initialize_progress!(:state; description="Stress")
+
+    n_workers = max(4, Threads.nthreads())
+    n_iterations = 100
+    errors = Threads.Atomic{Int}(0)
+
+    # Spawn workers that rapidly create, update, and finalize children
+    workers = map(1:n_workers) do w
+        Threads.@spawn begin
+            for i in 1:n_iterations
+                child = initialize_progress!(root, 10; description="W$w-$i")
+                for j in 1:10
+                    update_progress!(child, j; speed="$j", temp="$(rand())")
+                end
+                finalize_progress!(child)
+            end
+        end
+    end
+
+    # Concurrent poller that reads the tree while it's being mutated
+    poll_count = Threads.Atomic{Int}(0)
+    poller = Threads.@spawn begin
+        while any(!istaskdone, workers)
+            try
+                progress_state(root)
+                Threads.atomic_add!(poll_count, 1)
+            catch e
+                Threads.atomic_add!(errors, 1)
+            end
+            yield()
+        end
+    end
+
+    for w in workers; wait(w); end
+    wait(poller)
+
+    @test errors[] == 0
+    @test poll_count[] > 0
+    finalize_progress!(root)
+end

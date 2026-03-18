@@ -7,7 +7,7 @@ struct ProgressNode{I,M,C}
     meta::M
     parent::Union{ProgressNode,Nothing}
     children::C
-    ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=Set{ProgressNode}()) = begin
+    ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}()) = begin
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
             impl, meta, parent, children
         )
@@ -24,7 +24,7 @@ labels(node::ProgressNode) = get(node.meta, :labels, nothing)
 # Initialize a child progress node
 initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, kwargs...) = ProgressNode(
     initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
-    (; propagates, transient, labels=Dict{Symbol,Any}());
+    (; propagates, transient, labels=ThreadsafeDict{Symbol,Any}());
     parent=node
 )
 
@@ -90,7 +90,7 @@ mutable struct StateProgress
 end
 
 initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
-    StateProgress(; kwargs...), (;propagates=false, labels=Dict{Symbol,Any}())
+    StateProgress(; kwargs...), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
 initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...) = begin
     child = StateProgress(; description, N)
