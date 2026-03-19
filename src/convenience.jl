@@ -1,3 +1,8 @@
+"""
+    with_progress(f, kind, N; kwargs...)
+
+Initialize progress, call `f(progress_node)`, finalize on completion or fail on error.
+"""
 with_progress(f, args...; kwargs...) = begin 
     progress = initialize_progress!(args...; kwargs...)
     try
@@ -55,6 +60,13 @@ else
     Expr(x.head, progress_expr.(x.args; progress, transient)...)
 end
 
+"""
+    @progress for i in 1:N ... end
+    @progress backend for i in 1:N ... end
+
+Wrap a `for` loop with automatic progress tracking. Rewrites the loop to call
+`initialize_progress!`, `update_progress!`, and `finalize_progress!` automatically.
+"""
 macro progress(body)
     esc(progress_expr(body; progress=:($BACKEND[])))
 end

@@ -1,7 +1,33 @@
-# No-op defaults for nothing (disabled progress)
+"""
+    initialize_progress!(kind::Symbol, N; description="Running...", kwargs...)
+    initialize_progress!(parent::ProgressNode, N; description="Running...", kwargs...)
+
+Create a progress root (from a backend symbol like `:state` or `:term`) or a child
+node (from an existing `ProgressNode`). Returns a `ProgressNode`. No-op when `nothing`.
+"""
 initialize_progress!(::Nothing, args...; kwargs...) = nothing
+
+"""
+    update_progress!(node, i; kwargs...)
+    update_progress!(node, message::AbstractString; kwargs...)
+
+Update progress on `node`. Pass an integer to set the counter, a string for a status
+message, or keyword arguments to create/update labeled child nodes. No-op when `nothing`.
+"""
 update_progress!(::Nothing, args...; kwargs...) = nothing
+
+"""
+    fail_progress!(node; kwargs...)
+
+Mark a progress node as failed. No-op when `nothing`.
+"""
 fail_progress!(::Nothing, args...; kwargs...) = nothing
+
+"""
+    finalize_progress!(node; kwargs...)
+
+Mark a progress node as complete. No-op when `nothing`.
+"""
 finalize_progress!(::Nothing, args...; kwargs...) = nothing
 
 # Symbol dispatch: initialize_progress!(:term, ...) → initialize_progress!(Val(:term), ...)

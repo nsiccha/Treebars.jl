@@ -66,11 +66,10 @@ fail_progress!(node::ProgressNode, args...; kwargs...) = fail_progress!(node.imp
 
 finalize_progress!(node::ProgressNode) = begin
     finalize_progress!(node.impl)
-    isnothing(node.parent) || pop!(node.parent.children, node)
     for child in collect(node.children)
-        finalize_progress!(child)
+        isrunning(child) && finalize_progress!(child)
     end
-    propagates_finalization(node) && finalize_progress!(node.parent)
+    propagates_finalization(node) && !isnothing(node.parent) && isrunning(node.parent) && finalize_progress!(node.parent)
 end
 
 # StateProgress: a thread-safe progress backend that stores state for inspection.
@@ -88,6 +87,9 @@ mutable struct StateProgress
         ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(), true, false
     )
 end
+
+isrunning(node::ProgressNode{<:StateProgress}) = node.impl.running
+isrunning(node::ProgressNode) = true
 
 initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
     StateProgress(; kwargs...), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
@@ -125,7 +127,12 @@ finalize_progress!(sp::StateProgress) = lock(sp.lock) do
     sp.running = false
 end
 
-# JSON-serializable snapshot of a StateProgress node
+"""
+    progress_state(node::StateProgress) -> Dict{String, Any}
+
+Return a JSON-serializable snapshot of a progress node's current state,
+including description, counter, children, and running/failed status.
+"""
 progress_state(sp::StateProgress) = lock(sp.lock) do
     Dict{String,Any}(
         "description" => sp.description,
