@@ -1,6 +1,7 @@
 module HTMXObjectsExt
 import HTMXObjects: h, Node
-import Treebars: htmx_render, htmx_render_children, ws_progress, ProgressNode, StateProgress, root
+import DynamicObjects: fetchindex
+import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex, progress_state, ProgressNode, StateProgress, root
 
 # Render a StateProgress node as HTML
 htmx_render(node::ProgressNode{<:StateProgress}; kwargs...) = begin
@@ -95,5 +96,38 @@ Client-side:
 ```
 """
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+
+"""
+    polling_fetchindex(render_result, ip, keys...; poll_url, label, rerun="", poll_interval="200ms", kwargs...)
+
+Generic fetchindex + HTMX polling pattern. Returns either a self-polling
+progress div (while the task is running), an error article (if failed),
+or the result of `render_result(rv)` (when done).
+
+- `render_result(rv)`: function that renders the final result (supports `do` syntax)
+- `ip`: IndexableProperty (e.g. `app.pathfinder`)
+- `keys...`: cache key(s) (variadic — supports multi-index like `f1, f2`)
+- `poll_url`: URL to poll while running (use `query_url`)
+- `label`: display label (e.g. "Pathfinder (my-model)")
+- `rerun`: pass non-empty string to force re-computation
+- `poll_interval`: HTMX polling interval (default "200ms")
+- `kwargs...`: passed through to `fetchindex`
+"""
+function polling_fetchindex(render_result, ip, keys...; poll_url, label, rerun="", poll_interval="200ms", kwargs...)
+    fetchindex(ip, keys...; force=!isempty(rerun), kwargs...) do rv, status
+        if rv isa Task && istaskfailed(rv)
+            err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
+            h.article(h.header("$label — failed"), h.pre(err_str))
+        elseif rv isa Task
+            state = progress_state(status)
+            h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
+                style="min-height:200px;")(
+                h.article(h.header("$label — running..."), htmx_render_children(state))
+            )
+        else
+            render_result(rv)
+        end
+    end
+end
 
 end

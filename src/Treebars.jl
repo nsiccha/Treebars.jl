@@ -3,6 +3,7 @@ module Treebars
 export @progress, with_progress,
     initialize_progress!, update_progress!, fail_progress!, finalize_progress!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, ws_progress, htmx_ws_render,
+    polling_fetchindex,
     round2, short_string, Fraction,
     progress_state
 
@@ -15,5 +16,7 @@ function round2 end
 function short_string end
 include("formatting.jl")
 include("convenience.jl")
+
+function polling_fetchindex end
 
 end # module Treebars
