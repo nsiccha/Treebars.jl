@@ -75,12 +75,13 @@ end
     finalize_progress!(root)
 end
 
-@testset "finalize removes from parent" begin
+@testset "finalize keeps node in parent" begin
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child")
     @test length(root.children) == 1
     finalize_progress!(child)
-    @test length(root.children) == 0
+    @test length(root.children) == 1
+    @test child.impl.running == false
     finalize_progress!(root)
 end
 
