@@ -1,6 +1,5 @@
 module HTMXObjectsExt
-import HTMXObjects: h, Node
-import DynamicObjects: fetchindex
+import HTMXObjects: h, Node, fetchindex
 import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex, progress_state, ProgressNode, StateProgress, root
 
 # Render a StateProgress node as HTML
