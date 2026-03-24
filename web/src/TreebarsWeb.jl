@@ -61,7 +61,6 @@ end
 
 @htmx struct AppContext
     req = nothing
-    md = wants_markdown(req)
 
     page(content) = htmx(
         h.main(class="container")(content);
