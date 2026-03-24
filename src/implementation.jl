@@ -7,7 +7,7 @@ struct ProgressNode{I,M,C}
     meta::M
     parent::Union{ProgressNode,Nothing}
     children::C
-    ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}()) = begin
+    function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}())
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
             impl, meta, parent, children
         )
@@ -22,26 +22,28 @@ propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
 
 # Initialize a child progress node
-initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, kwargs...) = ProgressNode(
-    initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
-    (; propagates, transient, labels=ThreadsafeDict{Symbol,Any}());
-    parent=node
-)
+function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, kwargs...)
+    ProgressNode(
+        initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
+        (; propagates, transient, labels=ThreadsafeDict{Symbol,Any}());
+        parent=node
+    )
+end
 
 # Update: forward to impl, then handle kwargs as labeled sub-nodes
 update_progress!(node::ProgressNode; kwargs...) = update_progress!(node, IncrementBy(1); kwargs...)
-update_progress!(node::ProgressNode, i; kwargs...) = begin
+function update_progress!(node::ProgressNode, i; kwargs...)
     update_progress!(node.impl, i)
     _update_labels!(node; kwargs...)
 end
 update_progress!(node::ProgressNode, ::Nothing; kwargs...) = _update_labels!(node; kwargs...)
-update_progress!(node::ProgressNode, msg::AbstractString; kwargs...) = begin
+function update_progress!(node::ProgressNode, msg::AbstractString; kwargs...)
     update_progress!(node.impl, msg)
     _update_labels!(node; kwargs...)
 end
 
 # Handle kwargs as labeled child nodes (like WarmupHMC's labels pattern)
-_update_labels!(node::ProgressNode; kwargs...) = begin
+function _update_labels!(node::ProgressNode; kwargs...)
     labs = labels(node)
     isnothing(labs) && isempty(kwargs) && return node
     for (key, value) in pairs(kwargs)
@@ -64,7 +66,7 @@ end
 
 fail_progress!(node::ProgressNode, args...; kwargs...) = fail_progress!(node.impl, args...; kwargs...)
 
-finalize_progress!(node::ProgressNode) = begin
+function finalize_progress!(node::ProgressNode)
     finalize_progress!(node.impl)
     for child in collect(node.children)
         isrunning(child) && finalize_progress!(child)
@@ -94,73 +96,66 @@ isrunning(node::ProgressNode) = true
 initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
     StateProgress(; kwargs...), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
-initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...) = begin
+function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
     child = StateProgress(; description, N)
     child.message = value
     child
 end
-initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...) = begin
+function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
     child = StateProgress(; description)
     child.message = value
     child
 end
 
-update_progress!(sp::StateProgress, i::Integer) = lock(sp.lock) do
-    if isnothing(sp.N)
-        sp.message = string(i)
-    else
-        sp.i = clamp(i, 0, sp.N)
+function update_progress!(sp::StateProgress, i::Integer)
+    lock(sp.lock) do
+        if isnothing(sp.N)
+            sp.message = string(i)
+        else
+            sp.i = clamp(i, 0, sp.N)
+        end
     end
 end
-update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di} = lock(sp.lock) do
-    sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
+function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
+    lock(sp.lock) do
+        sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
+    end
 end
-update_progress!(sp::StateProgress, msg::AbstractString) = lock(sp.lock) do
-    sp.message = msg
+function update_progress!(sp::StateProgress, msg::AbstractString)
+    lock(sp.lock) do
+        sp.message = msg
+    end
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
 
-fail_progress!(sp::StateProgress, args...; kwargs...) = lock(sp.lock) do
-    sp.failed = true
-end
-finalize_progress!(sp::StateProgress) = lock(sp.lock) do
-    sp.running = false
-end
+fail_progress!(sp::StateProgress, args...; kwargs...) = lock(sp.lock) do; sp.failed = true end
+finalize_progress!(sp::StateProgress) = lock(sp.lock) do; sp.running = false end
 
-"""
-    progress_state(node::StateProgress) -> Dict{String, Any}
-
-Return a JSON-serializable snapshot of a progress node's current state,
-including description, counter, children, and running/failed status.
-"""
-progress_state(sp::StateProgress) = lock(sp.lock) do
-    Dict{String,Any}(
-        "description" => sp.description,
-        "N" => sp.N,
-        "i" => sp.i,
-        "message" => sp.message,
-        "running" => sp.running,
-        "failed" => sp.failed,
-    )
+# JSON-serializable snapshot (non-exported — prefer working with ProgressNode directly)
+function progress_state(sp::StateProgress)
+    lock(sp.lock) do
+        Dict{String,Any}(
+            "description" => sp.description,
+            "N" => sp.N,
+            "i" => sp.i,
+            "message" => sp.message,
+            "running" => sp.running,
+            "failed" => sp.failed,
+        )
+    end
 end
-
-# Snapshot of a full ProgressNode tree (StateProgress backend)
-progress_state(node::ProgressNode{<:StateProgress}) = begin
+function progress_state(node::ProgressNode{<:StateProgress})
     d = progress_state(node.impl)
     if !isempty(node.children)
         d["children"] = [progress_state(child) for child in node.children]
     end
     d
 end
-
-# Generic fallback: just report children
-progress_state(node::ProgressNode) = begin
+function progress_state(node::ProgressNode)
     d = Dict{String,Any}("type" => string(typeof(node.impl)))
     if !isempty(node.children)
         d["children"] = [progress_state(child) for child in node.children]
     end
     d
 end
-
-# Nothing fallback
 progress_state(::Nothing) = nothing

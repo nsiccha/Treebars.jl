@@ -1,9 +1,9 @@
 module HTMXObjectsExt
 import HTMXObjects: h, Node, fetchindex
-import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex, progress_state, ProgressNode, StateProgress, root
+import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex, ProgressNode, StateProgress, root
 
 # Render a StateProgress node as HTML
-htmx_render(node::ProgressNode{<:StateProgress}; kwargs...) = begin
+function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
     sp = node.impl
     children_html = [htmx_render(child; kwargs...) for child in node.children]
     lock(sp.lock) do
@@ -35,50 +35,25 @@ htmx_render(node::ProgressNode{<:StateProgress}; kwargs...) = begin
 end
 
 # Render a full progress tree rooted at node
-htmx_render(node::ProgressNode; kwargs...) = begin
+function htmx_render(node::ProgressNode; kwargs...)
     children_html = [htmx_render(child; kwargs...) for child in node.children]
     h.div(class="treebar-root")(children_html...)
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
-# Render a progress_state() Dict tree as HTML (for polling pattern)
-htmx_render(state::Dict; depth=0) = begin
-    children = get(state, "children", [])
-    N = get(state, "N", nothing)
-    i = get(state, "i", 0)
-    desc = get(state, "description", "")
-    msg = get(state, "message", "")
-
-    parts = []
-    if !isempty(desc)
-        push!(parts, h.div(class="treebar-node", style="margin-left:$(depth)rem")(
-            h.div(class="treebar-header")(
-                h.strong(desc, ": "),
-                isnothing(N) ? h.span(class="treebar-message")(msg) : h.span(class="treebar-count")(string(i), " / ", string(N)),
-            ),
-            isnothing(N) ? "" : h.progress(value=string(i), max=string(N), class="treebar-progress")(),
-        ))
-    end
-    for child in children
-        push!(parts, htmx_render(child; depth=depth+1))
-    end
-    h.div(parts...)
-end
-
-# Render just the children of a progress_state() Dict (for top-level substatus nodes)
-htmx_render_children(state) = begin
-    isnothing(state) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
-    children = get(state, "children", [])
-    root_msg = get(state, "message", "")
-    if isempty(children) && !isempty(root_msg)
+# Render just the children of a ProgressNode (for top-level substatus display)
+htmx_render_children(::Nothing) = h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
+function htmx_render_children(node::ProgressNode{<:StateProgress})
+    sp = node.impl
+    if isempty(node.children) && !isempty(sp.message)
         return h.div(
-            h.span(root_msg; style="color:var(--pico-muted-color)"),
+            h.span(sp.message; style="color:var(--pico-muted-color)"),
             h.span(" "; aria_busy="true"),
         )
     end
-    isempty(children) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
-    h.div([htmx_render(cs) for cs in children]...)
+    isempty(node.children) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
+    h.div([htmx_render(child) for child in node.children]...)
 end
 
 """
@@ -118,10 +93,9 @@ function polling_fetchindex(render_result, ip, keys...; poll_url, label, rerun="
             err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
             h.article(h.header("$label — failed"), h.pre(err_str))
         elseif rv isa Task
-            state = progress_state(status)
             h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
                 style="min-height:200px;")(
-                h.article(h.header("$label — running..."), htmx_render_children(state))
+                h.article(h.header("$label — running..."), htmx_render_children(status))
             )
         else
             render_result(rv)

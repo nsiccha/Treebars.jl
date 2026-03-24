@@ -77,11 +77,10 @@ end
         if rv isa Task && istaskfailed(rv)
             h.article(h.header("Failed"), h.pre(sprint(showerror, rv.result)))
         elseif rv isa Task
-            state = progress_state(status)
             h.div(; hx_get=query_url("/compute/$key"), hx_trigger="every 200ms", hx_swap="outerHTML")(
                 h.article(
                     h.header("Computing '$key'..."),
-                    htmx_render_children(state),
+                    htmx_render_children(status),
                 )
             )
         else

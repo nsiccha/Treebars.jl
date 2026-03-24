@@ -126,12 +126,12 @@ end
     finalize_progress!(root)
 end
 
-@testset "progress_state (JSON snapshot)" begin
+@testset "Treebars.progress_state (JSON snapshot)" begin
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Step")
     update_progress!(child, 5)
 
-    state = progress_state(root)
+    state = Treebars.progress_state(root)
     @test state isa Dict
     @test state["description"] == "Root"
     @test state["running"] == true
@@ -144,10 +144,10 @@ end
     @test child_state["i"] == 5
 
     finalize_progress!(root)
-    state2 = progress_state(root)
+    state2 = Treebars.progress_state(root)
     @test state2["running"] == false
 
-    @test progress_state(nothing) === nothing
+    @test Treebars.progress_state(nothing) === nothing
 end
 
 @testset "Web polling simulation" begin
@@ -164,7 +164,7 @@ end
 
     states = []
     for _ in 1:5
-        push!(states, progress_state(root))
+        push!(states, Treebars.progress_state(root))
         sleep(0.01)
     end
     wait(worker)
@@ -174,7 +174,7 @@ end
         @test s["description"] == "Sampling"
     end
 
-    final = progress_state(root)
+    final = Treebars.progress_state(root)
     @test final["description"] == "Sampling"
 
     mid_state = states[end]
@@ -249,7 +249,7 @@ end
     poller = Threads.@spawn begin
         while any(!istaskdone, workers)
             try
-                progress_state(root)
+                Treebars.progress_state(root)
                 Threads.atomic_add!(poll_count, 1)
             catch e
                 Threads.atomic_add!(errors, 1)

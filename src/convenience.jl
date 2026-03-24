@@ -3,7 +3,7 @@
 
 Initialize progress, call `f(progress_node)`, finalize on completion or fail on error.
 """
-with_progress(f, args...; kwargs...) = begin 
+function with_progress(f, args...; kwargs...)
     progress = initialize_progress!(args...; kwargs...)
     try
         return f(progress)
@@ -19,45 +19,52 @@ struct IterableProgress{P,W}
     progress::P
     wrapped::W
 end
-initialize_iterable_progress!(progress, it; kwargs...) = IterableProgress(
-    initialize_progress!(progress, length(it); kwargs...),
-    it
-)
-Base.iterate(p::IterableProgress) = begin 
+function initialize_iterable_progress!(progress, it; kwargs...)
+    IterableProgress(
+        initialize_progress!(progress, length(it); kwargs...),
+        it
+    )
+end
+function Base.iterate(p::IterableProgress)
     update_progress!(p.progress, 0)
     iterate(p.wrapped)
 end
-Base.iterate(p::IterableProgress, state) = begin 
+function Base.iterate(p::IterableProgress, state)
     update_progress!(p.progress, IncrementBy(1))
     iterate(p.wrapped, state)
 end
+Base.length(p::IterableProgress) = length(p.wrapped)
+Base.eltype(::Type{IterableProgress{P,W}}) where {P,W} = eltype(W)
+Base.IteratorSize(::Type{IterableProgress{P,W}}) where {P,W} = Base.IteratorSize(W)
 finalize_progress!(p::IterableProgress) = finalize_progress!(p.progress)
 
 progress_expr(x; kwargs...) = x
 progress_expr(x::Symbol; progress, kwargs...) = x == :__progress__ ? progress : x
-progress_expr(x::Expr; progress, transient=false) = if x.head == :for
-    subprogress = gensym(:subprogress)
-    @assert length(x.args) == 2
-    head, body = x.args
-    body = progress_expr(body; progress=:($subprogress.progress), transient=true)
-    @assert Meta.isexpr(head, :(=))
-    lhs, rhs = head.args
-    description = "for $lhs in ..."
-    quote 
-        $subprogress = $initialize_iterable_progress!($progress, $rhs; description=$description, transient=$transient)
-        try 
-            for $lhs in $subprogress
-                $body
+function progress_expr(x::Expr; progress, transient=false)
+    if x.head == :for
+        subprogress = gensym(:subprogress)
+        @assert length(x.args) == 2
+        head, body = x.args
+        body = progress_expr(body; progress=:($subprogress.progress), transient=true)
+        @assert Meta.isexpr(head, :(=))
+        lhs, rhs = head.args
+        description = "for $lhs in ..."
+        quote
+            $subprogress = $initialize_iterable_progress!($progress, $rhs; description=$description, transient=$transient)
+            try
+                for $lhs in $subprogress
+                    $body
+                end
+            catch e
+                $fail_progress!($subprogress, e)
+                rethrow()
+            finally
+                $finalize_progress!($subprogress)
             end
-        catch e
-            $fail_progress!($subprogress, e)
-            rethrow()
-        finally
-            $finalize_progress!($subprogress)
         end
+    else
+        Expr(x.head, progress_expr.(x.args; progress, transient)...)
     end
-else
-    Expr(x.head, progress_expr.(x.args; progress, transient)...)
 end
 
 """
