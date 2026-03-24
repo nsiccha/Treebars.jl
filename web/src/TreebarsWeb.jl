@@ -6,10 +6,7 @@ import HTTP.WebSockets: send
 using TestModules
 using Random
 
-# Include tests — defer so they register but don't run on load
-TestModules.defer!()
 include("test/runtests.jl")
-TestModules.undefer!()
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
