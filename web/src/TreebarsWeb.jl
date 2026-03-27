@@ -130,7 +130,7 @@ end
     end
 
     # --- Pill demo: static snapshot of mixed child states ---
-    @get pill_demo() = begin
+    @get pill_demo = begin
         root = initialize_progress!(:state; description="Pathfinder")
         # Finished chain
         c1 = initialize_progress!(root, 1000; description="Chain 1")
