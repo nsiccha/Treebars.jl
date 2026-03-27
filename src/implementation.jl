@@ -85,12 +85,24 @@ mutable struct StateProgress
     labels::Dict{Symbol,Any}
     running::Bool
     failed::Bool
+    started_at::DateTime
+    finalized_at::Union{DateTime,Nothing}
     StateProgress(; description="Running...", N=nothing) = new(
-        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(), true, false
+        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(), true, false, now(), nothing
     )
 end
 
-isrunning(node::ProgressNode{<:StateProgress}) = node.impl.running
+is_running(s::StateProgress) = isnothing(s.finalized_at)
+is_finished(s::StateProgress) = !isnothing(s.finalized_at) && !s.failed
+is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
+duration(s::StateProgress) = something(s.finalized_at, now()) - s.started_at
+
+is_running(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
+is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
+is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
+duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
+
+isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true
 
 initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
@@ -128,8 +140,19 @@ function update_progress!(sp::StateProgress, msg::AbstractString)
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
 
-fail_progress!(sp::StateProgress, args...; kwargs...) = lock(sp.lock) do; sp.failed = true end
-finalize_progress!(sp::StateProgress) = lock(sp.lock) do; sp.running = false end
+function fail_progress!(sp::StateProgress, args...; kwargs...)
+    lock(sp.lock) do
+        sp.failed = true
+        sp.running = false
+        sp.finalized_at = now()
+    end
+end
+function finalize_progress!(sp::StateProgress)
+    lock(sp.lock) do
+        sp.running = false
+        sp.finalized_at = now()
+    end
+end
 
 # JSON-serializable snapshot (non-exported — prefer working with ProgressNode directly)
 function progress_state(sp::StateProgress)
@@ -141,6 +164,8 @@ function progress_state(sp::StateProgress)
             "message" => sp.message,
             "running" => sp.running,
             "failed" => sp.failed,
+            "started_at" => string(sp.started_at),
+            "finalized_at" => isnothing(sp.finalized_at) ? nothing : string(sp.finalized_at),
         )
     end
 end

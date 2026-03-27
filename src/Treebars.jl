@@ -1,9 +1,12 @@
 module Treebars
 
+using Dates: DateTime, now, canonicalize, CompoundPeriod
+
 export @progress, with_progress,
     initialize_progress!, update_progress!, fail_progress!, finalize_progress!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, ws_progress, htmx_ws_render,
     polling_fetchindex,
+    is_running, is_finished, is_failed, duration, short_duration,
     round2, short_string, Fraction
 
 BACKEND = Ref{Any}(nothing)

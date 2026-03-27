@@ -1,12 +1,26 @@
 module HTMXObjectsExt
 import HTMXObjects: h, Node, fetchindex
-import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex, ProgressNode, StateProgress, root
+import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex,
+    ProgressNode, StateProgress, root, is_running, is_finished, is_failed, duration, short_duration
+
+# Duration suffix for a node's label
+function _duration_suffix(sp::StateProgress)
+    d = short_duration(duration(sp))
+    if is_running(sp)
+        " — $(d) so far"
+    elseif is_failed(sp)
+        " — failed ($(d))"
+    else
+        " — done ($(d))"
+    end
+end
 
 # Render a StateProgress node as HTML
 function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
     sp = node.impl
     children_html = [htmx_render(child; kwargs...) for child in node.children]
     lock(sp.lock) do
+        suffix = _duration_suffix(sp)
         if !isnothing(sp.N)
             # Progress bar with counter
             h.div(class="treebar-node")(
@@ -14,6 +28,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
                     h.span(class="treebar-description")(sp.description),
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
                     !isempty(sp.message) ? h.span(class="treebar-message")(sp.message) : "",
+                    h.span(class="treebar-duration")(suffix),
                 ),
                 h.progress(value=string(sp.i), max=string(sp.N), class="treebar-progress")(),
                 children_html...,
@@ -27,7 +42,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
         else
             # Container node
             h.div(class="treebar-node")(
-                !isempty(sp.description) ? h.div(class="treebar-header")(sp.description) : "",
+                !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, suffix) : "",
                 children_html...,
             )
         end
@@ -53,7 +68,30 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
         )
     end
     isempty(node.children) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
-    h.div([htmx_render(child) for child in node.children]...)
+
+    children = collect(node.children)
+    has_running = any(c -> is_running(c), children)
+
+    rendered = map(children) do child
+        if is_running(child)
+            # Running children: always shown prominently
+            htmx_render(child)
+        elseif is_failed(child) && has_running
+            # Failed with running siblings: suppress (retry in flight)
+            nothing
+        else
+            # Finished or failed-with-no-running-siblings: collapsed <details>
+            child_sp = child.impl
+            label = child_sp.description
+            suffix = _duration_suffix(child_sp)
+            h.details(class="treebar-collapsed")(
+                h.summary("$(label)$(suffix)"),
+                htmx_render(child),
+            )
+        end
+    end
+
+    h.div(filter(!isnothing, rendered)...)
 end
 
 """

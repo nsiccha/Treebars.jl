@@ -1,3 +1,30 @@
+## Duration formatting
+
+using Dates: Millisecond, Second, Minute, Hour, value
+
+"""
+    short_duration(dt::Union{Dates.CompoundPeriod, Dates.Period}) -> String
+
+Human-friendly duration string: "4s", "1m 23s", "2h 5m".
+"""
+function short_duration(dt)
+    cp = canonicalize(dt)
+    parts = cp.periods
+    isempty(parts) && return "0s"
+    # Map each period to a short label
+    labels = map(parts) do p
+        v = value(p)
+        if p isa Hour;   "$(v)h"
+        elseif p isa Minute; "$(v)m"
+        elseif p isa Second; "$(v)s"
+        elseif p isa Millisecond; v >= 100 ? "$(div(v, 100) / 10)s" : "$(v)ms"
+        else; string(p)
+        end
+    end
+    # Show at most 2 most-significant parts
+    join(labels[1:min(2, length(labels))], " ")
+end
+
 ## Generic formatting utilities for progress display
 # These are general-purpose; domain-specific `short_string` methods
 # (e.g. for MatrixFactorization) should be defined in the consuming package.

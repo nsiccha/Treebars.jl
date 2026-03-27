@@ -64,7 +64,38 @@ end
     root = initialize_progress!(:state; description="Root")
     fail_progress!(root)
     @test root.impl.failed == true
+    @test root.impl.running == false
+    @test !isnothing(root.impl.finalized_at)
+    @test is_failed(root)
+    @test !is_running(root)
+end
+
+@testset "timestamps and status helpers" begin
+    using Dates
+    root = initialize_progress!(:state; description="Root")
+    @test root.impl.started_at isa DateTime
+    @test isnothing(root.impl.finalized_at)
+    @test is_running(root)
+    @test !is_finished(root)
+    @test !is_failed(root)
+    @test duration(root) isa Dates.Period || duration(root) isa Dates.CompoundPeriod
+
     finalize_progress!(root)
+    @test !is_running(root)
+    @test is_finished(root)
+    @test !is_failed(root)
+    @test root.impl.finalized_at isa DateTime
+    @test root.impl.finalized_at >= root.impl.started_at
+end
+
+@testset "short_duration" begin
+    using Dates
+    @test short_duration(Dates.Second(4)) == "4s"
+    @test short_duration(Dates.Minute(1) + Dates.Second(23)) == "1m 23s"
+    @test short_duration(Dates.Hour(2) + Dates.Minute(5) + Dates.Second(30)) == "2h 5m"
+    @test short_duration(Dates.Millisecond(0)) == "0s"
+    @test short_duration(Dates.Millisecond(50)) == "50ms"
+    @test short_duration(Dates.Millisecond(500)) == "0.5s"
 end
 
 @testset "labels create sub-nodes" begin
