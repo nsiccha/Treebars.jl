@@ -55,6 +55,9 @@ htmx_render(p; kwargs...) = @error "No implementation loaded for htmx_render($(t
 # htmx_render_children — implemented in HTMXObjectsExt
 function htmx_render_children end
 
+# htmx_treebar_styles — returns a <style> Node with all treebar CSS classes
+function htmx_treebar_styles end
+
 # ws_progress fallback
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 

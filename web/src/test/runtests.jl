@@ -1,5 +1,6 @@
 using TestModules
 using Treebars
+using Dates
 
 @testset "nothing backend (no-ops)" begin
     @test initialize_progress!(nothing) === nothing
@@ -71,25 +72,23 @@ end
 end
 
 @testset "timestamps and status helpers" begin
-    using Dates
     root = initialize_progress!(:state; description="Root")
-    @test root.impl.started_at isa DateTime
+    @test root.impl.started_at isa Dates.DateTime
     @test isnothing(root.impl.finalized_at)
     @test is_running(root)
     @test !is_finished(root)
     @test !is_failed(root)
-    @test duration(root) isa Dates.Period || duration(root) isa Dates.CompoundPeriod
+    @test duration(root) isa Union{Dates.Period, Dates.CompoundPeriod}
 
     finalize_progress!(root)
     @test !is_running(root)
     @test is_finished(root)
     @test !is_failed(root)
-    @test root.impl.finalized_at isa DateTime
+    @test root.impl.finalized_at isa Dates.DateTime
     @test root.impl.finalized_at >= root.impl.started_at
 end
 
 @testset "short_duration" begin
-    using Dates
     @test short_duration(Dates.Second(4)) == "4s"
     @test short_duration(Dates.Minute(1) + Dates.Second(23)) == "1m 23s"
     @test short_duration(Dates.Hour(2) + Dates.Minute(5) + Dates.Second(30)) == "2h 5m"

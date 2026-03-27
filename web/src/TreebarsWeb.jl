@@ -62,7 +62,7 @@ end
     page(content) = htmx(
         h.main(class="container")(content);
         pico_version="2",
-        extra_head=(h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"),),
+        extra_head=(h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"), htmx_treebar_styles()),
     )
 
     # --- Test routes via @include ---
@@ -129,10 +129,37 @@ end
         try; send(__ws__, html); catch; end
     end
 
+    # --- Pill demo: static snapshot of mixed child states ---
+    @get pill_demo() = begin
+        root = initialize_progress!(:state; description="Pathfinder")
+        # Finished chain
+        c1 = initialize_progress!(root, 1000; description="Chain 1")
+        update_progress!(c1, 1000)
+        finalize_progress!(c1)
+        # Failed chain
+        c2 = initialize_progress!(root, 1000; description="Chain 2")
+        update_progress!(c2, 42)
+        fail_progress!(c2)
+        # Running chain
+        c3 = initialize_progress!(root, 1000; description="Chain 3")
+        update_progress!(c3, 350; stepsize="0.12", divergences="0")
+        # Another finished chain
+        c4 = initialize_progress!(root, 1000; description="Chain 4")
+        update_progress!(c4, 1000)
+        finalize_progress!(c4)
+
+        h.div(
+            h.h3("Pill demo — mixed child states"),
+            h.p("Chain 1: finished, Chain 2: failed (dimmed — running sibling), Chain 3: running, Chain 4: finished";
+                style="font-size:0.9em;color:var(--pico-muted-color)"),
+            htmx_render_children(root),
+        )
+    end
+
     # --- Index page with both examples ---
     @get index = h.div(
         h.h1("Treebars Web Demo"),
-        h.p(h.a(href="/tests")("Tests"), " | Two approaches to live progress: HTTP polling and WebSockets."),
+        h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demo"), " | Two approaches to live progress: HTTP polling and WebSockets."),
 
         h.hr(),
         h.h3("1. HTTP Polling"),

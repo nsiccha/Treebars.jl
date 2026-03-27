@@ -1,7 +1,7 @@
 struct ThreadsafeSet{T} <: AbstractSet{T}
     lock::ReentrantLock
-    inner::Set{T}
-    ThreadsafeSet{T}() where T = new{T}(ReentrantLock(), Set{T}())
+    inner::OrderedSet{T}
+    ThreadsafeSet{T}() where T = new{T}(ReentrantLock(), OrderedSet{T}())
 end
 ThreadsafeSet() = ThreadsafeSet{Any}()
 
@@ -20,8 +20,8 @@ Base.show(io::IO, s::ThreadsafeSet{T}) where T = @lock s.lock print(io, "Threads
 
 struct ThreadsafeDict{K,V} <: AbstractDict{K,V}
     lock::ReentrantLock
-    inner::Dict{K,V}
-    ThreadsafeDict{K,V}() where {K,V} = new{K,V}(ReentrantLock(), Dict{K,V}())
+    inner::OrderedDict{K,V}
+    ThreadsafeDict{K,V}() where {K,V} = new{K,V}(ReentrantLock(), OrderedDict{K,V}())
 end
 ThreadsafeDict() = ThreadsafeDict{Any,Any}()
 
@@ -36,7 +36,7 @@ Base.get!(f::Function, d::ThreadsafeDict, k) = @lock d.lock get!(f, d.inner, k)
 Base.pop!(d::ThreadsafeDict, k) = @lock d.lock pop!(d.inner, k)
 Base.pop!(d::ThreadsafeDict, k, default) = @lock d.lock pop!(d.inner, k, default)
 Base.delete!(d::ThreadsafeDict, k) = (@lock d.lock delete!(d.inner, k); d)
-Base.empty!(d::ThreadsafeDict) = (@lock d.lock empty!(d.inner); d)
+Base.empty!(d::ThreadsafeDict) = (@lock d.lock empty!(d.inner); s)
 Base.iterate(d::ThreadsafeDict) = @lock d.lock iterate(d.inner)
 Base.iterate(d::ThreadsafeDict, state) = @lock d.lock iterate(d.inner, state)
 Base.keys(d::ThreadsafeDict) = @lock d.lock collect(keys(d.inner))

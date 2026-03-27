@@ -5,6 +5,7 @@ version = "0.1.0"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+OrderedCollections = "bac558e1-5e72-5ebc-8fee-abe8a469f55d"
 
 [weakdeps]
 HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
@@ -17,6 +18,7 @@ HTTPExt = "HTTP"
 TermExt = "Term"
 
 [compat]
+OrderedCollections = "1"
 Term = "2"
 julia = "1.10"
 

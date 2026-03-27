@@ -1,6 +1,6 @@
 module HTMXObjectsExt
 import HTMXObjects: h, Node, fetchindex
-import Treebars: htmx_render, htmx_render_children, ws_progress, polling_fetchindex,
+import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, ws_progress, polling_fetchindex,
     ProgressNode, StateProgress, root, is_running, is_finished, is_failed, duration, short_duration
 
 # Duration suffix for a node's label
@@ -15,6 +15,33 @@ function _duration_suffix(sp::StateProgress)
     end
 end
 
+# Global stylesheet for treebar components — include via extra_head in htmx()
+htmx_treebar_styles() = h.style("""
+.treebar-pills { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+.treebar-pill {
+    display: inline-block;
+    padding: 0.15rem 0.6rem;
+    border-radius: 1rem;
+    font-size: 0.8rem;
+    cursor: pointer;
+    user-select: none;
+    border: 1px solid transparent;
+    transition: opacity 0.15s;
+}
+.treebar-pill-finished {
+    background: color-mix(in srgb, var(--pico-ins-color, #d1fae5) 35%, transparent);
+}
+.treebar-pill-failed {
+    background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 35%, transparent);
+}
+.treebar-pill-expanded {
+    border-color: currentColor;
+}
+.treebar-pill:hover { opacity: 0.8; }
+.treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
+.treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
+""")
+
 # Render a StateProgress node as HTML
 function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
     sp = node.impl
@@ -25,7 +52,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
             # Progress bar with counter
             h.div(class="treebar-node")(
                 h.div(class="treebar-header")(
-                    h.span(class="treebar-description")(sp.description),
+                    h.span(class="treebar-description")("$(sp.description):"),
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
                     !isempty(sp.message) ? h.span(class="treebar-message")(sp.message) : "",
                     h.span(class="treebar-duration")(suffix),
@@ -70,28 +97,36 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
     isempty(node.children) && return h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
 
     children = collect(node.children)
-    has_running = any(c -> is_running(c), children)
+    n_finished = count(c -> is_finished(c), children)
+    n_failed = count(c -> is_failed(c), children)
+
+    # Toggle pills for finished/failed groups
+    pills = Node[]
+    if n_finished > 0
+        push!(pills, h.span(class="treebar-pill treebar-pill-finished",
+            onclick="this.classList.toggle('treebar-pill-expanded'); this.closest('.treebar-children').querySelectorAll('.treebar-child-finished').forEach(function(el){el.hidden=!el.hidden})")(
+            "$(n_finished) finished"))
+    end
+    if n_failed > 0
+        push!(pills, h.span(class="treebar-pill treebar-pill-failed",
+            onclick="this.classList.toggle('treebar-pill-expanded'); this.closest('.treebar-children').querySelectorAll('.treebar-child-failed').forEach(function(el){el.hidden=!el.hidden})")(
+            "$(n_failed) failed"))
+    end
 
     rendered = map(children) do child
         if is_running(child)
-            # Running children: always shown prominently
             htmx_render(child)
-        elseif is_failed(child) && has_running
-            # Failed with running siblings: suppress (retry in flight)
-            nothing
+        elseif is_finished(child)
+            h.div(class="treebar-child-finished", hidden="")(htmx_render(child))
         else
-            # Finished or failed-with-no-running-siblings: collapsed <details>
-            child_sp = child.impl
-            label = child_sp.description
-            suffix = _duration_suffix(child_sp)
-            h.details(class="treebar-collapsed")(
-                h.summary("$(label)$(suffix)"),
-                htmx_render(child),
-            )
+            h.div(class="treebar-child-failed", hidden="")(htmx_render(child))
         end
     end
 
-    h.div(filter(!isnothing, rendered)...)
+    h.div(class="treebar-children")(
+        isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
+        rendered...,
+    )
 end
 
 """
