@@ -69,7 +69,7 @@ end
     @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
     # --- Polling route (using fetchindex + __substatus__) ---
-    @get compute(key; rerun="") = fetchindex(_async.results, key; force=!isempty(rerun)) do rv, status
+    @get compute(key; force::Bool=false) = fetchindex(_async.results, key; force) do rv, status
         if rv isa Task && istaskfailed(rv)
             h.article(h.header("Failed"), h.pre(sprint(showerror, rv.result)))
         elseif rv isa Task
@@ -84,7 +84,7 @@ end
                 h.header("Result for '$key'"),
                 h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
                 h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
-                h.button("Rerun"; hx_get=query_url("/compute/$key"; rerun="1"), hx_target="closest article", hx_swap="outerHTML"),
+                h.button("Rerun"; hx_get=query_url("/compute/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
             )
         end
     end

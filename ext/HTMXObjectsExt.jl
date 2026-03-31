@@ -145,7 +145,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_url, label, rerun="", poll_interval="200ms", kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Returns either a self-polling
 progress div (while the task is running), an error article (if failed),
@@ -156,12 +156,12 @@ or the result of `render_result(rv)` (when done).
 - `keys...`: cache key(s) (variadic — supports multi-index like `f1, f2`)
 - `poll_url`: URL to poll while running (use `query_url`)
 - `label`: display label (e.g. "Pathfinder (my-model)")
-- `rerun`: pass non-empty string to force re-computation
+- `force`: force re-computation (default `false`)
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_url, label, rerun="", poll_interval="200ms", kwargs...)
-    fetchindex(ip, keys...; force=!isempty(rerun), kwargs...) do rv, status
+function polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", kwargs...)
+    fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task && istaskfailed(rv)
             err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
             h.article(h.header("$label — failed"), h.pre(err_str))
