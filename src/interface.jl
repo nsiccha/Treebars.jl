@@ -4,6 +4,28 @@
 
 Create a progress root (from a backend symbol like `:state` or `:term`) or a child
 node (from an existing `ProgressNode`). Returns a `ProgressNode`. No-op when `nothing`.
+
+!!! warning "Prefer `@progress` or `with_progress` instead"
+    Calling `initialize_progress!` / `update_progress!` / `finalize_progress!` manually
+    is error-prone — forgetting `finalize_progress!` or missing exceptions leaves
+    progress nodes stuck in the "running" state forever. Use the convenience API:
+
+    ```julia
+    # Best: automatic initialize + update + finalize for loops
+    @progress parent for i in 1:N
+        # ...
+    end
+
+    # Good: automatic finalize + fail handling via do-block
+    with_progress(parent, N; description="...") do p
+        for i in 1:N
+            # ...
+            update_progress!(p, i)
+        end
+    end
+    ```
+
+    See [`with_progress`](@ref), [`@progress`](@ref).
 """
 initialize_progress!(::Nothing, args...; kwargs...) = nothing
 
@@ -13,6 +35,9 @@ initialize_progress!(::Nothing, args...; kwargs...) = nothing
 
 Update progress on `node`. Pass an integer to set the counter, a string for a status
 message, or keyword arguments to create/update labeled child nodes. No-op when `nothing`.
+
+See [`@progress`](@ref) and [`with_progress`](@ref) for wrappers that handle the
+full initialize/update/finalize lifecycle automatically.
 """
 update_progress!(::Nothing, args...; kwargs...) = nothing
 
@@ -27,6 +52,11 @@ fail_progress!(::Nothing, args...; kwargs...) = nothing
     finalize_progress!(node; kwargs...)
 
 Mark a progress node as complete. No-op when `nothing`.
+
+!!! warning "Prefer `@progress` or `with_progress` instead"
+    Manual `finalize_progress!` is easy to forget or skip on exceptions. Use
+    [`@progress`](@ref) or [`with_progress`](@ref) which handle finalization and
+    failure automatically in a try/catch/finally block.
 """
 finalize_progress!(::Nothing, args...; kwargs...) = nothing
 
