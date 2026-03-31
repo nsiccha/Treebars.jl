@@ -29,11 +29,9 @@ function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
 end
 
 
-# --- Async computation state (fetchindex + __substatus__ pattern) ---
+# --- Async computation state ---
 @dynamicstruct struct AsyncComputations
     __status__ = initialize_progress!(:state; description="Treebars Demo")
-    __substatus__(name, args...; kwargs...) =
-        initialize_progress!(__status__; description="$name[$(join(args, ","))]")
     results[key] = fake_sampling(__status__)
 end
 _async = AsyncComputations(; cache_type=:parallel)
@@ -68,7 +66,7 @@ end
     # --- Test routes via @include ---
     @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
-    # --- Polling route (using fetchindex + __substatus__) ---
+    # --- Polling route (using fetchindex) ---
     @get compute(key; force::Bool=false) = fetchindex(_async.results, key; force) do rv, status
         if rv isa Task && istaskfailed(rv)
             h.article(h.header("Failed"), h.pre(sprint(showerror, rv.result)))
