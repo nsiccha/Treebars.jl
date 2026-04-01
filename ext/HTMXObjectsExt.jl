@@ -41,6 +41,9 @@ htmx_treebar_styles() = h.style("""
 .treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
+.treebar-node { margin-bottom: 0.25rem; }
+.treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
+.treebar-label { padding-left: 1rem; margin-left: 0.25rem; }
 """)
 
 # Render a StateProgress node as HTML
