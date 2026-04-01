@@ -2,7 +2,6 @@ module TreebarsWeb
 
 using HTMXObjects
 using Treebars
-using DynamicObjects: cancel!
 import HTTP.WebSockets: send
 using TestModules
 using Random
