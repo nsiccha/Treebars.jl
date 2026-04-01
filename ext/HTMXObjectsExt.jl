@@ -49,7 +49,7 @@ htmx_treebar_styles() = h.style("""
 # Render a StateProgress node as HTML
 function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
     sp = node.impl
-    children_html = [htmx_render(child; kwargs...) for child in node.children]
+    children_node = isempty(node.children) ? "" : htmx_render_children(node)
     lock(sp.lock) do
         suffix = _duration_suffix(sp)
         if !isnothing(sp.N)
@@ -62,7 +62,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
                     h.span(class="treebar-duration")(suffix),
                 ),
                 h.progress(value=string(sp.i), max=string(sp.N), class="treebar-progress")(),
-                children_html...,
+                children_node,
             )
         elseif !isempty(sp.message)
             # Label node (key: value)
@@ -74,7 +74,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
             # Container node
             h.div(class="treebar-node")(
                 !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, suffix) : "",
-                children_html...,
+                children_node,
             )
         end
     end
