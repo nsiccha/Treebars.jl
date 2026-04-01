@@ -2,6 +2,7 @@ module TreebarsWeb
 
 using HTMXObjects
 using Treebars
+using DynamicObjects: cancel!
 import HTTP.WebSockets: send
 using TestModules
 using Random
@@ -66,25 +67,23 @@ end
     # --- Test routes via @include ---
     @include tests = TestRoutes(; req, test_module=@__MODULE__)
 
-    # --- Polling route (using fetchindex) ---
-    @get compute(key; force::Bool=false) = fetchindex(_async.results, key; force) do rv, status
-        if rv isa Task && istaskfailed(rv)
-            h.article(h.header("Failed"), h.pre(sprint(showerror, rv.result)))
-        elseif rv isa Task
-            h.div(; hx_get=query_url("/compute/$key"), hx_trigger="every 200ms", hx_swap="outerHTML")(
-                h.article(
-                    h.header("Computing '$key'..."),
-                    htmx_render_children(status),
-                )
-            )
-        else
-            h.article(
-                h.header("Result for '$key'"),
-                h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
-                h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
-                h.button("Rerun"; hx_get=query_url("/compute/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
-            )
-        end
+    # --- Polling route (using polling_fetchindex with cancel support) ---
+    @get compute(key; force::Bool=false) = polling_fetchindex(_async.results, key;
+        poll_url=query_url("/compute/$key"), label="Computing '$key'",
+        cancel_url=query_url("/cancel/$key"), force,
+    ) do rv
+        h.article(
+            h.header("Result for '$key'"),
+            h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+            h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
+            h.button("Rerun"; hx_get=query_url("/compute/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+        )
+    end
+
+    # --- Cancel route ---
+    @get cancel(key) = begin
+        cancel!(_async.results, key)
+        h.article(h.header("Cancelled '$key'"), h.p("Task was cancelled."))
     end
 
     # --- WebSocket routes ---

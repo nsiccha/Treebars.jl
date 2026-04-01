@@ -40,6 +40,7 @@ htmx_treebar_styles() = h.style("""
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
+.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 """)
 
 # Render a StateProgress node as HTML
@@ -145,7 +146,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", cancel_url="", kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Returns either a self-polling
 progress div (while the task is running), an error article (if failed),
@@ -158,17 +159,22 @@ or the result of `render_result(rv)` (when done).
 - `label`: display label (e.g. "Pathfinder (my-model)")
 - `force`: force re-computation (default `false`)
 - `poll_interval`: HTMX polling interval (default "200ms")
+- `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
+  The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
+  After cancel, the task fails with `InterruptException`; next poll shows the failure.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", cancel_url="", kwargs...)
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task && istaskfailed(rv)
             err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
             h.article(h.header("$label — failed"), h.pre(err_str))
         elseif rv isa Task
+            stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
+                hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
             h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
                 style="min-height:200px;")(
-                h.article(h.header("$label — running..."), htmx_render_children(status))
+                h.article(h.header("$label — running...", stop_btn), htmx_render_children(status))
             )
         else
             render_result(rv)
