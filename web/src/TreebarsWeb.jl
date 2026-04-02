@@ -29,12 +29,23 @@ function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
 end
 
 
-# --- Async computation state ---
+# --- Async computation state (flat) ---
 @dynamicstruct struct AsyncComputations
     __status__ = initialize_progress!(:state; description="Treebars Demo")
     results(key) = fake_sampling(__status__)
 end
 _async = AsyncComputations(; cache_type=:parallel)
+
+# --- Inline child demo: automatic substatus inheritance ---
+# Sub inherits cache_type from parent and gets a scoped ProgressNode as __status__
+# (provided by DynamicObjects/ext/TreebarsExt.jl default __substatus__ wiring)
+@dynamicstruct struct NestedComputations
+    __status__ = initialize_progress!(:state; description="Nested Demo")
+    struct Sub
+        results(key) = fake_sampling(__status__; n_steps=100, sleep_per_step=0.02)
+    end
+end
+_nested = NestedComputations(; cache_type=:parallel)
 
 function _ws_send_result(key, task)
     rv = istaskfailed(task) ? nothing : fetch(task)
@@ -157,6 +168,19 @@ end
         h.article(h.header("Cancelled '$key'"), h.p("Task was cancelled."))
     end
 
+    # --- Inline child demo route ---
+    # _nested.Sub inherits cache_type=:parallel and gets a scoped ProgressNode under _nested.__status__
+    @get nested_compute(key; force::Bool=false) = polling_fetchindex(_nested.Sub.results, key;
+        poll_url=query_url("/nested_compute/$key"), label="Nested '$key'", force,
+    ) do rv
+        h.article(
+            h.header("Nested result for '$key'"),
+            h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+            h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
+            h.button("Rerun"; hx_get=query_url("/nested_compute/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+        )
+    end
+
     # --- WebSocket routes ---
     # __ws__ is the WebSocket, injected by @htmx's @ws handling
     @ws ws = begin
@@ -241,7 +265,7 @@ end
     # --- Index page with both examples ---
     @get index = h.div(
         h.h1("Treebars Web Demo"),
-        h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demos"), " | Two approaches to live progress: HTTP polling and WebSockets."),
+        h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demos"), " | HTTP polling, WebSockets, and inline child substatus."),
 
         h.hr(),
         h.h3("1. HTTP Polling"),
@@ -269,7 +293,19 @@ end
         h.div(; id="ws-result"),
 
         h.hr(),
-        h.h3("3. WebSocket with path params + kwargs"),
+        h.h3("3. Inline child substatus (new pattern)"),
+        h.p("Demonstrates automatic substatus inheritance: the inline Sub struct gets its own ProgressNode under the parent's status. No manual __substatus__ needed."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.div(
+            h.fieldset(; role="group")(
+                h.input(; type="text", id="nested-key", value="nested-demo", placeholder="Key"),
+                h.button("Run (nested)"; hx_get="/nested_compute/nested-demo", hx_target="#nested-result", hx_swap="innerHTML",
+                    _="on click set my @hx-get to '/nested_compute/' + #nested-key.value"),
+            ),
+        ),
+        h.div(; id="nested-result"),
+
+        h.hr(),
+        h.h3("4. WebSocket with path params + kwargs"),
         h.p("Kwargs from query string: /ws_run?key=...&n_steps=...&speed=..."; style="font-size:0.9em;color:var(--pico-muted-color)"),
         h.form(; _="on submit halt the event then set key to #param-key.value then set steps to #param-steps.value then set spd to #param-speed.value then set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd then set #param-ws-container @ws-connect to url then js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
             h.fieldset(; role="group")(

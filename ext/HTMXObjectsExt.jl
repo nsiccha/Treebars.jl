@@ -112,7 +112,7 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
             "$(n_finished) finished"))
     end
     if n_failed > 0
-        push!(pills, h.span(class="treebar-pill treebar-pill-failed",
+        push!(pills, h.span(class="treebar-pill treebar-pill-failed treebar-pill-expanded",
             onclick="this.classList.toggle('treebar-pill-expanded'); this.closest('.treebar-children').querySelectorAll('.treebar-child-failed').forEach(function(el){el.hidden=!el.hidden})")(
             "$(n_failed) failed"))
     end
@@ -123,7 +123,7 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
         elseif is_finished(child)
             h.div(class="treebar-child-finished", hidden="")(htmx_render(child))
         else
-            h.div(class="treebar-child-failed", hidden="")(htmx_render(child))
+            h.div(class="treebar-child-failed")(htmx_render(child))
         end
     end
 

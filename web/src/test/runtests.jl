@@ -2,6 +2,14 @@ using TestModules
 using Treebars
 using Dates
 
+# Defined at module scope (required for @dynamicstruct type definitions)
+@dynamicstruct struct _InlineSubTest
+    __status__ = initialize_progress!(:state; description="InlineParent")
+    struct InlineSub
+        computed = 42
+    end
+end
+
 @testset "nothing backend (no-ops)" begin
     @test initialize_progress!(nothing) === nothing
     @test update_progress!(nothing, 1) === nothing
@@ -252,6 +260,19 @@ end
     @test occursin("...", s)
     @test startswith(s, "[1, 2, 3,")
     @test endswith(s, "8, 9, 10]")
+end
+
+@testset "@dynamicstruct inline child substatus" begin
+    p = _InlineSubTest(; cache_type=:parallel)
+    # Accessing p.InlineSub triggers construction with __status__ = substatus scoped to :InlineSub
+    child_status = p.InlineSub.__status__
+    @test child_status isa Treebars.ProgressNode
+    # Child's status is a child of the parent's root status
+    @test child_status.parent === p.__status__
+    @test child_status.impl.description == "InlineSub[]"
+    # Inline child inherits cache_type from parent
+    @test p.InlineSub.__cache_type__ == p.__cache_type__
+    finalize_progress!(p.__status__)
 end
 
 @testset "Concurrency stress test" begin
