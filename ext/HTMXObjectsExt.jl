@@ -177,7 +177,7 @@ function polling_fetchindex(render_result, ip, keys...; poll_url, label, force=f
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
             h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
                 style="min-height:200px;")(
-                h.article(h.header("$label — running...", stop_btn), htmx_render_children(status))
+                h.article(h.header("$label — running...", stop_btn), htmx_render(status))
             )
         else
             render_result(rv)

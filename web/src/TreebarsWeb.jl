@@ -33,6 +33,7 @@ end
 @dynamicstruct struct AsyncComputations
     __status__ = initialize_progress!(:state; description="Treebars Demo")
     results(key) = fake_sampling(__status__)
+    parameterized(n_steps, sleep_per_step) = fake_sampling(__status__; n_steps, sleep_per_step)
 end
 _async = AsyncComputations(; cache_type=:parallel)
 
@@ -46,6 +47,20 @@ _async = AsyncComputations(; cache_type=:parallel)
     end
 end
 _nested = NestedComputations(; cache_type=:parallel)
+
+# --- Docstring descriptions demo ---
+# Properties with docstrings use the docstring as progress description instead
+# of the auto-generated "name[args]" format
+@dynamicstruct struct DocstringDemo
+    __status__ = initialize_progress!(:state; description="Docstring Demo")
+    "Sampling chain"
+    results(key) = fake_sampling(__status__)
+    "Sampling $(n_steps) steps at $(sleep_per_step)s intervals"
+    parameterized(n_steps, sleep_per_step) = fake_sampling(__status__; n_steps, sleep_per_step)
+    "Cached sampling for $(key)"
+    @cached cached_results(key) = fake_sampling(__status__)
+end
+_docstring = DocstringDemo(; cache_type=:parallel)
 
 function _ws_send_result(key, task)
     rv = istaskfailed(task) ? nothing : fetch(task)
@@ -137,6 +152,26 @@ function _pill_demo_all_running()
     htmx_render_children(root)
 end
 
+function _pill_demo_docstrings()
+    # Compare auto-generated vs docstring descriptions in the same tree
+    root = initialize_progress!(:state; description="Docstring vs Auto")
+    # Simulate what _default_substatus produces WITHOUT a docstring
+    auto1 = initialize_progress!(root; description="results[key1]")
+    c = initialize_progress!(auto1, 500; description="MCMC", propagates=true)
+    update_progress!(c, 500); finalize_progress!(c)
+    auto2 = initialize_progress!(root; description="parameterized[200,0.02]")
+    c = initialize_progress!(auto2, 500; description="MCMC", propagates=true)
+    update_progress!(c, 300)
+    # Simulate what _property_description produces WITH a docstring
+    doc1 = initialize_progress!(root; description="Sampling chain")
+    c = initialize_progress!(doc1, 500; description="MCMC", propagates=true)
+    update_progress!(c, 500); finalize_progress!(c)
+    doc2 = initialize_progress!(root; description="Sampling 200 steps at 0.02s intervals")
+    c = initialize_progress!(doc2, 500; description="MCMC", propagates=true)
+    update_progress!(c, 300)
+    htmx_render_children(root)
+end
+
 @htmx struct AppContext
     req = nothing
 
@@ -166,6 +201,20 @@ end
     @get cancel(key) = begin
         cancel!(_async.results, key)
         h.article(h.header("Cancelled '$key'"), h.p("Task was cancelled."))
+    end
+
+    # --- Parameterized route (no docstring, for baseline comparison) ---
+    @get param_compute(n_steps::Int, sleep_ms::Int; force::Bool=false) = begin
+        sleep_per_step = sleep_ms / 1000.0
+        polling_fetchindex(_async.parameterized, n_steps, sleep_per_step;
+            poll_url=query_url("/param_compute/$n_steps/$sleep_ms"), label="Parameterized", force,
+        ) do rv
+            h.article(
+                h.header("Result ($n_steps steps @ $(sleep_ms)ms)"),
+                h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+                h.button("Rerun"; hx_get=query_url("/param_compute/$n_steps/$sleep_ms"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+            )
+        end
     end
 
     # --- Inline child demo route ---
@@ -221,6 +270,40 @@ end
         try; send(__ws__, html); catch; end
     end
 
+    # --- Docstring description demo routes ---
+    @get dsdemo_compute(key; force::Bool=false) = polling_fetchindex(_docstring.results, key;
+        poll_url=query_url("/dsdemo_compute/$key"), label="Docstring '$key'", force,
+    ) do rv
+        h.article(
+            h.header("Result for '$key'"),
+            h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+            h.button("Rerun"; hx_get=query_url("/dsdemo_compute/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+        )
+    end
+
+    @get dsdemo_cached(key; force::Bool=false) = polling_fetchindex(_docstring.cached_results, key;
+        poll_url=query_url("/dsdemo_cached/$key"), label="Cached '$key'", force,
+    ) do rv
+        h.article(
+            h.header("Cached result for '$key'"),
+            h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+            h.button("Rerun"; hx_get=query_url("/dsdemo_cached/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+        )
+    end
+
+    @get dsdemo_param(n_steps::Int, sleep_ms::Int; force::Bool=false) = begin
+        sleep_per_step = sleep_ms / 1000.0
+        polling_fetchindex(_docstring.parameterized, n_steps, sleep_per_step;
+            poll_url=query_url("/dsdemo_param/$n_steps/$sleep_ms"), label="Parameterized", force,
+        ) do rv
+            h.article(
+                h.header("Result ($n_steps steps @ $(sleep_ms)ms)"),
+                h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
+                h.button("Rerun"; hx_get=query_url("/dsdemo_param/$n_steps/$sleep_ms"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+            )
+        end
+    end
+
     # --- Pill demos: various nesting patterns ---
     @get pill_demo = begin
         h.div(
@@ -259,6 +342,14 @@ end
             # 5. All running: no pills needed
             h.h4("5. All running — no pills"),
             _pill_demo_all_running(),
+
+            h.hr(),
+
+            # 6. Docstring descriptions: side-by-side comparison
+            h.h4("6. Docstring descriptions — auto vs custom"),
+            h.p("Top two nodes show auto-generated descriptions (\"results[key1]\", \"parameterized[200,0.02]\"). Bottom two show the same properties with docstrings (\"Sampling chain\", \"Sampling 200 steps at 0.02s intervals\").";
+                style="font-size:0.85em;color:var(--pico-muted-color)"),
+            _pill_demo_docstrings(),
         )
     end
 
@@ -305,7 +396,54 @@ end
         h.div(; id="nested-result"),
 
         h.hr(),
-        h.h3("4. WebSocket with path params + kwargs"),
+        h.h3("4. Docstring descriptions (new)"),
+        h.p("Left: auto-generated description (\"results[key]\"). Right: docstring as progress description (\"Sampling chain\"). Run both and compare the progress text."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.div(; style="display:grid;grid-template-columns:1fr 1fr;gap:1rem")(
+            h.div(
+                h.h5("Without docstring"),
+                h.fieldset(; role="group")(
+                    h.input(; type="text", id="doc-cmp-key", value="compare", placeholder="Key"),
+                    h.button("Run"; hx_get="/compute/compare", hx_target="#doc-cmp-left", hx_swap="innerHTML",
+                        _="on click set my @hx-get to '/compute/' + #doc-cmp-key.value"),
+                ),
+                h.div(; id="doc-cmp-left"),
+            ),
+            h.div(
+                h.h5("With docstring"),
+                h.fieldset(; role="group")(
+                    h.input(; type="text", id="doc-cmp-key2", value="compare", placeholder="Key"),
+                    h.button("Run"; hx_get="/dsdemo_compute/compare", hx_target="#doc-cmp-right", hx_swap="innerHTML",
+                        _="on click set my @hx-get to '/dsdemo_compute/' + #doc-cmp-key2.value"),
+                ),
+                h.div(; id="doc-cmp-right"),
+            ),
+        ),
+        h.p("Interpolated: auto-generated shows \"parameterized[100,0.02]\", docstring shows \"Sampling 100 steps at 0.02s intervals\"."; style="font-size:0.9em;color:var(--pico-muted-color);margin-top:0.5rem"),
+        h.div(; style="display:grid;grid-template-columns:1fr 1fr;gap:1rem")(
+            h.div(
+                h.h5("Without docstring"),
+                h.fieldset(; role="group")(
+                    h.input(; type="number", id="doc-steps-l", value="100", placeholder="Steps", style="max-width:6rem"),
+                    h.input(; type="number", id="doc-sleep-l", value="20", placeholder="ms", style="max-width:6rem"),
+                    h.button("Run"; hx_get="/param_compute/100/20", hx_target="#doc-param-left", hx_swap="innerHTML",
+                        _="on click set my @hx-get to '/param_compute/' + #doc-steps-l.value + '/' + #doc-sleep-l.value"),
+                ),
+                h.div(; id="doc-param-left"),
+            ),
+            h.div(
+                h.h5("With docstring"),
+                h.fieldset(; role="group")(
+                    h.input(; type="number", id="doc-steps-r", value="100", placeholder="Steps", style="max-width:6rem"),
+                    h.input(; type="number", id="doc-sleep-r", value="20", placeholder="ms", style="max-width:6rem"),
+                    h.button("Run"; hx_get="/dsdemo_param/100/20", hx_target="#doc-param-right", hx_swap="innerHTML",
+                        _="on click set my @hx-get to '/dsdemo_param/' + #doc-steps-r.value + '/' + #doc-sleep-r.value"),
+                ),
+                h.div(; id="doc-param-right"),
+            ),
+        ),
+
+        h.hr(),
+        h.h3("5. WebSocket with path params + kwargs"),
         h.p("Kwargs from query string: /ws_run?key=...&n_steps=...&speed=..."; style="font-size:0.9em;color:var(--pico-muted-color)"),
         h.form(; _="on submit halt the event then set key to #param-key.value then set steps to #param-steps.value then set spd to #param-speed.value then set url to '/ws_run?key=' + key + '&n_steps=' + steps + '&speed=' + spd then set #param-ws-container @ws-connect to url then js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
             h.fieldset(; role="group")(
