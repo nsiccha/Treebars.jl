@@ -64,14 +64,28 @@ function _update_labels!(node::ProgressNode; kwargs...)
     node
 end
 
-fail_progress!(node::ProgressNode, args...; kwargs...) = fail_progress!(node.impl, args...; kwargs...)
+function fail_progress!(node::ProgressNode, args...; kwargs...)
+    fail_progress!(node.impl, args...; kwargs...)
+    # collect() snapshot — a child failing may mutate node.children mid-walk
+    for child in node.children
+        isrunning(child) && fail_progress!(child, args...; kwargs...)
+    end
+    propagates_finalization(node) && !isnothing(node.parent) && isrunning(node.parent) && fail_progress!(node.parent, args...; kwargs...)
+    # Intentional asymmetry with finalize_progress!: failed transient nodes stay
+    # pinned to their parent so htmx_render_children's "N failed" pill can show
+    # them until the user retries (which clears the DO cache entry).
+end
 
 function finalize_progress!(node::ProgressNode)
     finalize_progress!(node.impl)
-    for child in collect(node.children)
+    # collect() snapshot — a transient child detaches itself mid-walk
+    for child in node.children
         isrunning(child) && finalize_progress!(child)
     end
     propagates_finalization(node) && !isnothing(node.parent) && isrunning(node.parent) && finalize_progress!(node.parent)
+    if istransient(node) && !isnothing(node.parent)
+        pop!(node.parent.children, node, nothing)
+    end
 end
 
 # StateProgress: a thread-safe progress backend that stores state for inspection.

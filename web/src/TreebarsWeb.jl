@@ -48,6 +48,35 @@ _async = AsyncComputations(; cache_type=:parallel)
 end
 _nested = NestedComputations(; cache_type=:parallel)
 
+# --- Auto-cleanup demo: exercises the new transient-substatus detach path ---
+# Each `results[k]` call goes through DO's ThreadsafeDict.get! spawn block, which
+# now calls _finalize_substatus! on success → the TreebarsExt override calls
+# Treebars.finalize_progress! → transient nodes detach from the parent tree.
+# Fire N in parallel, watch children count spike then collapse to 0.
+@dynamicstruct struct AutoCleanupDemo
+    __status__ = initialize_progress!(:state; description="AutoCleanup Demo")
+    "Computing '$key'"
+    results(key) = fake_sampling(__status__; n_steps=40, sleep_per_step=0.05)
+    "Failing '$key'"
+    failing(key) = begin
+        child = initialize_progress!(__status__, 20; description="Working", propagates=true)
+        for i in 1:10
+            update_progress!(child, i); sleep(0.05)
+        end
+        error("boom on $key")
+    end
+end
+_autocleanup = AutoCleanupDemo(; cache_type=:parallel)
+
+_autocleanup_view(msg="") = h.div(;
+    id="autocleanup-view",
+    hx_get="/autocleanup_view", hx_trigger="every 300ms", hx_swap="outerHTML",
+)(
+    h.p("Root children: ", h.strong(string(length(_autocleanup.__status__.children))),
+        isempty(msg) ? "" : " — $msg"),
+    htmx_render(_autocleanup.__status__),
+)
+
 # --- Docstring descriptions demo ---
 # Properties with docstrings use the docstring as progress description instead
 # of the auto-generated "name[args]" format
@@ -173,8 +202,6 @@ function _pill_demo_docstrings()
 end
 
 @htmx struct AppContext
-    req = nothing
-
     page(content) = htmx(
         h.main(class="container")(content);
         pico_version="2",
@@ -182,7 +209,7 @@ end
     )
 
     # --- Test routes via @include ---
-    @include tests = TestRoutes(; req, test_module=@__MODULE__)
+    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
 
     # --- Polling route (using polling_fetchindex with cancel support) ---
     @get compute(key; force::Bool=false) = polling_fetchindex(_async.results, key;
@@ -304,6 +331,35 @@ end
         end
     end
 
+    # --- Auto-cleanup demo routes ---
+    @get autocleanup_demo = h.div(
+        h.h3("Auto-cleanup demo"),
+        h.p("Fires N parallel ", h.code("_autocleanup.results[randkey]"),
+            " computations. With the new TreebarsExt hook, each substatus detaches from the root tree on success — watch the ",
+            h.em("Root children"), " count spike during the run and collapse back to 0. The failing button stays pinned as a red child."),
+        h.fieldset(; role="group")(
+            h.button("Fire 8"; hx_get="/autocleanup_fire/8", hx_target="#autocleanup-view", hx_swap="outerHTML"),
+            h.button("Fire 16"; hx_get="/autocleanup_fire/16", hx_target="#autocleanup-view", hx_swap="outerHTML"),
+            h.button("Fire failing"; hx_get="/autocleanup_fire_fail", hx_target="#autocleanup-view", hx_swap="outerHTML"),
+        ),
+        _autocleanup_view(),
+    )
+
+    @get autocleanup_view = _autocleanup_view()
+
+    @get autocleanup_fire(n::Int) = begin
+        for _ in 1:n
+            k = "k$(rand(1:1_000_000))"
+            Threads.@spawn try; _autocleanup.results[k]; catch; end
+        end
+        _autocleanup_view("spawned $n tasks")
+    end
+
+    @get autocleanup_fire_fail = begin
+        k = "boom$(rand(1:1_000_000))"
+        Threads.@spawn try; _autocleanup.failing[k]; catch; end
+        _autocleanup_view("spawned failing '$k' (stays pinned)")
+    end
     # --- Pill demos: various nesting patterns ---
     @get pill_demo = begin
         h.div(
@@ -356,7 +412,7 @@ end
     # --- Index page with both examples ---
     @get index = h.div(
         h.h1("Treebars Web Demo"),
-        h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demos"), " | HTTP polling, WebSockets, and inline child substatus."),
+        h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demos"), " | ", h.a(href="/autocleanup_demo")("Auto-cleanup demo"), " | HTTP polling, WebSockets, and inline child substatus."),
 
         h.hr(),
         h.h3("1. HTTP Polling"),

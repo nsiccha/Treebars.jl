@@ -10,6 +10,24 @@ using Dates
     end
 end
 
+@dynamicstruct struct _AutoCleanupTest
+    __status__ = initialize_progress!(:state; description="AutoCleanup")
+    "Computing $key"
+    results(key) = begin
+        sleep(0.01)
+        key * 2
+    end
+end
+
+@dynamicstruct struct _FailedSubstatusTest
+    __status__ = initialize_progress!(:state; description="FailedRoot")
+    "Computing $key"
+    results(key) = begin
+        key == :boom && error("boom")
+        key
+    end
+end
+
 @testset "nothing backend (no-ops)" begin
     @test initialize_progress!(nothing) === nothing
     @test update_progress!(nothing, 1) === nothing
@@ -113,7 +131,7 @@ end
     finalize_progress!(root)
 end
 
-@testset "finalize keeps node in parent" begin
+@testset "finalize keeps non-transient node in parent" begin
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child")
     @test length(root.children) == 1
@@ -121,6 +139,41 @@ end
     @test length(root.children) == 1
     @test child.impl.running == false
     finalize_progress!(root)
+end
+
+@testset "finalize detaches transient node from parent" begin
+    root = initialize_progress!(:state; description="Root")
+    child = initialize_progress!(root, 10; description="Child", transient=true)
+    @test length(root.children) == 1
+    finalize_progress!(child)
+    @test length(root.children) == 0
+    @test child ∉ root.children
+    @test child.impl.running == false
+    # Double finalize must be a no-op (3-arg pop handles already-detached case)
+    finalize_progress!(child)
+    @test length(root.children) == 0
+    finalize_progress!(root)
+end
+
+@testset "fail does NOT detach transient node" begin
+    # Intentional asymmetry: failed transients stay pinned so htmx pills can show them
+    root = initialize_progress!(:state; description="Root")
+    child = initialize_progress!(root, 10; description="Child", transient=true)
+    fail_progress!(child)
+    @test length(root.children) == 1
+    @test child in root.children
+    @test is_failed(child)
+    finalize_progress!(root)
+end
+
+@testset "fail recurses into children" begin
+    root = initialize_progress!(:state; description="Root")
+    child1 = initialize_progress!(root, 10; description="Child1")
+    child2 = initialize_progress!(root, 10; description="Child2")
+    fail_progress!(root)
+    @test is_failed(root)
+    @test is_failed(child1)
+    @test is_failed(child2)
 end
 
 @testset "propagating finalization" begin
@@ -260,6 +313,44 @@ end
     @test occursin("...", s)
     @test startswith(s, "[1, 2, 3,")
     @test endswith(s, "8, 9, 10]")
+end
+
+@testset "DO ThreadsafeDict leaves failed substatus visible" begin
+    # Asymmetric with the success path: on failure, _fail_substatus! calls
+    # Treebars.fail_progress! (which does NOT detach transient nodes) so the
+    # failed substatus stays pinned to the tree for inspection until the user
+    # retries the key (which triggers DO's retry_failed cleanup).
+    app = _FailedSubstatusTest(; cache_type=:parallel)
+    t = Threads.@spawn app.results[:boom]
+    try; wait(t); catch; end
+    @test istaskdone(t) && istaskfailed(t)
+
+    children = app.__status__.children
+    @test length(children) == 1
+    @test is_failed(children[1])
+
+    finalize_progress!(app.__status__)
+end
+
+@testset "DO ThreadsafeDict auto-cleans substatus tree" begin
+    # The bruno SimState scenario: many cache-miss keys should not accumulate
+    # children in app.__status__ after their tasks finish. The TreebarsExt
+    # `_default_substatus` now passes transient=true, so finalize_progress!
+    # (called by the auto-generated @progress wrapper around the property body)
+    # detaches each substatus from the root tree on success.
+    app = _AutoCleanupTest(; cache_type=:parallel)
+    @test length(app.__status__.children) == 0
+
+    n_keys = 8
+    tasks = [Threads.@spawn(app.results[k]) for k in 1:n_keys]
+    for t in tasks; wait(t); end
+
+    # All tasks finished → all substatus nodes should be detached
+    @test length(app.__status__.children) == 0
+    # And the actual cached results are still there
+    @test all(app.results[k] == 2k for k in 1:n_keys)
+
+    finalize_progress!(app.__status__)
 end
 
 @testset "@dynamicstruct inline child substatus" begin
