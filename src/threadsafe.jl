@@ -2,8 +2,10 @@ struct ThreadsafeSet{T} <: AbstractSet{T}
     lock::ReentrantLock
     inner::OrderedSet{T}
     ThreadsafeSet{T}() where T = new{T}(ReentrantLock(), OrderedSet{T}())
+    ThreadsafeSet{T}(items) where T = new{T}(ReentrantLock(), OrderedSet{T}(items))
 end
 ThreadsafeSet() = ThreadsafeSet{Any}()
+ThreadsafeSet(items::AbstractVector{T}) where T = ThreadsafeSet{T}(items)
 
 Base.length(s::ThreadsafeSet) = @lock s.lock length(s.inner)
 Base.isempty(s::ThreadsafeSet) = @lock s.lock isempty(s.inner)

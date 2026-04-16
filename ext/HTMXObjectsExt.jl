@@ -47,7 +47,7 @@ htmx_treebar_styles() = h.style("""
 """)
 
 # Render a StateProgress node as HTML
-function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, kwargs...)
     sp = node.impl
     children_node = isempty(node.children) ? "" : htmx_render_children(node)
     lock(sp.lock) do
@@ -71,11 +71,19 @@ function htmx_render(node::ProgressNode{<:StateProgress}; kwargs...)
                 h.span(class="treebar-value")(sp.message),
             )
         else
-            # Container node
-            h.div(class="treebar-node")(
-                !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, suffix) : "",
-                children_node,
-            )
+            if article
+                # Nested container node
+                h.article(class="treebar-node")(
+                    !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, suffix) : "",
+                    children_node,
+                )
+            else
+                # Nested container node
+                h.div(class="treebar-node")(
+                    !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, suffix) : "",
+                    children_node,
+                )
+            end
         end
     end
 end
@@ -167,17 +175,18 @@ or the result of `render_result(rv)` (when done).
   After cancel, the task fails with `InterruptException`; next poll shows the failure.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task && istaskfailed(rv)
-            err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
-            h.article(h.header("$label — failed"), h.pre(err_str))
+            throw(rv.result)
+            # err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
+            # h.article(h.header("$label — failed"), h.pre(err_str))
         elseif rv isa Task
             stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
             h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
                 style="min-height:200px;")(
-                h.article(h.header("$label — running...", stop_btn), htmx_render(status))
+                    isnothing(label) ? htmx_render(status; article=true) : h.article(h.header("$label — running...", stop_btn), htmx_render(status))
             )
         else
             render_result(rv)

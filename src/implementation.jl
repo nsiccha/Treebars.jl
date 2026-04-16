@@ -16,7 +16,15 @@ struct ProgressNode{I,M,C}
     end
 end
 
+ProgressNode(children::AbstractVector; description="", kwargs...) =
+    ProgressNode(StateProgress(; description, kwargs...), (;propagates=false);
+        children=ThreadsafeSet{ProgressNode}(filter(!isnothing, children)))
+
 root(node::ProgressNode) = isnothing(node.parent) ? node : root(node.parent)
+
+add_child!(parent::ProgressNode, child::ProgressNode) = push!(parent.children, child)
+add_child!(::Nothing, ::Any) = nothing
+add_child!(::Any, ::Nothing) = nothing
 istransient(node::ProgressNode) = get(node.meta, :transient, false)
 propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
