@@ -1,4 +1,5 @@
 module HTMXObjectsExt
+import HTMXObjects
 import HTMXObjects: h, Node, fetchindex
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, ws_progress, polling_fetchindex,
     ProgressNode, StateProgress, root, is_running, is_finished, is_failed, duration, short_duration
@@ -193,5 +194,9 @@ function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing,
         end
     end
 end
+
+# Convenience: when called with an IndexableProperty (no render_result), default to identity.
+polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
+    polling_fetchindex(identity, ip, keys...; kwargs...)
 
 end
