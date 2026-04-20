@@ -80,7 +80,7 @@ fail_progress!(p, args...; kwargs...) = @debug "No implementation loaded for fai
 finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for finalize_progress!($(typeof(p)), args...; kwargs...)"
 
 # htmx_render fallback
-htmx_render(p; kwargs...) = @error "No implementation loaded for htmx_render($(typeof(p)); kwargs...)"
+htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
 # htmx_render_children — implemented in HTMXObjectsExt
 function htmx_render_children end

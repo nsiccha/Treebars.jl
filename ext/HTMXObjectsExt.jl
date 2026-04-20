@@ -185,7 +185,7 @@ function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing,
         elseif rv isa Task
             stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-            h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="morph:outerHTML",
+            h.div(; hx_get=poll_url, hx_trigger="every $poll_interval", hx_swap="outerHTML",
                 style="min-height:200px;")(
                     isnothing(label) ? htmx_render(status; article=true) : h.article(h.header("$label — running...", stop_btn), htmx_render(status))
             )
