@@ -19,9 +19,11 @@ struct IterableProgress{P,W}
     progress::P
     wrapped::W
 end
+_has_length(it) = Base.IteratorSize(typeof(it)) isa Union{Base.HasLength, Base.HasShape}
 function initialize_iterable_progress!(progress, it; kwargs...)
     IterableProgress(
-        initialize_progress!(progress, length(it); kwargs...),
+        _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
+                          initialize_progress!(progress; kwargs...),
         it
     )
 end
