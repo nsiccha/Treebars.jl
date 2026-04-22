@@ -15,6 +15,80 @@ function with_progress(f, args...; kwargs...)
     end
 end
 
+# Shared AST for the start-progress → body → fail-on-error / finalize sandwich.
+# Used by both @with_progress and _emit_phases so there's a single source of
+# truth for the per-phase lifecycle. Binds `phase_expr` to a local so it is
+# evaluated exactly once.
+function _phase_sandwich_ast(phase_expr, body_expr)
+    quote
+        local _phase = $phase_expr
+        $start_progress!(_phase)
+        try
+            $body_expr
+        catch _e
+            $fail_progress!(_phase, _e)
+            rethrow()
+        finally
+            $finalize_progress!(_phase)
+        end
+    end
+end
+
+"""
+    @with_progress phase body
+
+Per-phase sandwich: start the (prepared, pending) `phase` node, run `body`,
+then finalize — calling `fail_progress!(phase, err)` and rethrowing on
+exception. Inline expansion (no closure), so `return`, `break`, `continue`,
+local-variable access, and early exits behave as in the surrounding scope.
+
+Companion to [`prepare_progress!`](@ref). Use when the set of phases is
+data-driven and the static `@progress "label" begin … end` form doesn't apply:
+
+```julia
+phases = [prepare_progress!(root; description=string(k)) for k in keys(chain)]
+for (spec, phase) in zip(chain, phases)
+    @with_progress phase compute(spec)
+end
+```
+
+See also [`with_prepared_progress`](@ref) for the HOF form.
+"""
+macro with_progress(phase, body)
+    _phase_sandwich_ast(esc(phase), esc(body))
+end
+
+"""
+    with_prepared_progress(f, phase)
+
+HOF form of [`@with_progress`](@ref). Starts the (prepared, pending) `phase`
+node, calls `f(phase)`, and finalizes — with `fail_progress!(phase, err)` and
+rethrow on exception. Returns `f`'s value.
+
+Pairs with [`prepare_progress!`](@ref): prepare all phases up front so they
+appear as pending siblings, then run each one inside `with_prepared_progress`:
+
+```julia
+phases = [prepare_progress!(root; description=string(k)) for k in keys(chain)]
+vals = map(pairs(chain), phases) do ((_, spec), phase)
+    with_prepared_progress(phase) do _
+        compute(spec)
+    end
+end
+```
+"""
+function with_prepared_progress(f, phase)
+    start_progress!(phase)
+    try
+        return f(phase)
+    catch e
+        fail_progress!(phase, e)
+        rethrow()
+    finally
+        finalize_progress!(phase)
+    end
+end
+
 struct IterableProgress{P,W}
     progress::P
     wrapped::W
@@ -261,17 +335,7 @@ function _emit_phases(phases, ctx)
             sym = pending_syms[idx]
             phase_ctx = (progress=sym, transient=ctx.transient)
             rewritten = Any[progress_expr(s, phase_ctx) for s in stmts]
-            push!(phase_blocks, quote
-                $start_progress!($sym)
-                try
-                    $(Expr(:block, rewritten...))
-                catch _e
-                    $fail_progress!($sym, _e)
-                    rethrow()
-                finally
-                    $finalize_progress!($sym)
-                end
-            end)
+            push!(phase_blocks, _phase_sandwich_ast(sym, Expr(:block, rewritten...)))
         end
     end
 
