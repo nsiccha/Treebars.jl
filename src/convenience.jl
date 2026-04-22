@@ -89,6 +89,71 @@ function with_prepared_progress(f, phase)
     end
 end
 
+"""
+    with_prepared_phases(f, parent, descriptions; kwargs...)
+
+Bulk-prepare a set of pending phase nodes under `parent`, pass them to `f`,
+and clean up on exception.
+
+`descriptions` may be:
+
+- an iterable of description strings (e.g. `Vector{String}` or `Tuple`) —
+  `phases` is a `Vector{ProgressNode}` of the same length, in iteration order.
+- a `NamedTuple` — `phases` is a `NamedTuple` with the same keys and
+  `ProgressNode` values. The per-phase description is the NT value if it is
+  an `AbstractString`, otherwise `string(key)` — so `NamedTuple`s whose values
+  carry non-string metadata (symbols, specs, etc.) still produce sensible
+  labels.
+
+If `f(phases)` throws, any phase still `is_pending` or `is_running` is failed
+via `fail_progress!(p, err)` before the exception rethrows, so user code never
+has to guard the prepare / consume gap manually.
+
+Extra `kwargs...` are forwarded to each [`prepare_progress!`](@ref) call
+(e.g. `transient=true`, `N=100`).
+
+See also [`@with_progress`](@ref) and [`with_prepared_progress`](@ref) for
+running individual prepared phases.
+
+```julia
+# Data-driven chain. Keys carry structure; values carry specs.
+chain = (parse=:parse, transform=:transform, wrap=:wrap, brmi=:brmi)
+
+vals = with_prepared_phases(__status__, chain) do phases
+    # phases.parse, phases.transform, … are pending ProgressNodes.
+    map(chain, phases) do spec, phase
+        with_prepared_progress(phase) do _
+            getproperty(r, spec)
+        end
+    end
+end
+```
+"""
+function with_prepared_phases(f, parent, descriptions; kwargs...)
+    phases = map(d -> prepare_progress!(parent; description=string(d), kwargs...), descriptions)
+    _run_prepared_phases(f, phases)
+end
+
+function with_prepared_phases(f, parent, labels::NamedTuple; kwargs...)
+    phases = map(keys(labels)) do k
+        v = labels[k]
+        desc = v isa AbstractString ? v : string(k)
+        prepare_progress!(parent; description=desc, kwargs...)
+    end
+    _run_prepared_phases(f, NamedTuple{keys(labels)}(phases))
+end
+
+function _run_prepared_phases(f, phases)
+    try
+        return f(phases)
+    catch e
+        for p in phases
+            (is_pending(p) || is_running(p)) && fail_progress!(p, e)
+        end
+        rethrow()
+    end
+end
+
 struct IterableProgress{P,W}
     progress::P
     wrapped::W

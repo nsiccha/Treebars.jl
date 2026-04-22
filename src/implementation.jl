@@ -150,9 +150,14 @@ is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
 is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
 duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
 
-# Defaults for non-StateProgress (no pending concept)
+# Defaults for non-StateProgress (no pending concept) and disabled backend.
+# A `nothing` phase is a no-op target, so it's neither pending nor running —
+# with_prepared_phases' cleanup handler skips it.
 is_pending(::Any) = false
 is_pending(::Nothing) = false
+is_running(::Nothing) = false
+is_finished(::Nothing) = false
+is_failed(::Nothing) = false
 
 isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true

@@ -65,6 +65,38 @@ end
 end
 _phases = PhasePipeline(; cache_type=:parallel)
 
+# --- Dynamic phases demo: with_prepared_phases + with_prepared_progress ---
+# Exercises the data-driven phase primitives (BRM's use case pattern): the set
+# of phases is a NamedTuple computed at runtime from the preset, pre-enumerated
+# as pending children via `with_prepared_phases`, then run one by one via
+# `with_prepared_progress`. If any phase throws, `with_prepared_phases`' outer
+# handler fails the remaining still-pending phases before rethrowing.
+_dynamic_chain(preset) = preset == "short" ?
+        (load=0.3, process=0.5, save=0.2) :
+    preset == "long" ?
+        (load=0.4, validate=0.3, preprocess=0.5, train=1.0, evaluate=0.6, postprocess=0.4, save=0.3) :
+        (load=0.3, validate=0.2, process=0.5, analyze=0.4, save=0.2)   # "medium" default
+
+function dynamic_pipeline(parent, preset; fail_at=nothing)
+    chain = _dynamic_chain(preset)
+    with_prepared_phases(parent, chain) do phases
+        map(chain, phases) do duration, phase
+            with_prepared_progress(phase) do _
+                sleep(duration)
+                phase.impl.description == string(fail_at) && error("simulated failure at $fail_at")
+                duration
+            end
+        end
+    end
+end
+
+@dynamicstruct struct DynamicPhases
+    __status__ = initialize_progress!(:state; description="Dynamic phases")
+    "Dynamic pipeline '$preset' (fail_at=$fail_at)"
+    results(preset, fail_at=nothing) = dynamic_pipeline(__status__, preset; fail_at)
+end
+_dynamic = DynamicPhases(; cache_type=:parallel)
+
 # --- Async computation state (flat) ---
 @dynamicstruct struct AsyncComputations
     __status__ = initialize_progress!(:state; description="Treebars Demo")
@@ -412,6 +444,22 @@ end
         h.article(h.header("Cancelled '$key'"))
     end
 
+    # --- Dynamic phases demo (with_prepared_phases + with_prepared_progress) ---
+    @get dynamic_demo(preset; force::Bool=false, fail_at::Symbol=Symbol("")) = begin
+        fail_arg = fail_at == Symbol("") ? nothing : fail_at
+        polling_fetchindex(_dynamic.results, preset, fail_arg;
+            poll_url=query_url("/dynamic_demo/$preset"; fail_at),
+            label="Dynamic '$preset'" * (fail_arg === nothing ? "" : " (fail at :$fail_arg)"),
+            force,
+        ) do rv
+            h.article(
+                h.header("Dynamic '$preset' — total $(round(sum(rv); digits=2))s"),
+                h.p("Per-phase durations: ", h.code(repr(rv))),
+                h.button("Rerun"; hx_get=query_url("/dynamic_demo/$preset"; force=true, fail_at), hx_target="closest article", hx_swap="outerHTML"),
+            )
+        end
+    end
+
     # --- Pill demos: various nesting patterns ---
     @get pill_demo = begin
         h.div(
@@ -480,6 +528,31 @@ end
             ),
         ),
         h.div(; id="macro-result"),
+
+        h.hr(),
+        h.h3("0b. Dynamic phases (with_prepared_phases + with_prepared_progress)"),
+        h.p("Same pending-children UX, but the set of phases is computed at runtime from the preset. ",
+            "Uses ", h.code("with_prepared_phases(parent, chain) do phases; map(chain, phases) do spec, phase; with_prepared_progress(phase) do _; compute(spec); end; end; end"),
+            " — the pattern BRM's ", h.code("compute_steps"), " uses. Pick a preset; toggle fail-at to watch the outer handler fail any still-pending phases instead of leaving them orphaned.";
+            style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.div(
+            h.fieldset(; role="group")(
+                h.select(; id="dyn-preset")(
+                    h.option("short"; value="short"),
+                    h.option("medium"; value="medium", selected=""),
+                    h.option("long"; value="long"),
+                ),
+                h.select(; id="dyn-fail")(
+                    h.option("no failure"; value=""),
+                    h.option("fail at :train"; value="train"),
+                    h.option("fail at :analyze"; value="analyze"),
+                    h.option("fail at :process"; value="process"),
+                ),
+                h.button("Run dynamic"; hx_get="/dynamic_demo/medium", hx_target="#dynamic-result", hx_swap="innerHTML",
+                    _="on click set my @hx-get to '/dynamic_demo/' + #dyn-preset.value + '?fail_at=' + #dyn-fail.value"),
+            ),
+        ),
+        h.div(; id="dynamic-result"),
 
         h.hr(),
         h.h3("1. HTTP Polling"),
