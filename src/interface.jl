@@ -79,6 +79,25 @@ update_progress!(p, args...; kwargs...) = @error "No implementation loaded for u
 fail_progress!(p, args...; kwargs...) = @debug "No implementation loaded for fail_progress!($(typeof(p)), args...; kwargs...)"
 finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for finalize_progress!($(typeof(p)), args...; kwargs...)"
 
+# prepare_progress! / start_progress! no-ops for disabled + non-pending backends
+"""
+    prepare_progress!(parent, args...; kwargs...)
+
+Create a child progress node in the **pending** state — appears in the tree but
+not yet started. Call [`start_progress!`](@ref) to transition it to running.
+Used by `@progress begin … end` to pre-enumerate phase markers.
+"""
+prepare_progress!(::Nothing, args...; kwargs...) = nothing
+
+"""
+    start_progress!(node)
+
+Transition a pending progress node to running. Idempotent; no-op for backends
+without a pending concept.
+"""
+start_progress!(::Nothing) = nothing
+start_progress!(::Any) = nothing
+
 # htmx_render fallback
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 

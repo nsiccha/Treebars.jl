@@ -2,10 +2,11 @@ module HTMXObjectsExt
 import HTMXObjects
 import HTMXObjects: h, Node, fetchindex
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, ws_progress, polling_fetchindex,
-    ProgressNode, StateProgress, root, is_running, is_finished, is_failed, duration, short_duration
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, duration, short_duration
 
 # Duration suffix for a node's label
 function _duration_suffix(sp::StateProgress)
+    is_pending(sp) && return " — pending"
     d = short_duration(duration(sp))
     if is_running(sp)
         " — $(d) so far"
@@ -35,6 +36,11 @@ htmx_treebar_styles() = h.style("""
 .treebar-pill-failed {
     background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 35%, transparent);
 }
+.treebar-pill-pending {
+    background: color-mix(in srgb, var(--pico-muted-color, #ccc) 25%, transparent);
+}
+.treebar-pending { opacity: 0.55; }
+.treebar-pending .treebar-progress { opacity: 0.5; }
 .treebar-pill-expanded {
     border-color: currentColor;
 }
@@ -53,9 +59,11 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, kwargs.
     children_node = isempty(node.children) ? "" : htmx_render_children(node)
     lock(sp.lock) do
         suffix = _duration_suffix(sp)
+        pending = is_pending(sp)
+        node_class = pending ? "treebar-node treebar-pending" : "treebar-node"
         if !isnothing(sp.N)
-            # Progress bar with counter
-            h.div(class="treebar-node")(
+            # Progress bar with counter (pending → value=0, max=N, dim)
+            h.div(class=node_class)(
                 h.div(class="treebar-header")(
                     h.span(class="treebar-description")("$(sp.description):"),
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
@@ -74,13 +82,13 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, kwargs.
         else
             if article
                 # Nested container node
-                h.article(class="treebar-node")(
+                h.article(class=node_class)(
                     !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, suffix) : "",
                     children_node,
                 )
             else
                 # Nested container node
-                h.div(class="treebar-node")(
+                h.div(class=node_class)(
                     !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, suffix) : "",
                     children_node,
                 )
@@ -112,9 +120,15 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
     children = collect(node.children)
     n_finished = count(c -> is_finished(c), children)
     n_failed = count(c -> is_failed(c), children)
+    n_pending = count(c -> is_pending(c), children)
 
-    # Toggle pills for finished/failed groups
+    # Toggle pills for pending/finished/failed groups
     pills = Node[]
+    if n_pending > 0
+        push!(pills, h.span(class="treebar-pill treebar-pill-pending treebar-pill-expanded",
+            onclick="this.classList.toggle('treebar-pill-expanded'); this.closest('.treebar-children').querySelectorAll('.treebar-child-pending').forEach(function(el){el.hidden=!el.hidden})")(
+            "$(n_pending) pending"))
+    end
     if n_finished > 0
         push!(pills, h.span(class="treebar-pill treebar-pill-finished",
             onclick="this.classList.toggle('treebar-pill-expanded'); this.closest('.treebar-children').querySelectorAll('.treebar-child-finished').forEach(function(el){el.hidden=!el.hidden})")(
@@ -127,7 +141,9 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
     end
 
     rendered = map(children) do child
-        if is_running(child)
+        if is_pending(child)
+            h.div(class="treebar-child-pending")(htmx_render(child))
+        elseif is_running(child)
             htmx_render(child)
         elseif is_finished(child)
             h.div(class="treebar-child-finished", hidden="")(htmx_render(child))

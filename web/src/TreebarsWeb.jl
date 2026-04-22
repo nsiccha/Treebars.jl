@@ -29,6 +29,42 @@ function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
 end
 
 
+# --- @progress macro demo: phase markers + labeled for loops + pending state ---
+# Exercises the new @progress syntax. `__status__` is the computation's ProgressNode.
+# Each `@progress "label"` inside the `begin` block is a phase marker: statements
+# between markers belong to the previous phase. All phases are pre-enumerated
+# as pending children — you see them immediately, and they transition pending → running → done.
+function phase_pipeline(parent; n_steps=40, sleep_per_step=0.05)
+    @progress parent "Pipeline" begin
+        @progress "Load data"
+        sleep(0.5 + rand() * 0.5)
+
+        @progress "Preprocess"
+        for _ in 1:5
+            sleep(sleep_per_step * 2)
+        end
+
+        @progress "Fit"
+        for i in 1:n_steps
+            sleep(sleep_per_step)
+        end
+
+        @progress "Evaluate"
+        sleep(0.4 + rand() * 0.4)
+
+        @progress "Save"
+        sleep(0.3)
+    end
+    :done
+end
+
+@dynamicstruct struct PhasePipeline
+    __status__ = initialize_progress!(:state; description="Pipelines")
+    "Pipeline '$key'"
+    results(key) = phase_pipeline(__status__)
+end
+_phases = PhasePipeline(; cache_type=:parallel)
+
 # --- Async computation state (flat) ---
 @dynamicstruct struct AsyncComputations
     __status__ = initialize_progress!(:state; description="Treebars Demo")
@@ -360,6 +396,22 @@ end
         Threads.@spawn try; _autocleanup.failing[k]; catch; end
         _autocleanup_view("spawned failing '$k' (stays pinned)")
     end
+    # --- @progress macro phase-marker demo ---
+    @get macro_demo(key; force::Bool=false) = polling_fetchindex(_phases.results, key;
+        poll_url=query_url("/macro_demo/$key"), label="Pipeline '$key'",
+        cancel_url=query_url("/macro_demo_cancel/$key"), force,
+    ) do rv
+        h.article(
+            h.header("Pipeline '$key' — $rv"),
+            h.button("Rerun"; hx_get=query_url("/macro_demo/$key"; force=true), hx_target="closest article", hx_swap="outerHTML"),
+        )
+    end
+
+    @get macro_demo_cancel(key) = begin
+        cancel!(_phases.results, key)
+        h.article(h.header("Cancelled '$key'"))
+    end
+
     # --- Pill demos: various nesting patterns ---
     @get pill_demo = begin
         h.div(
@@ -413,6 +465,21 @@ end
     @get index = h.div(
         h.h1("Treebars Web Demo"),
         h.p(h.a(href="/tests")("Tests"), " | ", h.a(href="/pill_demo")("Pill demos"), " | ", h.a(href="/autocleanup_demo")("Auto-cleanup demo"), " | HTTP polling, WebSockets, and inline child substatus."),
+
+        h.hr(),
+        h.h3("0. @progress phase markers + pending state (new)"),
+        h.p("Demonstrates the new ", h.code("@progress \"label\" begin … end"), " form with phase markers. ",
+            "All phases (Load / Preprocess / Fit / Evaluate / Save) are pre-enumerated as ",
+            h.em("pending"), " children — they appear greyed-out from the outset and transition pending → running → done as execution reaches each marker.";
+            style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.div(
+            h.fieldset(; role="group")(
+                h.input(; type="text", id="macro-key", value="macro-demo", placeholder="Key"),
+                h.button("Run pipeline"; hx_get="/macro_demo/macro-demo", hx_target="#macro-result", hx_swap="innerHTML",
+                    _="on click set my @hx-get to '/macro_demo/' + #macro-key.value"),
+            ),
+        ),
+        h.div(; id="macro-result"),
 
         h.hr(),
         h.h3("1. HTTP Polling"),

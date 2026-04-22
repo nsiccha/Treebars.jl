@@ -1,6 +1,6 @@
 module Treebars
 
-using Dates: DateTime, now, canonicalize, CompoundPeriod
+using Dates: DateTime, Millisecond, now, canonicalize, CompoundPeriod
 using OrderedCollections: OrderedSet, OrderedDict
 
 export @progress, with_progress,
@@ -8,7 +8,8 @@ export @progress, with_progress,
     add_child!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, ws_progress, htmx_ws_render,
     polling_fetchindex,
-    is_running, is_finished, is_failed, duration, short_duration,
+    is_pending, is_running, is_finished, is_failed, duration, short_duration,
+    prepare_progress!, start_progress!,
     round2, short_string, Fraction
 
 BACKEND = Ref{Any}(nothing)

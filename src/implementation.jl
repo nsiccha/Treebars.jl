@@ -38,6 +38,26 @@ function initialize_progress!(node::ProgressNode, args...; transient=false, prop
     )
 end
 
+"""
+    prepare_progress!(parent, args...; kwargs...)
+
+Create a child progress node in the **pending** state — visible in the tree but
+not yet started. Call [`start_progress!`](@ref) to transition it to running.
+
+Used by the `@progress begin … end` macro to pre-enumerate phase markers so
+the whole pipeline is visible from the outset.
+"""
+prepare_progress!(node::ProgressNode, args...; kwargs...) =
+    initialize_progress!(node, args...; pending=true, kwargs...)
+
+"""
+    start_progress!(node)
+
+Transition a pending progress node to running. Idempotent — no-op if the node
+has already started or finished.
+"""
+start_progress!(node::ProgressNode) = (start_progress!(node.impl); node)
+
 # Update: forward to impl, then handle kwargs as labeled sub-nodes
 update_progress!(node::ProgressNode; kwargs...) = update_progress!(node, IncrementBy(1); kwargs...)
 function update_progress!(node::ProgressNode, i; kwargs...)
@@ -107,22 +127,32 @@ mutable struct StateProgress
     labels::Dict{Symbol,Any}
     running::Bool
     failed::Bool
-    started_at::DateTime
+    started_at::Union{DateTime,Nothing}  # nothing = pending (not yet started)
     finalized_at::Union{DateTime,Nothing}
-    StateProgress(; description="Running...", N=nothing) = new(
-        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(), true, false, now(), nothing
+    StateProgress(; description="Running...", N=nothing, pending=false) = new(
+        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(),
+        !pending, false, pending ? nothing : now(), nothing
     )
 end
 
-is_running(s::StateProgress) = isnothing(s.finalized_at)
+is_pending(s::StateProgress) = isnothing(s.started_at)
+is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized_at)
 is_finished(s::StateProgress) = !isnothing(s.finalized_at) && !s.failed
 is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
-duration(s::StateProgress) = something(s.finalized_at, now()) - s.started_at
+function duration(s::StateProgress)
+    isnothing(s.started_at) && return Millisecond(0)
+    something(s.finalized_at, now()) - s.started_at
+end
 
+is_pending(node::ProgressNode{<:StateProgress}) = is_pending(node.impl)
 is_running(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
 is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
 duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
+
+# Defaults for non-StateProgress (no pending concept)
+is_pending(::Any) = false
+is_pending(::Nothing) = false
 
 isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true
@@ -130,15 +160,25 @@ isrunning(node::ProgressNode) = true
 initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
     StateProgress(; kwargs...), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
-function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
-    child = StateProgress(; description, N)
+function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, kwargs...)
+    child = StateProgress(; description, N, pending)
     child.message = value
     child
 end
-function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
-    child = StateProgress(; description)
+function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, kwargs...)
+    child = StateProgress(; description, pending)
     child.message = value
     child
+end
+
+# Transition a pending node to running. Idempotent — no-op if already started.
+function start_progress!(sp::StateProgress)
+    lock(sp.lock) do
+        if isnothing(sp.started_at)
+            sp.started_at = now()
+            sp.running = true
+        end
+    end
 end
 
 function update_progress!(sp::StateProgress, i::Integer)
@@ -166,13 +206,17 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
     lock(sp.lock) do
         sp.failed = true
         sp.running = false
-        sp.finalized_at = now()
+        t = now()
+        isnothing(sp.started_at) && (sp.started_at = t)
+        sp.finalized_at = t
     end
 end
 function finalize_progress!(sp::StateProgress)
     lock(sp.lock) do
         sp.running = false
-        sp.finalized_at = now()
+        t = now()
+        isnothing(sp.started_at) && (sp.started_at = t)
+        sp.finalized_at = t
     end
 end
 
