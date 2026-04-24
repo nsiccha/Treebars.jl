@@ -375,7 +375,10 @@ function _block_progress_expr(block::Expr, outer_label, ctx)
     end
 end
 
-# Emit: preparation of all pending phase nodes, then sequential phase execution
+# Emit: prepare all pending phase nodes, then run phase bodies inside a single
+# try/catch so assignments flow naturally across phase boundaries (no per-phase
+# `try` scope means no surprise `UndefVarError` for variables set in one phase
+# and used in the next). Mirrors `_run_prepared_phases` for the dynamic form.
 function _emit_phases(phases, ctx)
     labeled = [(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
     pending_syms = [gensym(:phase) for _ in labeled]
@@ -387,24 +390,41 @@ function _emit_phases(phases, ctx)
         for (sym, (lbl, _)) in zip(pending_syms, labeled)
     ]
 
-    phase_blocks = Any[]
-    idx = 0
-    for (lbl, stmts) in phases
-        if lbl === nothing
-            # Pre-first-marker statements: execute directly in outer ctx
-            for s in stmts
-                push!(phase_blocks, progress_expr(s, ctx))
-            end
-        else
-            idx += 1
-            sym = pending_syms[idx]
-            phase_ctx = (progress=sym, transient=ctx.transient)
-            rewritten = Any[progress_expr(s, phase_ctx) for s in stmts]
-            push!(phase_blocks, _phase_sandwich_ast(sym, Expr(:block, rewritten...)))
+    # Pre-first-marker statements run in the outer ctx, before any phase is
+    # started. Keep them outside the try so their assignments remain visible
+    # in the enclosing scope (nothing to fail/clean up for them anyway).
+    # phases always starts with the (nothing, pre-marker stmts) entry (possibly
+    # empty); labeled phases follow. Pre-stmts stay outside the try so their
+    # assignments leak into the enclosing scope as before.
+    pre_stmts = Any[progress_expr(s, ctx) for s in first(phases)[2]]
+    phase_stmts = Any[]
+    for (idx, (lbl, stmts)) in enumerate(labeled)
+        sym = pending_syms[idx]
+        phase_ctx = (progress=sym, transient=ctx.transient)
+        push!(phase_stmts, :( $start_progress!($sym) ))
+        for s in stmts
+            push!(phase_stmts, progress_expr(s, phase_ctx))
         end
+        push!(phase_stmts, :( $finalize_progress!($sym) ))
     end
 
-    Expr(:block, prepare_stmts..., phase_blocks...)
+    if isempty(pending_syms)
+        return Expr(:block, prepare_stmts..., pre_stmts..., phase_stmts...)
+    end
+
+    phases_tuple = Expr(:tuple, pending_syms...)
+    quote
+        $(prepare_stmts...)
+        $(pre_stmts...)
+        try
+            $(phase_stmts...)
+        catch _e
+            for _p in $phases_tuple
+                ($is_pending(_p) || $is_running(_p)) && $fail_progress!(_p, _e)
+            end
+            rethrow()
+        end
+    end
 end
 
 """
