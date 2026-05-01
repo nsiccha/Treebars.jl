@@ -308,26 +308,22 @@ Client-side:
 """
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
-# Stable id for the polling wrapper. Same (ip, keys) tuple → same id across
-# initial render, polls, and the final done/failed response — required so the
-# done-state OOB swap can find the running wrapper to replace.
-_poller_id(ip, keys) = "treebar-poller-" * string(hash((objectid(ip), keys)); base=16)
-
 """
     polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", cancel_url="", kwargs...)
 
-Generic fetchindex + HTMX polling pattern. Returns either a self-polling
-progress wrapper (while the task is running), or — once the task is done or
-failed — a fragment containing both the final article and an
-`hx-swap-oob` element that replaces the (still-polling) wrapper to stop the
-polling loop.
+Generic fetchindex + HTMX polling pattern. Renders the running progress
+inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
+element that carries the polling attributes (`hx-trigger="every Xs"
+hx-target="this" hx-swap="outerHTML"`). On each poll the inner self-swaps;
+once the task is done, the response replaces the inner with non-polling
+content (the rendered result), which naturally stops the loop. The wrapper
+itself is never touched by polling, so UX state on it (`data-show-finished`
+/ `-failed` / `-pending`, set by pill clicks) persists across polls.
 
-While running, the wrapper is a stable element with `hx-target="find
-.treebar-poller-inner" hx-swap="outerHTML" hx-select=".treebar-poller-inner"`,
-so each poll only swaps the inner progress fragment in place. The wrapper
-itself survives across polls, which means UX state (`data-show-finished`,
-`data-show-failed`, `data-show-pending`) set by pill clicks persists across
-polls instead of being reset on every server response.
+Failure path: `throw(rv.result)`. HTMXObjects wraps user errors as a 200
+HTML response for HTMX requests; that response replaces the polling inner
+via the inner's own `hx-target="this" hx-swap="outerHTML"`, so polling
+stops naturally without any custom OOB / HX-Retarget gymnastics.
 
 - `render_result(rv)`: function that renders the final result (supports `do` syntax)
 - `ip`: IndexableProperty (e.g. `app.pathfinder`)
@@ -338,57 +334,57 @@ polls instead of being reset on every server response.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
   The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
-  After cancel, the task fails with `InterruptException`; next poll shows the failure.
+  After cancel, the task fails with `InterruptException`; next poll throws and
+  HTMXObjects renders the error article.
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
-    pid = _poller_id(ip, keys)
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task && istaskfailed(rv)
-            err_str = try sprint(showerror, rv.result) catch; "$(typeof(rv.result)): $(rv.result)" end
-            final = h.article(h.header("$label — failed"), h.pre(err_str))
-            _polling_done(pid, final)
+            # Restore the original throw-on-failure path. HTMXObjects' route-
+            # error machinery turns this into a 200 HTML response with the
+            # error rendered; the polling inner self-swaps with that content
+            # (no hx-trigger in the error HTML), and polling stops cleanly.
+            throw(rv.result)
         elseif rv isa Task
             stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
             inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
                 h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
-            _polling_running(pid, poll_url, poll_interval, inner_body)
+            _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body))
         else
-            _polling_done(pid, render_result(rv))
+            # Done — already-cached or just-completed. The wrapper here is
+            # vestigial on first-call-done (no polling ever happened) but
+            # harmless; on running-then-done the response replaces the polling
+            # inner so the wrapper persists with its UX state intact.
+            _polling_wrap(_polling_inner_done(render_result(rv)))
         end
     end
 end
 
-# Wrapper that survives across polls. `hx-select=".treebar-poller-inner"` makes
-# each poll's response shrink to the inner div before swap, and `hx-target="find
-# .treebar-poller-inner" hx-swap="outerHTML"` swaps that inner into the live
-# wrapper's child without touching the wrapper itself. Result: data-show-* on
-# the wrapper persists across polls.
-_polling_running(id, poll_url, interval, inner) = h.div(;
-        id,
-        class="treebar-poller",
+# Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
+# pick it up. The wrapper is rendered fresh on every response shape but in
+# practice only the initial response (and any first-call-done) actually puts
+# this wrapper into the DOM — subsequent polls only swap the inner, leaving
+# the original wrapper element (and its possibly-toggled data-show-* attrs)
+# untouched.
+_polling_wrap(inner) = h.div(class="treebar-poller",
         data_show_finished="0",
         data_show_pending="1",
-        data_show_failed="1",
+        data_show_failed="1")(inner)
+
+# The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
+# Polling continues as long as the response keeps emitting an inner with
+# `hx-trigger`; replace the inner with a non-polling fragment (done state, or
+# any error response from HTMXObjects) and the loop ends with no extra
+# wiring needed.
+_polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
         hx_trigger="every $interval",
-        hx_target="find .treebar-poller-inner",
-        hx_swap="outerHTML",
-        hx_select=".treebar-poller-inner",
-    )(
-        h.div(class="treebar-poller-inner")(inner),
-    )
+        hx_target="this",
+        hx_swap="outerHTML")(body)
 
-# Done state: emit both the OOB wrapper-replacement (used when polling is in
-# flight — stops the poll loop by replacing the polling wrapper outright) and a
-# bare copy of the final article (used on first-call-done, when no polling
-# wrapper exists yet to OOB-target). HTMX strips OOB elements from the response
-# before main-swap, so the bare copy is what lands at the user's main target.
-_polling_done(id, final) = [
-    h.div(; id, hx_swap_oob="outerHTML")(final),
-    final,
-]
+_polling_inner_done(body) = h.div(class="treebar-poller-inner")(body)
 
 # Convenience: when called with an IndexableProperty (no render_result), default to identity.
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
