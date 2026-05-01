@@ -374,15 +374,21 @@ _polling_wrap(inner) = h.div(class="treebar-poller",
         data_show_failed="1")(inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
-# Polling continues as long as the response keeps emitting an inner with
-# `hx-trigger`; replace the inner with a non-polling fragment (done state, or
-# any error response from HTMXObjects) and the loop ends with no extra
-# wiring needed.
+# `hx-select` strips the wrapper out of the response on each poll (the server
+# always emits wrapper > inner — initial calls need the wrapper, polls don't —
+# and selecting just the inner keeps the live wrapper untouched, which is what
+# preserves `data-show-*` UX state across polls). The selector also matches
+# HTMXObjects' default error article shape (`article[aria-invalid="true"]`),
+# so a thrown task failure — which HTMXObjects turns into a 200 with that
+# article — still lands inside the wrapper, replaces this polling element
+# (no `hx-trigger` in the error article → polling stops naturally), and is
+# visible to the user. No request-sniffing, no OOB, no JS state hacks needed.
 _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
         hx_trigger="every $interval",
         hx_target="this",
-        hx_swap="outerHTML")(body)
+        hx_swap="outerHTML",
+        hx_select=".treebar-poller-inner, article[aria-invalid='true']")(body)
 
 _polling_inner_done(body) = h.div(class="treebar-poller-inner")(body)
 
