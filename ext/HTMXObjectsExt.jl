@@ -162,10 +162,13 @@ htmx_treebar_script() = h.script("""
 })();
 """)
 
-# Render a StateProgress node as HTML
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, kwargs...)
+# Render a StateProgress node as HTML. `scoped=false` (used internally by
+# polling_fetchindex) suppresses data-show-* attrs on inner .treebar-children,
+# so the .treebar-poller wrapper's descendant CSS rule controls visibility
+# globally without inner direct-child rules fighting it.
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, kwargs...)
     sp = node.impl
-    children_node = isempty(node.children) ? "" : htmx_render_children(node)
+    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped)
     lock(sp.lock) do
         duration_node = _duration_span(sp)
         pending = is_pending(sp)
@@ -207,24 +210,28 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, kwargs.
 end
 
 # Render a full progress tree rooted at node
-function htmx_render(node::ProgressNode; kwargs...)
-    children_html = [htmx_render(child; kwargs...) for child in node.children]
+function htmx_render(node::ProgressNode; scoped=true, kwargs...)
+    children_html = [htmx_render(child; scoped, kwargs...) for child in node.children]
     h.div(class="treebar-root")(children_html...)
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
-# Pill onclick: walk up to the closest UX-state scope (.treebar-poller in the
-# polling case, .treebar-children otherwise) and toggle the data attr there.
-# CSS in htmx_treebar_styles() reads data-show-* off the same scope, so children
-# visibility tracks the toggle without per-element class flipping. Living on
-# .treebar-poller means the toggle survives subsequent polls (the wrapper isn't
-# re-rendered).
-_pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
+# Pill onclick: prefer the .treebar-poller (so polling toggles survive across
+# polls); fall back to the closest .treebar-children for static one-shot
+# renders (no poller in scope). The two-step `closest` (rather than a single
+# comma selector) is intentional — `closest('.treebar-poller, .treebar-children')`
+# returns whichever is the closer ancestor, which is always .treebar-children.
+_pill_onclick(key) = """var s = this.closest('.treebar-poller') || this.closest('.treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
 
-# Render just the children of a ProgressNode (for top-level substatus display)
-htmx_render_children(::Nothing) = h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress})
+# Render just the children of a ProgressNode (for top-level substatus display).
+# When `scoped=true` (default) the wrapper carries data-show-* attrs so pills
+# at this level toggle visibility scoped to this .treebar-children. Inside a
+# .treebar-poller (polling_fetchindex passes `scoped=false`) we suppress
+# those attrs so the wrapper's descendant CSS rule controls visibility
+# without inner direct-child rules fighting it.
+htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; style="color:var(--pico-muted-color)", aria_busy="true")
+function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true)
     sp = node.impl
     if isempty(node.children) && !isempty(sp.message)
         return h.div(
@@ -255,27 +262,35 @@ function htmx_render_children(node::ProgressNode{<:StateProgress})
 
     rendered = map(children) do child
         if is_pending(child)
-            h.div(class="treebar-child-pending")(htmx_render(child))
+            h.div(class="treebar-child-pending")(htmx_render(child; scoped))
         elseif is_running(child)
-            htmx_render(child)
+            htmx_render(child; scoped)
         elseif is_finished(child)
-            h.div(class="treebar-child-finished")(htmx_render(child))
+            h.div(class="treebar-child-finished")(htmx_render(child; scoped))
         else
-            h.div(class="treebar-child-failed")(htmx_render(child))
+            h.div(class="treebar-child-failed")(htmx_render(child; scoped))
         end
     end
 
-    # Default UX state baked into .treebar-children so static (non-polling) renders
-    # also have working pill toggles. Inside a .treebar-poller the wrapper's data
-    # attrs win because they're a closer ancestor (the click handler walks up to
-    # whichever it finds first), and they survive polls.
-    h.div(class="treebar-children",
-        data_show_finished="0",
-        data_show_pending="1",
-        data_show_failed="1")(
-        isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
-        rendered...,
-    )
+    # Static one-shot renders (no .treebar-poller wrapper in scope) need the
+    # data attrs here so pills at this level can toggle visibility against
+    # this scope. Inside a poller we leave them off so only the wrapper's
+    # descendant CSS rule applies — otherwise the inner direct-child rule
+    # would keep hiding finished children even after the wrapper toggle flips.
+    if scoped
+        h.div(class="treebar-children",
+            data_show_finished="0",
+            data_show_pending="1",
+            data_show_failed="1")(
+            isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
+            rendered...,
+        )
+    else
+        h.div(class="treebar-children")(
+            isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
+            rendered...,
+        )
+    end
 end
 
 """
@@ -336,8 +351,8 @@ function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing,
         elseif rv isa Task
             stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-            inner_body = isnothing(label) ? htmx_render(status; article=true) :
-                h.article(h.header("$label — running...", stop_btn), htmx_render(status))
+            inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
+                h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
             _polling_running(pid, poll_url, poll_interval, inner_body)
         else
             _polling_done(pid, render_result(rv))
