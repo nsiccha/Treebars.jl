@@ -101,27 +101,45 @@ htmx_treebar_styles() = h.style("""
 # counter advances smoothly between server polls instead of stuttering.
 htmx_treebar_script() = h.script("""
 (function(){
+    // Band-based formatter: only the most relevant unit (plus one finer for
+    // precision) is shown in any band, and each band's smallest displayed
+    // unit is an integer step. So the rendered string changes at most once
+    // per integer step of the smallest unit (per-100ms below 1s, per-second
+    // up to 1h, per-minute up to 1d, per-hour beyond) and length stays
+    // stable within a band.
     function fmt(ms){
         if (ms < 0) ms = 0;
-        if (ms < 1000) return ms >= 100 ? (ms/1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
-        var s = Math.floor(ms/1000);
-        if (s < 60) return s + 's';
-        var m = Math.floor(s/60); s = s % 60;
-        if (m < 60) return m + 'm ' + s + 's';
-        var h = Math.floor(m/60); m = m % 60;
-        if (h < 24) return h + 'h ' + m + 'm';
-        var d = Math.floor(h/24); h = h % 24;
+        if (ms < 1000)        return (Math.floor(ms / 100) * 100) + 'ms';
+        if (ms < 60_000)      return Math.floor(ms / 1000) + 's';
+        if (ms < 3_600_000){
+            var m = Math.floor(ms / 60_000);
+            var s = Math.floor(ms / 1000) % 60;
+            return m + 'm ' + s + 's';
+        }
+        if (ms < 86_400_000){
+            var h = Math.floor(ms / 3_600_000);
+            var m = Math.floor(ms / 60_000) % 60;
+            return h + 'h ' + m + 'm';
+        }
+        var d = Math.floor(ms / 86_400_000);
+        var h = Math.floor(ms / 3_600_000) % 24;
         return d + 'd ' + h + 'h';
     }
     function anchor(el){
         var ms = parseInt(el.dataset.elapsedMs, 10);
         if (isNaN(ms)) ms = 0;
         el._tbAnchor = Date.now() - ms;
+        el._tbLast = undefined;
     }
     function tick(el){
         if (el.dataset.treebarStatus !== 'running') return;
         if (el._tbAnchor === undefined) anchor(el);
-        el.textContent = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
+        var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
+        // Only touch the DOM when the rendered string actually changes —
+        // sub-second formatting steps in 100ms increments, second-and-up
+        // formatting only changes once per integer step, so most ticks at
+        // 100ms cadence are no-ops.
+        if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
     function reanchorAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
@@ -129,16 +147,17 @@ htmx_treebar_script() = h.script("""
     function tickAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
     }
-    document.addEventListener('htmx:afterSwap', reanchorAll);
-    document.addEventListener('htmx:oobAfterSwap', reanchorAll);
-    document.addEventListener('DOMContentLoaded', function(){
-        reanchorAll();
-        setInterval(tickAll, 250);
-    });
-    // Cover the case where the script loads after DOMContentLoaded (e.g. HTMX-injected pages).
-    if (document.readyState !== 'loading'){
-        reanchorAll();
-        if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 250); }
+    function reanchorAndTick(){ reanchorAll(); tickAll(); }
+    document.addEventListener('htmx:afterSwap', reanchorAndTick);
+    document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
+    function start(){
+        reanchorAndTick();
+        if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 100); }
+    }
+    if (document.readyState === 'loading'){
+        document.addEventListener('DOMContentLoaded', start);
+    } else {
+        start();
     }
 })();
 """)
