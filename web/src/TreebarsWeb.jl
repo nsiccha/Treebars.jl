@@ -61,6 +61,7 @@ const APPDATA = AppData()
             h.title("Treebars Demo"),
             h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"),
             htmx_treebar_styles(),
+            htmx_treebar_script(),
         ),
     )
 
