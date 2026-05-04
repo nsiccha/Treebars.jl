@@ -101,6 +101,32 @@ start_progress!(::Any) = nothing
 # htmx_render fallback
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
+# Specific guard: a `nothing` status reaches `htmx_render` whenever
+# `polling_fetchindex` runs against an IP whose enclosing AppData (or
+# wherever the IP lives) didn't initialise `__status__`. The fallback
+# above would say "No implementation loaded for htmx_render(Nothing;
+# kwargs...)" — accurate but unhelpful. This message points at the
+# root cause directly.
+htmx_render(::Nothing; kwargs...) = error("""
+htmx_render(::Nothing) — `__status__` resolved to `nothing` on the IP
+that `polling_fetchindex` is rendering.
+
+The progress tree was never initialized. Add to your AppData @dynamicstruct:
+
+    using Treebars: initialize_progress!
+
+    @dynamicstruct struct AppData
+        __status__ = initialize_progress!(:state; description="<your app>")
+        # … your IPs and other state
+    end
+
+`:state` selects the StateProgress backend (text-tree, suitable for
+HTMX rendering). The `description` is the root label shown above the
+per-phase nodes.
+
+See HTMXObjects KB "AppData must initialize __status__" for context.
+""")
+
 # htmx_render_children — implemented in HTMXObjectsExt
 function htmx_render_children end
 
