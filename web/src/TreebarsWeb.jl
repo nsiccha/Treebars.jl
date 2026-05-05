@@ -85,7 +85,7 @@ const APPDATA = AppData()
         h.h3("0. @progress phase markers + pending state"),
         h.p("All phases (Load / Preprocess / Fit / Evaluate / Save) are pre-enumerated as ",
             h.em("pending"), " children — they appear greyed-out from the outset and transition pending → running → done as execution reaches each marker.";
-            style="font-size:0.9em;color:var(--pico-muted-color)"),
+            class="tb-hint"),
         h.div(
             h.fieldset(; role="group")(
                 h.input(; type="text", id="macro-key", value="macro-demo", placeholder="Key"),
@@ -100,7 +100,7 @@ const APPDATA = AppData()
         h.h3("0b. Dynamic phases (with_prepared_phases + with_prepared_progress)"),
         h.p("Runtime-computed NamedTuple chain using the data-driven phase primitives. ",
             "Toggle fail-at to watch the outer handler fail any still-pending phases instead of orphaning them.";
-            style="font-size:0.9em;color:var(--pico-muted-color)"),
+            class="tb-hint"),
         h.div(
             h.fieldset(; role="group")(
                 h.select(; id="dyn-preset")(
@@ -123,7 +123,7 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("1. HTTP polling"),
-        h.p("Client polls every 200ms via hx-get + hx-trigger."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.p("Client polls every 200ms via hx-get + hx-trigger."; class="tb-hint"),
         h.div(
             h.fieldset(; role="group")(
                 h.input(; type="text", id="poll-key", value="poll-demo", placeholder="Key"),
@@ -136,7 +136,7 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("2. WebSocket (server push)"),
-        h.p("Server pushes HTML updates over a persistent connection."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.p("Server pushes HTML updates over a persistent connection."; class="tb-hint"),
         h.div(; hx_ext="ws", ws_connect="/websockets/ws")(
             h.form(; ws_send="true")(
                 h.fieldset(; role="group")(
@@ -149,7 +149,7 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("3. Inline child substatus"),
-        h.p("Inline Sub struct gets its own ProgressNode under the parent's status. No manual __substatus__ needed."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.p("Inline Sub struct gets its own ProgressNode under the parent's status. No manual __substatus__ needed."; class="tb-hint"),
         h.div(
             h.fieldset(; role="group")(
                 h.input(; type="text", id="nested-key", value="nested-demo", placeholder="Key"),
@@ -162,8 +162,8 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("4. Docstring descriptions"),
-        h.p("Left: auto description (\"results[key]\"). Right: docstring description (\"Sampling chain\")."; style="font-size:0.9em;color:var(--pico-muted-color)"),
-        h.div(; style="display:grid;grid-template-columns:1fr 1fr;gap:1rem")(
+        h.p("Left: auto description (\"results[key]\"). Right: docstring description (\"Sampling chain\")."; class="tb-hint"),
+        h.div(; class="tb-grid-2")(
             h.div(
                 h.h5("Without docstring"),
                 h.fieldset(; role="group")(
@@ -185,13 +185,13 @@ const APPDATA = AppData()
                 h.div(; id="doc-cmp-right"),
             ),
         ),
-        h.p("Interpolated: auto shows \"parameterized[100,0.02]\", docstring shows \"Sampling 100 steps at 0.02s intervals\"."; style="font-size:0.9em;color:var(--pico-muted-color);margin-top:0.5rem"),
-        h.div(; style="display:grid;grid-template-columns:1fr 1fr;gap:1rem")(
+        h.p("Interpolated: auto shows \"parameterized[100,0.02]\", docstring shows \"Sampling 100 steps at 0.02s intervals\"."; class="tb-hint tb-mt-half"),
+        h.div(; class="tb-grid-2")(
             h.div(
                 h.h5("Without docstring"),
                 h.fieldset(; role="group")(
-                    h.input(; type="number", id="doc-steps-l", value="100", placeholder="Steps", style="max-width:6rem"),
-                    h.input(; type="number", id="doc-sleep-l", value="20", placeholder="ms", style="max-width:6rem"),
+                    h.input(; type="number", id="doc-steps-l", value="100", placeholder="Steps", class="tb-input-narrow"),
+                    h.input(; type="number", id="doc-sleep-l", value="20", placeholder="ms", class="tb-input-narrow"),
                     h.button("Run"; hx_get="/async/param/100/20",
                         hx_target="#doc-param-left", hx_swap="innerHTML",
                         _="on click set my @hx-get to '/async/param/' + #doc-steps-l.value + '/' + #doc-sleep-l.value"),
@@ -201,8 +201,8 @@ const APPDATA = AppData()
             h.div(
                 h.h5("With docstring"),
                 h.fieldset(; role="group")(
-                    h.input(; type="number", id="doc-steps-r", value="100", placeholder="Steps", style="max-width:6rem"),
-                    h.input(; type="number", id="doc-sleep-r", value="20", placeholder="ms", style="max-width:6rem"),
+                    h.input(; type="number", id="doc-steps-r", value="100", placeholder="Steps", class="tb-input-narrow"),
+                    h.input(; type="number", id="doc-sleep-r", value="20", placeholder="ms", class="tb-input-narrow"),
                     h.button("Run"; hx_get="/dsdemo/param/100/20",
                         hx_target="#doc-param-right", hx_swap="innerHTML",
                         _="on click set my @hx-get to '/dsdemo/param/' + #doc-steps-r.value + '/' + #doc-sleep-r.value"),
@@ -213,12 +213,12 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("5. WebSocket with kwargs"),
-        h.p("Kwargs from query string."; style="font-size:0.9em;color:var(--pico-muted-color)"),
+        h.p("Kwargs from query string."; class="tb-hint"),
         h.form(; _="on submit halt the event then set key to #param-key.value then set steps to #param-steps.value then set spd to #param-speed.value then set url to '/websockets/run?key=' + key + '&n_steps=' + steps + '&speed=' + spd then set #param-ws-container @ws-connect to url then js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
             h.fieldset(; role="group")(
                 h.input(; type="text", id="param-key", value="param-demo", placeholder="Key"),
-                h.input(; type="number", id="param-steps", value="100", placeholder="Steps", style="max-width:6rem"),
-                h.input(; type="number", id="param-speed", value="20", placeholder="Speed (ms)", style="max-width:7rem"),
+                h.input(; type="number", id="param-steps", value="100", placeholder="Steps", class="tb-input-narrow"),
+                h.input(; type="number", id="param-speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
                 h.button("Run"; type="submit"),
             ),
         ),
