@@ -97,20 +97,20 @@
     @get index = h.div(
         h.h3("Pill Demos"),
         h.p("Various tree structures demonstrating pill filtering at different nesting levels.";
-            class="tb-hint"),
+            class="u-text-sm u-text-muted"),
 
         h.h4("1. Flat — mixed child states"), flat,
         h.hr(),
 
         h.h4("2. Nested — structural parents with substatus children"),
         h.p("Bruno pattern: always-running parents with finished/failed/running grandchildren.";
-            class="tb-hint-sm"),
+            class="u-text-sm u-text-muted"),
         nested,
         h.hr(),
 
         h.h4("3. Deep — three-level tree"),
         h.p("Root → groups → chains → labels. Pills at every level.";
-            class="tb-hint-sm"),
+            class="u-text-sm u-text-muted"),
         deep,
         h.hr(),
 
@@ -122,7 +122,7 @@
 
         h.h4("6. Docstring descriptions — auto vs custom"),
         h.p("Top two: auto (\"results[key1]\", \"parameterized[200,0.02]\"). Bottom two: docstrings (\"Sampling chain\", \"Sampling 200 steps at 0.02s intervals\").";
-            class="tb-hint-sm"),
+            class="u-text-sm u-text-muted"),
         docstrings,
     )
 end

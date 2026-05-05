@@ -95,13 +95,8 @@ htmx_treebar_styles() = h.style("""
 .treebar-children[data-show-pending="1"] > .treebar-pills .treebar-pill-pending { border-color: currentColor; }
 
 /* Demo helpers */
-.tb-hint { font-size: 0.9em; color: var(--pico-muted-color); }
-.tb-hint-sm { font-size: 0.85em; color: var(--pico-muted-color); }
-.tb-muted { color: var(--pico-muted-color); }
-.tb-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
 .tb-input-narrow { max-width: 6rem; }
 .tb-input-narrow-7 { max-width: 7rem; }
-.tb-mt-half { margin-top: 0.5rem; }
 """)
 
 # Client-side duration ticker. Anchors each running .treebar-duration on first
@@ -239,16 +234,16 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller') || this.closest(
 # .treebar-poller (polling_fetchindex passes `scoped=false`) we suppress
 # those attrs so the wrapper's descendant CSS rule controls visibility
 # without inner direct-child rules fighting it.
-htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="tb-muted", aria_busy="true")
+htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
 function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true)
     sp = node.impl
     if isempty(node.children) && !isempty(sp.message)
         return h.div(
-            h.span(sp.message; class="tb-muted"),
+            h.span(sp.message; class="u-text-muted"),
             h.span(" "; aria_busy="true"),
         )
     end
-    isempty(node.children) && return h.p("Starting..."; class="tb-muted", aria_busy="true")
+    isempty(node.children) && return h.p("Starting..."; class="u-text-muted", aria_busy="true")
 
     children = collect(node.children)
     n_finished = count(c -> is_finished(c), children)
