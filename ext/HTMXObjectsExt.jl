@@ -7,9 +7,6 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
 import Dates
 using Dates: Millisecond
 
-_is_task(::Task) = true
-_is_task(_) = false
-
 # Map a StateProgress's lifecycle into a single status string the client JS can dispatch on.
 function _status_string(sp::StateProgress)
     is_pending(sp) && return "pending"
@@ -354,26 +351,37 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
         force = poll_context.force
     end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if _is_task(rv) && istaskfailed(rv)
-            # Restore the original throw-on-failure path. HTMXObjects' route-
-            # error machinery turns this into a 200 HTML response with the
-            # error rendered; the polling inner self-swaps with that content
-            # (no hx-trigger in the error HTML), and polling stops cleanly.
-            throw(rv.result)
-        elseif _is_task(rv)
-            stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
-                hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-            inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
-                h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
-            _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body))
-        else
-            # Done — already-cached or just-completed. The wrapper here is
-            # vestigial on first-call-done (no polling ever happened) but
-            # harmless; on running-then-done the response replaces the polling
-            # inner so the wrapper persists with its UX state intact.
-            _polling_wrap(_polling_inner_done(render_result(rv)))
-        end
+        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result)
     end
+end
+
+# Two-method dispatch on the IP's resolved value: a `Task` is still
+# running (or just failed); anything else is the final (done) result.
+# Replaces the `if _is_task(rv) … elseif _is_task(rv) … else …` chain
+# in `polling_fetchindex`'s `do rv, status` block — the type test now
+# lives at the method boundary, and the failure-vs-running split inside
+# the Task method is a plain value test (`istaskfailed`).
+_polling_resolve(rv::Task, status; label, poll_url, poll_interval, cancel_url, render_result) =
+    # Restore the original throw-on-failure path. HTMXObjects' route-
+    # error machinery turns this into a 200 HTML response with the
+    # error rendered; the polling inner self-swaps with that content
+    # (no hx-trigger in the error HTML), and polling stops cleanly.
+    istaskfailed(rv) ? throw(rv.result) :
+        _polling_running(status; label, poll_url, poll_interval, cancel_url)
+
+# Done — already-cached or just-completed. The wrapper here is
+# vestigial on first-call-done (no polling ever happened) but
+# harmless; on running-then-done the response replaces the polling
+# inner so the wrapper persists with its UX state intact.
+_polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result) =
+    _polling_wrap(_polling_inner_done(render_result(rv)))
+
+function _polling_running(status; label, poll_url, poll_interval, cancel_url)
+    stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
+        hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
+    inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
+        h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
+    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body))
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
