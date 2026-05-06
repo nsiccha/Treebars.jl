@@ -160,7 +160,9 @@ struct IterableProgress{P,W}
     progress::P
     wrapped::W
 end
-_has_length(it) = Base.IteratorSize(typeof(it)) isa Union{Base.HasLength, Base.HasShape}
+_iter_has_length(::Union{Base.HasLength, Base.HasShape}) = true
+_iter_has_length(_) = false
+_has_length(it) = _iter_has_length(Base.IteratorSize(typeof(it)))
 function initialize_iterable_progress!(progress, it; kwargs...)
     IterableProgress(
         _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
@@ -209,11 +211,14 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 _is_progress_macrocall(x) =
     Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@progress")
 
+_is_string(::AbstractString) = true
+_is_string(_) = false
+
 # Phase marker = @progress "label" with exactly one user arg that's a String
 function _is_phase_marker(x)
     _is_progress_macrocall(x) || return false
     # args = [Symbol("@progress"), LineNumberNode, user_args...]
-    length(x.args) == 3 && x.args[3] isa AbstractString
+    length(x.args) == 3 && _is_string(x.args[3])
 end
 _phase_marker_label(x) = x.args[3]
 
@@ -241,13 +246,13 @@ end
 function _parse_toplevel_args(args)
     if length(args) == 1
         a = args[1]
-        a isa AbstractString && error("@progress \"$(a)\": top-level @progress requires a body expression")
+        _is_string(a) && error("@progress \"$(a)\": top-level @progress requires a body expression")
         return (nothing, nothing, a)
     elseif length(args) == 2
         return _split_two_args(args[1], args[2])
     elseif length(args) == 3
         backend, label, body = args
-        label isa AbstractString || error("@progress: three-arg form expects @progress backend \"label\" body")
+        _is_string(label) || error("@progress: three-arg form expects @progress backend \"label\" body")
         return (backend, label, body)
     else
         error("@progress: too many arguments")
@@ -263,7 +268,7 @@ function _rewrite_nested_progress(x::Expr, ctx)
     args = _progress_user_args(x)
     if length(args) == 1
         a = args[1]
-        if a isa AbstractString
+        if _is_string(a)
             # Phase marker in an invalid position (direct-in-block markers are
             # consumed by _block_progress_expr before this walker sees them)
             error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
@@ -271,7 +276,7 @@ function _rewrite_nested_progress(x::Expr, ctx)
         return _build_body(a, nothing, ctx)
     elseif length(args) == 2
         a, body = args
-        a isa AbstractString || error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
+        _is_string(a) || error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
         return _build_body(body, a, ctx)
     else
         error("@progress: too many arguments in nested position")
