@@ -134,11 +134,13 @@ function with_prepared_phases(f, parent, descriptions; kwargs...)
     _run_prepared_phases(f, phases)
 end
 
+# Per-phase description: use the NT value if it's a string, otherwise stringify the key.
+_phase_desc(v::AbstractString, k) = v
+_phase_desc(_, k) = string(k)
+
 function with_prepared_phases(f, parent, labels::NamedTuple; kwargs...)
     phases = map(keys(labels)) do k
-        v = labels[k]
-        desc = v isa AbstractString ? v : string(k)
-        prepare_progress!(parent; description=desc, kwargs...)
+        prepare_progress!(parent; description=_phase_desc(labels[k], k), kwargs...)
     end
     _run_prepared_phases(f, NamedTuple{keys(labels)}(phases))
 end
@@ -242,8 +244,7 @@ function _parse_toplevel_args(args)
         a isa AbstractString && error("@progress \"$(a)\": top-level @progress requires a body expression")
         return (nothing, nothing, a)
     elseif length(args) == 2
-        a, b = args
-        return a isa AbstractString ? (nothing, a, b) : (a, nothing, b)
+        return _split_two_args(args[1], args[2])
     elseif length(args) == 3
         backend, label, body = args
         label isa AbstractString || error("@progress: three-arg form expects @progress backend \"label\" body")
@@ -252,6 +253,10 @@ function _parse_toplevel_args(args)
         error("@progress: too many arguments")
     end
 end
+
+# Two-arg @progress form: a string is the label; anything else is the backend.
+_split_two_args(a::AbstractString, b) = (nothing, a, b)
+_split_two_args(a, b) = (a, nothing, b)
 
 # Rewrite a nested @progress macrocall (not top-level, so no backend allowed)
 function _rewrite_nested_progress(x::Expr, ctx)
