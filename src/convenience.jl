@@ -211,16 +211,15 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 _is_progress_macrocall(x) =
     Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@progress")
 
-_is_string(::AbstractString) = true
-_is_string(_) = false
-
-# Phase marker = @progress "label" with exactly one user arg that's a String
-function _is_phase_marker(x)
-    _is_progress_macrocall(x) || return false
-    # args = [Symbol("@progress"), LineNumberNode, user_args...]
-    length(x.args) == 3 && _is_string(x.args[3])
-end
-_phase_marker_label(x) = x.args[3]
+# Phase-marker recognition. The structural shape is a `:macrocall` to
+# `@progress` with exactly one user argument; the *kind* of that argument
+# (String label vs anything else) is dispatched here. The thin
+# `_is_string(::AbstractString)` predicate this replaces only ever fed this
+# leaf check, so the type test is pulled to the method boundary.
+_phase_marker_label(::Any) = nothing
+_phase_marker_label(label::AbstractString) = label
+_phase_marker_label(x::Expr) =
+    _is_progress_macrocall(x) && length(x.args) == 3 ? _phase_marker_label(x.args[3]) : nothing
 
 # User-supplied args of a @progress macrocall (strip macro name + LineNumberNode)
 _progress_user_args(x) = x.args[3:end]
@@ -242,46 +241,50 @@ function progress_expr(x::Expr, ctx)
     Expr(x.head, Any[progress_expr(a, ctx) for a in x.args]...)
 end
 
-# Parse top-level @progress args into (backend, label, body)
+# Parse top-level @progress args into (backend, label, body). Length-cased
+# branches dispatch on the position-relevant arg's type instead of running
+# `_is_string`-style guards inside the body.
 function _parse_toplevel_args(args)
-    if length(args) == 1
-        a = args[1]
-        _is_string(a) && error("@progress \"$(a)\": top-level @progress requires a body expression")
-        return (nothing, nothing, a)
-    elseif length(args) == 2
-        return _split_two_args(args[1], args[2])
-    elseif length(args) == 3
-        backend, label, body = args
-        _is_string(label) || error("@progress: three-arg form expects @progress backend \"label\" body")
-        return (backend, label, body)
-    else
-        error("@progress: too many arguments")
-    end
+    length(args) == 1 && return _toplevel_one_arg(args[1])
+    length(args) == 2 && return _split_two_args(args[1], args[2])
+    length(args) == 3 && return _toplevel_three_args(args[1], args[2], args[3])
+    error("@progress: too many arguments")
 end
+
+# Length-1 form: a body expression. A bare string here is a user error.
+_toplevel_one_arg(a) = (nothing, nothing, a)
+_toplevel_one_arg(a::AbstractString) =
+    error("@progress \"$(a)\": top-level @progress requires a body expression")
 
 # Two-arg @progress form: a string is the label; anything else is the backend.
 _split_two_args(a::AbstractString, b) = (nothing, a, b)
 _split_two_args(a, b) = (a, nothing, b)
 
-# Rewrite a nested @progress macrocall (not top-level, so no backend allowed)
+# Length-3 form: backend, label, body — label must be a literal string.
+_toplevel_three_args(backend, label::AbstractString, body) = (backend, label, body)
+_toplevel_three_args(backend, label, body) =
+    error("@progress: three-arg form expects @progress backend \"label\" body")
+
+# Rewrite a nested @progress macrocall (not top-level, so no backend allowed).
+# Each length-cased branch dispatches the type test on its label-position arg.
 function _rewrite_nested_progress(x::Expr, ctx)
     args = _progress_user_args(x)
-    if length(args) == 1
-        a = args[1]
-        if _is_string(a)
-            # Phase marker in an invalid position (direct-in-block markers are
-            # consumed by _block_progress_expr before this walker sees them)
-            error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
-        end
-        return _build_body(a, nothing, ctx)
-    elseif length(args) == 2
-        a, body = args
-        _is_string(a) || error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
-        return _build_body(body, a, ctx)
-    else
-        error("@progress: too many arguments in nested position")
-    end
+    length(args) == 1 && return _nested_one_arg(args[1], ctx)
+    length(args) == 2 && return _nested_two_args(args[1], args[2], ctx)
+    error("@progress: too many arguments in nested position")
 end
+
+# Length-1 nested form: a body expression. A bare string here is a stray
+# phase marker (markers are consumed by _block_progress_expr before reaching
+# this walker).
+_nested_one_arg(a, ctx) = _build_body(a, nothing, ctx)
+_nested_one_arg(a::AbstractString, ctx) =
+    error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
+
+# Length-2 nested form: label, body. Label must be a string.
+_nested_two_args(a::AbstractString, body, ctx) = _build_body(body, a, ctx)
+_nested_two_args(a, body, ctx) =
+    error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
 
 # Dispatch on body shape
 function _build_body(body, label, ctx)
@@ -343,6 +346,17 @@ function _single_stmt_progress_expr(body, label, ctx)
     end
 end
 
+# Per-block-arg fold for the phase splitter. Dispatched on the precomputed
+# `_phase_marker_label(a)` result: `AbstractString` ⇒ open a new phase;
+# `Nothing` ⇒ extend the current phase. Replaces the
+# `if _is_phase_marker(a) ... else ...` branch with method dispatch.
+_absorb_block_arg!(phases, cur_label, cur_stmts, a, label::AbstractString) = begin
+    push!(phases, (cur_label, cur_stmts))
+    (String(label), Any[])
+end
+_absorb_block_arg!(phases, cur_label, cur_stmts, a, ::Nothing) =
+    (push!(cur_stmts, a); (cur_label, cur_stmts))
+
 # Block wrap — split at phase markers, pre-enumerate labeled phases as pending
 function _block_progress_expr(block::Expr, outer_label, ctx)
     # Split block.args into (label, [stmts]) phases at phase-marker statements.
@@ -351,13 +365,7 @@ function _block_progress_expr(block::Expr, outer_label, ctx)
     cur_label::Union{Nothing,String} = nothing
     cur_stmts = Any[]
     for a in block.args
-        if _is_phase_marker(a)
-            push!(phases, (cur_label, cur_stmts))
-            cur_label = String(_phase_marker_label(a))
-            cur_stmts = Any[]
-        else
-            push!(cur_stmts, a)
-        end
+        cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a))
     end
     push!(phases, (cur_label, cur_stmts))
 
