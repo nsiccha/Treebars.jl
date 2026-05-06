@@ -7,20 +7,19 @@ using Dates: Millisecond, Second, Minute, Hour, value
 
 Human-friendly duration string: "4s", "1m 23s", "2h 5m".
 """
+_short_period(p::Hour)   = "$(value(p))h"
+_short_period(p::Minute) = "$(value(p))m"
+_short_period(p::Second) = "$(value(p))s"
+_short_period(p::Millisecond) =
+    let v = value(p); v >= 100 ? "$(div(v, 100) / 10)s" : "$(v)ms" end
+_short_period(p) = string(p)
+
 function short_duration(dt)
     cp = canonicalize(dt)
     parts = cp.periods
     isempty(parts) && return "0s"
     # Map each period to a short label
-    labels = map(parts) do p
-        v = value(p)
-        if p isa Hour;   "$(v)h"
-        elseif p isa Minute; "$(v)m"
-        elseif p isa Second; "$(v)s"
-        elseif p isa Millisecond; v >= 100 ? "$(div(v, 100) / 10)s" : "$(v)ms"
-        else; string(p)
-        end
-    end
+    labels = map(_short_period, parts)
     # Show at most 2 most-significant parts
     join(labels[1:min(2, length(labels))], " ")
 end
