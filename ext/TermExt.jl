@@ -119,9 +119,14 @@ function _update_job!(pjob::ProgressJob, i::Integer)
     _update_job!(pjob, msg)
 end
 _update_job!(pjob::ProgressJob, ::IncrementBy{di}) where {di} = _update_job!(pjob, pjob.i + di)
+# Width contribution of a column when computing remaining space for the message column.
+# ProgressColumns size dynamically, so contribute 0; everything else uses its measured width.
+_col_width(::Term.Progress.ProgressColumn) = 0
+_col_width(c) = c.measure.w
+
 function _update_job!(pjob::ProgressJob, msg::AbstractString)
     pjob.columns[end].msg[] = msg
-    Term.Progress.setwidth!(pjob.columns[end-1], pjob.width - length(pjob.columns) - sum(c -> isa(c, Term.Progress.ProgressColumn) ? 0 : c.measure.w, pjob.columns))
+    Term.Progress.setwidth!(pjob.columns[end-1], pjob.width - length(pjob.columns) - sum(_col_width, pjob.columns))
 end
 _update_job!(::ProgressJob, ::Nothing) = nothing
 
