@@ -309,7 +309,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_url, label, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -328,9 +328,12 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
 - `render_result(rv)`: function that renders the final result (supports `do` syntax)
 - `ip`: IndexableProperty (e.g. `app.pathfinder`)
 - `keys...`: cache key(s) (variadic — supports multi-index like `f1, f2`)
-- `poll_url`: URL to poll while running (use `query_url`)
+- `poll_context`: HTMX route struct (`__self__`). When provided, derives `poll_url`
+  via `query_url(poll_context; force=false)` and `force` from `poll_context.force`.
+  Overrides explicit `poll_url` and `force` kwargs.
+- `poll_url`: URL to poll while running (use `query_url`). Ignored when `poll_context` is set.
 - `label`: display label (e.g. "Pathfinder (my-model)")
-- `force`: force re-computation (default `false`)
+- `force`: force re-computation (default `false`). Ignored when `poll_context` is set.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
   The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
@@ -338,7 +341,11 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
   HTMXObjects renders the error article.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_url, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+    if !isnothing(poll_context)
+        poll_url = HTMXObjects.query_url(poll_context; force=false)
+        force = poll_context.force
+    end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task && istaskfailed(rv)
             # Restore the original throw-on-failure path. HTMXObjects' route-
