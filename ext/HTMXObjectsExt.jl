@@ -7,6 +7,9 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
 import Dates
 using Dates: Millisecond
 
+_is_task(::Task) = true
+_is_task(_) = false
+
 # Map a StateProgress's lifecycle into a single status string the client JS can dispatch on.
 function _status_string(sp::StateProgress)
     is_pending(sp) && return "pending"
@@ -351,13 +354,13 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
         force = poll_context.force
     end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if rv isa Task && istaskfailed(rv)
+        if _is_task(rv) && istaskfailed(rv)
             # Restore the original throw-on-failure path. HTMXObjects' route-
             # error machinery turns this into a 200 HTML response with the
             # error rendered; the polling inner self-swaps with that content
             # (no hx-trigger in the error HTML), and polling stops cleanly.
             throw(rv.result)
-        elseif rv isa Task
+        elseif _is_task(rv)
             stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
                 hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
             inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
