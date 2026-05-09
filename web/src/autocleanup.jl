@@ -59,14 +59,25 @@ end
     @get fire(n::Int) = begin
         for _ in 1:n
             k = "k$(rand(1:1_000_000))"
-            Threads.@spawn try; results[k]; catch; end
+            Threads.@spawn try
+                results[k]
+            catch err
+                @error "autocleanup results task failed" key=k exception=(err, catch_backtrace())
+            end
         end
         frame("spawned $n tasks")
     end
 
     @get fire_fail = begin
         k = "boom$(rand(1:1_000_000))"
-        Threads.@spawn try; failing[k]; catch; end
+        Threads.@spawn try
+            failing[k]
+        catch err
+            # `failing` deliberately throws; this task pins the substatus to the tree.
+            # Log at debug so the demo's expected error doesn't spam stderr, but the
+            # path is observable rather than silently swallowed.
+            @debug "autocleanup failing task errored as expected" key=k exception=(err, catch_backtrace())
+        end
         frame("spawned failing '$k' (stays pinned)")
     end
 end

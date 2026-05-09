@@ -36,7 +36,14 @@
                     h.article(h.header("Computing '$key'..."), htmx_render(node))
                 )
             ))
-            try; send(__ws__, send_result(key, task)); catch; break; end
+            try
+                send(__ws__, send_result(key, task))
+            catch err
+                # Client disconnected mid-stream — expected on tab close.
+                # Log and break the loop rather than silently swallowing.
+                @debug "ws send_result failed (client gone?)" key=key exception=(err, catch_backtrace())
+                break
+            end
         end
     end
 
@@ -59,6 +66,11 @@
                 h.p("$(length(rv)) values. Final: $(short_string(rv[end]))"),
             )))
         end
-        try; send(__ws__, html); catch; end
+        try
+            send(__ws__, html)
+        catch err
+            # Client disconnected before final result; nothing to recover.
+            @debug "ws run final send failed (client gone?)" key=key exception=(err, catch_backtrace())
+        end
     end
 end
