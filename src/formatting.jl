@@ -28,12 +28,35 @@ end
 # These are general-purpose; domain-specific `short_string` methods
 # (e.g. for MatrixFactorization) should be defined in the consuming package.
 
+"""
+    round2(x)
+
+Round `x` to two significant digits. Integers are returned unchanged.
+Tuples, named tuples, and arrays are mapped element-wise. `missing` and
+`String` values pass through.
+
+Used as a building block for [`short_string`](@ref); useful directly when
+preparing label values for [`update_progress!`](@ref).
+"""
 round2(x::Real) = round(x; sigdigits=2)
 round2(x::Integer) = round(x)
 round2(x::Union{Tuple,NamedTuple,AbstractArray}) = map(round2, x)
 round2(x::Missing) = x
 round2(x::String) = x
 
+"""
+    short_string(x) -> String
+
+Compact string form for progress display:
+
+- Reals are rounded via [`round2`](@ref), trailing `".0"` trimmed.
+- Integers are abbreviated with `k`/`M`/`G` suffixes (`1_500_000 → "1.5M"`).
+- Vectors of length > 7 are summarized as `[first 3, ..., last 3]`.
+- Pairs render as `"k => v"`; named tuples as `"(;k=v, …)"`.
+- A wrapped [`Fraction`](@ref) renders as a percentage.
+
+Extend with package-specific methods in consuming packages.
+"""
 short_string(x) = string(x)
 function short_string(x::Real)
     rv = string(round2(x))
@@ -65,6 +88,14 @@ function short_string(x::NamedTuple)
     ], ", ") * ")"
 end
 
+"""
+    Fraction(value)
+
+Marker wrapper that makes [`short_string`](@ref) render a number as a
+percentage (`Fraction(0.95) |> short_string == "95%"`). Useful for things
+like acceptance rates in progress labels. Comparison and equality forward to
+the underlying `value`.
+"""
 struct Fraction{T}
     value::T
 end

@@ -98,7 +98,25 @@ without a pending concept.
 start_progress!(::Nothing) = nothing
 start_progress!(::Any) = nothing
 
-# htmx_render fallback
+"""
+    htmx_render(node; article=false, scoped=true, kwargs...)
+
+Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
+lives in the HTMXObjects package extension — loading `HTMXObjects` activates
+it. Without that extension the call raises a descriptive `error`.
+
+Rendering rules (for `ProgressNode{<:StateProgress}`):
+
+- Nodes with a counter (`N !== nothing`) render as `<progress>` bars with
+  `description: i / N` headers.
+- Nodes with a message but no counter render as `key: value` label rows.
+- Container nodes render as nested `<div>` (or `<article>` when
+  `article=true`) with a header and `htmx_render_children` output.
+
+Each node's header includes a `.treebar-duration` span; the
+[`htmx_treebar_script`](@ref) ticker advances running nodes locally between
+polls. `scoped` is forwarded to `htmx_render_children` (see there).
+"""
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
 # Specific guard: a `nothing` status reaches `htmx_render` whenever
@@ -128,16 +146,78 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
 """)
 
 # htmx_render_children — implemented in HTMXObjectsExt
+"""
+    htmx_render_children(node; scoped=true)
+
+Render the children of a `ProgressNode` as an HTML fragment, classifying them
+into pending / running / finished / failed groups and emitting toggle pills
+(`"N pending"`, `"N finished"`, `"N failed"`) at the top. Implementation lives
+in the HTMXObjects package extension — loading `HTMXObjects` activates it.
+
+`scoped=true` (the default) emits `data-show-*` attributes on the wrapper so
+the pills toggle visibility scoped to this children container. Inside a
+`.treebar-poller` (as set up by [`polling_fetchindex`](@ref)), pass
+`scoped=false` so the wrapper's descendant CSS rules win.
+
+Use [`htmx_render`](@ref) for full-node rendering (it calls
+`htmx_render_children` internally for every level of the tree).
+"""
 function htmx_render_children end
 
 # htmx_treebar_styles — returns a <style> Node with all treebar CSS classes
+"""
+    htmx_treebar_styles()
+
+Return a `<style>` HTMX node with the CSS for every treebar class
+(`treebar-node`, `treebar-pill-*`, `treebar-children`, `treebar-poller`, …).
+Implementation lives in the HTMXObjects package extension.
+
+Include it in your app's `<head>` via the `extra_head` kwarg of `htmx(…)`:
+
+```julia
+htmx(...; extra_head=(htmx_treebar_styles(), htmx_treebar_script(), ...))
+```
+
+Pairs with [`htmx_treebar_script`](@ref), which provides the client-side
+duration ticker.
+"""
 function htmx_treebar_styles end
 
 # htmx_treebar_script — returns a <script> Node with the client-side duration ticker
+"""
+    htmx_treebar_script()
+
+Return a `<script>` HTMX node with the client-side duration ticker. Running
+`.treebar-duration` spans advance their displayed elapsed time every 100ms
+locally instead of stuttering between server polls; finished/failed nodes
+keep the server-rendered text. Implementation lives in the HTMXObjects
+package extension.
+
+Include it alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
+"""
 function htmx_treebar_script end
 
 # ws_progress fallback
+"""
+    ws_progress(ws, node; interval=0.1, render=repr)
+
+Push live progress updates over a WebSocket until `node` finalises.
+Implementation lives in the HTTP package extension — load `HTTP` to activate
+it.
+
+`render(node)` is called every `interval` seconds and the resulting string is
+sent over `ws`. The default `render=repr` is text-only; load `HTMXObjects` to
+get [`htmx_ws_render`](@ref), which produces an HTML fragment with a stable
+`id` suitable for HTMX swap-by-id.
+"""
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 
 # htmx_ws_render fallback
+"""
+    htmx_ws_render(node; id="treebar-progress")
+
+Default `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded.
+Wraps [`htmx_render`](@ref) in a `<div id=…>` so the HTMX ws extension swaps
+by element id.
+"""
 htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_render. Load HTMXObjects to enable HTML WebSocket rendering."

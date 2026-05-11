@@ -2,6 +2,20 @@ struct IncrementBy{di}
     IncrementBy(di) = new{di}()
 end
 
+"""
+    ProgressNode{I,M,C}
+
+Tree node of a Treebars progress tree. Wraps a backend-specific `impl`
+(`StateProgress`, Term.jl `ProgressBar` / `ProgressJob`, …) plus metadata,
+a (possibly `nothing`) parent, and a thread-safe set of children.
+
+All progress operations (`update_progress!`, `finalize_progress!`,
+`fail_progress!`, `add_child!`, …) dispatch through `ProgressNode` to the
+backend `impl`, and children are tracked automatically by the constructor.
+Prefer the convenience entry points ([`@progress`](@ref),
+[`with_progress`](@ref), [`with_prepared_phases`](@ref)) over building
+`ProgressNode`s by hand.
+"""
 struct ProgressNode{I,M,C}
     impl::I
     meta::M
@@ -22,6 +36,12 @@ ProgressNode(children::AbstractVector; description="", kwargs...) =
 
 root(node::ProgressNode) = isnothing(node.parent) ? node : root(node.parent)
 
+"""
+    add_child!(parent, child)
+
+Attach `child` as a child of `parent`. No-op when either argument is `nothing`,
+which makes it safe to use with optional/disabled progress trees.
+"""
 add_child!(parent::ProgressNode, child::ProgressNode) = push!(parent.children, child)
 add_child!(::Nothing, ::Any) = nothing
 add_child!(::Any, ::Nothing) = nothing
@@ -118,6 +138,26 @@ end
 
 # StateProgress: a thread-safe progress backend that stores state for inspection.
 # Useful for remote/web progress (HTMXObjects, polling, etc.)
+"""
+    StateProgress
+
+Thread-safe progress backend that stores all lifecycle state in mutable fields
+guarded by a `ReentrantLock`. Used by the `:state` backend (selected via
+`initialize_progress!(:state; …)`) and rendered by the HTMXObjects extension
+(`htmx_render`) and the HTTP extension (`ws_progress`).
+
+Lifecycle fields:
+
+- `started_at` — `nothing` while the node is **pending** (created by
+  [`prepare_progress!`](@ref)), set to `now()` by [`start_progress!`](@ref)
+  or by the eager constructors.
+- `finalized_at` — `nothing` while the node is running, set to `now()` by
+  [`finalize_progress!`](@ref) or [`fail_progress!`](@ref).
+- `failed` — `true` after [`fail_progress!`](@ref).
+
+Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
+[`is_finished`](@ref), [`is_failed`](@ref), [`duration`](@ref).
+"""
 mutable struct StateProgress
     lock::ReentrantLock
     description::String
@@ -135,10 +175,47 @@ mutable struct StateProgress
     )
 end
 
+"""
+    is_pending(s)
+
+`true` when a progress node has been created (via [`prepare_progress!`](@ref))
+but not yet started. Defined on `StateProgress` and on
+`ProgressNode{<:StateProgress}`; `false` for backends without a pending concept
+and for `nothing`.
+"""
 is_pending(s::StateProgress) = isnothing(s.started_at)
+
+"""
+    is_running(s)
+
+`true` when a progress node has been started (via [`start_progress!`](@ref) or
+an eager `initialize_progress!`) and not yet finalized or failed.
+"""
 is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized_at)
+
+"""
+    is_finished(s)
+
+`true` when a progress node has been finalized successfully (via
+[`finalize_progress!`](@ref)).
+"""
 is_finished(s::StateProgress) = !isnothing(s.finalized_at) && !s.failed
+
+"""
+    is_failed(s)
+
+`true` when a progress node has been finalized as a failure (via
+[`fail_progress!`](@ref)).
+"""
 is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
+
+"""
+    duration(s)
+
+Elapsed wall-clock time for a progress node as a `Dates.Period`. Returns
+`Millisecond(0)` for pending nodes; for running nodes counts up to `now()`;
+for finalized/failed nodes returns the frozen `finalized_at - started_at`.
+"""
 function duration(s::StateProgress)
     isnothing(s.started_at) && return Millisecond(0)
     something(s.finalized_at, now()) - s.started_at
