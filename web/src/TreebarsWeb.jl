@@ -108,9 +108,10 @@ const APPDATA = AppData()
 @htmx struct AppRoutes
     __appdata__ = APPDATA
 
-    __page__(content) = htmx(
-        h.main(class="container")(content);
-        pico_version = "2",
+    # Adopts the proposed `HTMXObjects.pico_page` helper (see
+    # proposals/by-app/dynamicobjects/pico-page-helper.md). Treebars is a consumer
+    # because its only customization is `extra_head`, which the helper supports.
+    __page__(content) = HTMXObjects.pico_page(content;
         extra_head = (
             h.title("Treebars Demo"),
             h.script(; src="https://unpkg.com/htmx-ext-ws@2.0.2/ws.js"),
