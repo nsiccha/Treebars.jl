@@ -18,12 +18,9 @@ end
         poll_url = query_url(__self__/"compute/$key"),
         label = "Nested '$key'", force,
     ) do rv
-        h.article(
-            h.header("Nested result for '$key'"),
-            h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
-            h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
-            h.button("Rerun"; hx_get=string(query_url(__self__/"compute/$key"; force=true)),
-                hx_target="closest article", hx_swap="outerHTML"),
+        result_article("Nested result for '$key'",
+            sample_summary(rv), sample_minmax(rv);
+            rerun_url = __self__/"compute/$key",
         )
     end
 end

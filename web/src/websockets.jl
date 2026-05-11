@@ -7,19 +7,10 @@
     # HTML helper: renders a task's final article (result or error).
     send_result(key, task) = begin
         rv = istaskfailed(task) ? nothing : fetch(task)
-        if isnothing(rv)
-            node_to_html(h.div(; id="ws-result")(
-                h.article(h.header("Failed"), h.pre(sprint(showerror, task.result)))
-            ))
-        else
-            node_to_html(h.div(; id="ws-result")(
-                h.article(
-                    h.header("Result for '$key'"),
-                    h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))"),
-                    h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))"),
-                )
-            ))
-        end
+        article = isnothing(rv) ?
+            result_article("Failed", h.pre(sprint(showerror, task.result))) :
+            result_article("Result for '$key'", sample_summary(rv), sample_minmax(rv))
+        node_to_html(h.div(; id="ws-result")(article))
     end
 
     # Simple form submission: HTMX WS sends JSON with the form's `key` field;
@@ -57,15 +48,10 @@
                 h.article(h.header("'$key' — $(n_steps) steps @ $(speed)ms"), htmx_render(node))
             )
         ))
-        html = if istaskfailed(task)
-            node_to_html(h.div(; id="ws-param-result")(h.article(h.header("Failed"))))
-        else
-            rv = fetch(task)
-            node_to_html(h.div(; id="ws-param-result")(h.article(
-                h.header("Result for '$key'"),
-                h.p("$(length(rv)) values. Final: $(short_string(rv[end]))"),
-            )))
-        end
+        article = istaskfailed(task) ?
+            result_article("Failed") :
+            result_article("Result for '$key'", sample_summary(fetch(task)))
+        html = node_to_html(h.div(; id="ws-param-result")(article))
         try
             send(__ws__, html)
         catch err

@@ -67,16 +67,12 @@ end
         cancel_url = query_url(__self__/"cancel/$key"),
         label = "Pipeline '$key'", force,
     ) do rv
-        h.article(
-            h.header("Pipeline '$key' — $rv"),
-            h.button("Rerun"; hx_get=string(query_url(__self__/"demo/$key"; force=true)),
-                hx_target="closest article", hx_swap="outerHTML"),
-        )
+        result_article("Pipeline '$key' — $rv"; rerun_url = __self__/"demo/$key")
     end
 
     @get cancel(key) = begin
         cancel!(results, key)
-        h.article(h.header("Cancelled '$key'"))
+        result_article("Cancelled '$key'")
     end
 
     # Data-driven phase chain — with_prepared_phases + with_prepared_progress.
@@ -90,8 +86,7 @@ end
             h.article(
                 h.header("Dynamic '$preset' — total $(round(sum(rv); digits=2))s"),
                 h.p("Per-phase durations: ", h.code(repr(rv))),
-                h.button("Rerun"; hx_get=string(query_url(__self__/"dynamic/$preset"; force=true, fail_at)),
-                    hx_target="closest article", hx_swap="outerHTML"),
+                rerun_button(__self__/"dynamic/$preset"; fail_at),
             )
         end
     end

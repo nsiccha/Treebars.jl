@@ -31,6 +31,30 @@ function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
     result
 end
 
+# Shared render helpers — every result panel across async / nested / docstring /
+# phases / websockets is "h.article(h.header(title), [summary p's...], [rerun])".
+# Keep the structure in one place; pass `rerun_url=nothing` to skip the button
+# (used by the WS-final article since the form replays the same key).
+
+"`Rerun` button that re-fires `rerun_url` with `?force=true` (plus optional extra query params) and replaces the closest article."
+rerun_button(rerun_url; extra_query...) = h.button("Rerun";
+    hx_get = string(query_url(rerun_url; force=true, extra_query...)),
+    hx_target = "closest article",
+    hx_swap = "outerHTML",
+)
+
+"Sample-summary `<p>` for a Float64 trace produced by `fake_sampling`."
+sample_summary(rv) = h.p("Computed $(length(rv)) values. Final: $(short_string(rv[end]))")
+
+"Min/max `<p>` for a Float64 trace produced by `fake_sampling`."
+sample_minmax(rv) = h.p("Min: $(short_string(minimum(rv))), Max: $(short_string(maximum(rv)))")
+
+"Standard result article: header + body children + (optional) rerun button. Pass `rerun_url=nothing` to omit the button."
+result_article(title, body...; rerun_url=nothing) = h.article(
+    h.header(title), body...,
+    rerun_url === nothing ? "" : rerun_button(rerun_url),
+)
+
 include("async.jl")
 include("nested.jl")
 include("phases.jl")
