@@ -3,14 +3,20 @@
 
 @dynamicstruct struct WebSocketsData end
 
+# Wrap WS payload: `<div id=target_id><article><header>title</header>body…</article></div>`.
+# Used both for progress pushes (body = htmx_render(node)) and final results.
+_ws_html(target_id, title, body...) =
+    node_to_html(h.div(; id=target_id)(h.article(h.header(title), body...)))
+
 @htmx struct WebSocketsRoutes
     # HTML helper: renders a task's final article (result or error).
     send_result(key, task) = begin
-        rv = istaskfailed(task) ? nothing : fetch(task)
-        article = isnothing(rv) ?
-            result_article("Failed", h.pre(sprint(showerror, task.result))) :
-            result_article("Result for '$key'", sample_summary(rv), sample_minmax(rv))
-        node_to_html(h.div(; id="ws-result")(article))
+        if istaskfailed(task)
+            _ws_html("ws-result", "Failed", h.pre(sprint(showerror, task.result)))
+        else
+            rv = fetch(task)
+            _ws_html("ws-result", "Result for '$key'", sample_summary(rv), sample_minmax(rv))
+        end
     end
 
     # Simple form submission: HTMX WS sends JSON with the form's `key` field;
@@ -22,11 +28,8 @@
             key = isnothing(m) ? msg : m.captures[1]
             p = initialize_progress!(:state; description="Running '$key'")
             task = Threads.@spawn fake_sampling(p)
-            ws_progress(__ws__, p; render=node -> node_to_html(
-                h.div(; id="ws-result")(
-                    h.article(h.header("Computing '$key'..."), htmx_render(node))
-                )
-            ))
+            ws_progress(__ws__, p;
+                render = node -> _ws_html("ws-result", "Computing '$key'...", htmx_render(node)))
             try
                 send(__ws__, send_result(key, task))
             catch err
@@ -43,15 +46,15 @@
         sleep_per_step = speed / 1000.0
         p = initialize_progress!(:state; description="Running '$key' ($(n_steps) steps, $(speed)ms)")
         task = Threads.@spawn fake_sampling(p; n_steps, sleep_per_step)
-        ws_progress(__ws__, p; render=node -> node_to_html(
-            h.div(; id="ws-param-result")(
-                h.article(h.header("'$key' — $(n_steps) steps @ $(speed)ms"), htmx_render(node))
-            )
-        ))
-        article = istaskfailed(task) ?
-            result_article("Failed") :
-            result_article("Result for '$key'", sample_summary(fetch(task)))
-        html = node_to_html(h.div(; id="ws-param-result")(article))
+        ws_progress(__ws__, p;
+            render = node -> _ws_html("ws-param-result", "'$key' — $(n_steps) steps @ $(speed)ms", htmx_render(node)))
+        html = if istaskfailed(task)
+            _ws_html("ws-param-result", "Failed")
+        else
+            rv = fetch(task)
+            _ws_html("ws-param-result", "Result for '$key'",
+                h.p("$(length(rv)) values. Final: $(short_string(rv[end]))"))
+        end
         try
             send(__ws__, html)
         catch err
