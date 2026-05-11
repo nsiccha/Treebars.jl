@@ -1,5 +1,17 @@
 # Usage
 
+!!! tip "Always use a convenience entry point"
+    Do **not** call [`initialize_progress!`](@ref) / [`prepare_progress!`](@ref) /
+    [`update_progress!`](@ref) / [`finalize_progress!`](@ref) manually in
+    application code — forgetting `finalize_progress!` or missing an exception
+    leaves nodes stuck in *running* or *pending* state forever.
+
+    The convenience API — [`@progress`](@ref), [`with_progress`](@ref),
+    [`with_prepared_phases`](@ref) / [`@with_progress`](@ref) /
+    [`with_prepared_progress`](@ref) — handles initialisation, error
+    propagation, and finalisation automatically. The bare lifecycle functions
+    are public only to enable custom backends.
+
 ## The `@progress` macro
 
 The simplest way to add progress tracking to `for` loops:
@@ -7,7 +19,6 @@ The simplest way to add progress tracking to `for` loops:
 ```julia
 using Treebars, Term
 
-# Set the global backend
 Treebars.BACKEND[] = :term
 
 # Single loop
@@ -23,22 +34,59 @@ end
 end
 ```
 
-You can also pass a progress node directly instead of using the global backend:
+You can also pass a backend symbol or an existing `ProgressNode` directly:
 
 ```julia
+@progress :term for i in 1:100; sleep(0.01); end
+
 p = initialize_progress!(:term)
-@progress p for i in 1:100
-    sleep(0.01)
-end
-finalize_progress!(p)
+@progress p for i in 1:100; sleep(0.01); end
 ```
 
-## `with_progress`
-
-For more control, use `with_progress` which handles initialization and cleanup:
+### Labelled single-statement wrap
 
 ```julia
-with_progress(:term, 10; description="My task") do p
+@progress :term "Compile" compile_model()   # indeterminate spinner child
+```
+
+### Phase markers inside `begin` blocks
+
+`@progress "label"` as a direct statement inside a `@progress … begin … end`
+opens a phase that runs from the marker to the next marker (or end of block).
+All labelled phases are pre-enumerated as **pending** children, so the whole
+pipeline is visible from the outset:
+
+```julia
+@progress :state "Pipeline" begin
+    @progress "Load data"
+    x = load()                      # runs under "Load data"
+
+    @progress "Preprocess"
+    for _ in 1:5; preproc(); end    # runs under "Preprocess"
+
+    @progress "Fit"
+    for i in 1:N; step(i); end      # for-loop becomes a counter-child of "Fit"
+
+    @progress "Evaluate"
+    evaluate(x)                     # x from "Load data" is visible here
+end
+```
+
+Inside a phase body, the local `__progress__` refers to the current phase's
+node — useful for nesting substatus from called functions under the active
+phase (e.g. `fetchindex!(__progress__, ip; …)`).
+
+All phase bodies share one scope, so assignments flow across phase boundaries.
+On error, any phase still pending/running is `fail_progress!`-ed before the
+exception rethrows.
+
+## `with_progress` — non-loop work
+
+For non-loop work with automatic finalise + fail handling, use the do-block
+form [`with_progress`](@ref):
+
+```julia
+with_progress(:term, 10; description="MCMC") do p
     for i in 1:10
         update_progress!(p, i)
         sleep(0.1)
@@ -46,9 +94,45 @@ with_progress(:term, 10; description="My task") do p
 end
 ```
 
-## Labeled sub-progress
+## Data-driven phases
 
-Pass keyword arguments to `update_progress!` to create labeled sub-rows:
+When the phase set is only known at runtime (so the static
+`@progress "label" begin … end` form doesn't fit), use
+[`with_prepared_phases`](@ref) together with [`@with_progress`](@ref) or
+[`with_prepared_progress`](@ref). The pattern: bulk-prepare pending phase
+nodes up front so the whole pipeline appears immediately, then run each phase
+one by one as it transitions pending → running → done.
+
+```julia
+# Keys carry structure; values carry specs / metadata.
+chain = (parse=:parse, transform=:transform, fit=:fit)
+
+vals = with_prepared_phases(progress, chain) do phases
+    # phases is a NamedTuple with the same keys, ProgressNode values.
+    # All three are pending siblings of `progress` right now.
+    map(chain, phases) do spec, phase
+        with_prepared_progress(phase) do _
+            run(spec)                # phase transitions pending → running → done
+        end
+    end
+end
+```
+
+`with_prepared_phases` accepts:
+
+- any iterable (`Vector{String}`, `Tuple`, generator) — `phases` is the same
+  shape, elements stringified as descriptions;
+- a `NamedTuple` — `phases` is a `NamedTuple` with the same keys. The
+  per-phase description is taken from the NT value when it is an
+  `AbstractString`, otherwise from `string(key)`.
+
+If anything throws inside the `f(phases)` body, any phase still
+`is_pending` or `is_running` is failed via `fail_progress!(p, err)` before
+the exception rethrows.
+
+## Labelled sub-progress via `update_progress!` kwargs
+
+Pass keyword arguments to `update_progress!` to create labelled sub-rows:
 
 ```julia
 with_progress(:term, 100; description="MCMC") do p
@@ -64,32 +148,11 @@ end
 ```
 
 Each keyword creates a child label row (e.g. `divergent: 5 out of 100`).
-Underscores in keyword names are replaced with spaces.
-
-## Manual lifecycle
-
-For full control over the progress lifecycle:
-
-```julia
-# Create root
-root = initialize_progress!(:term)
-
-# Create a child with N steps
-job = initialize_progress!(root, 50; description="Step 1")
-
-# Update
-for i in 1:50
-    update_progress!(job, i)
-end
-
-# Finalize child, then root
-finalize_progress!(job)
-finalize_progress!(root)
-```
+Underscores in keyword names are replaced with spaces. Labels are reused on
+subsequent calls — the child node is created the first time and updated
+thereafter.
 
 ## Update patterns
-
-All patterns used by WarmupHMC are supported:
 
 ```julia
 update_progress!(p, i)              # Set counter to i
@@ -112,6 +175,7 @@ short_string([1, 2, 3])  # "[1, 2, 3]"
 short_string(:a => 1)    # "a => 1"
 
 Fraction(0.95) |> short_string  # "95%"
+short_duration(Dates.Second(83))  # "1m 23s"
 ```
 
 These are useful for formatting metadata in `update_progress!` kwargs:
@@ -123,12 +187,13 @@ update_progress!(p, i;
 )
 ```
 
-Domain-specific `short_string` methods (e.g. for custom matrix types) can be added in the consuming package.
+Domain-specific `short_string` methods (e.g. for custom matrix types) can be
+added in the consuming package.
 
 ## Disabled progress
 
-Passing `nothing` as the progress backend is a no-op — all functions silently return `nothing`.
-This makes it easy to optionally enable progress:
+Passing `nothing` as the progress backend is a no-op — all functions silently
+return `nothing`. This makes it easy to optionally enable progress:
 
 ```julia
 function my_computation(; progress=nothing)
@@ -140,9 +205,7 @@ function my_computation(; progress=nothing)
     end
 end
 
-# No progress
-my_computation()
-
-# With progress
-my_computation(progress=:term)
+my_computation()                  # silent
+my_computation(progress=:term)    # terminal bars
+my_computation(progress=:state)   # web-ready tree
 ```
