@@ -55,6 +55,36 @@ result_article(title, body...; rerun_url=nothing) = h.article(
     rerun_url === nothing ? "" : rerun_button(rerun_url),
 )
 
+# Demo-index input form helpers. The index page wires ~7 single-key/param input
+# fieldsets, each with the same shape: <fieldset role=group> with <input> + <button>,
+# where the button's hx-get points at `url_prefix/<input value>` and a hyperscript
+# `_=` hook rewrites @hx-get on click using the current input value(s). Pulled
+# out so the index reads as a list of inputs, not as repeated boilerplate.
+
+"Single-key input + run button. Wires `_=` so the button rebuilds `url_prefix/<value>` on click before HTMX fires."
+key_input_form(button_text, url_prefix, key_id, key_value, target_id) = h.fieldset(; role="group")(
+    h.input(; type="text", id=key_id, value=key_value, placeholder="Key"),
+    h.button(button_text;
+        hx_get = "$url_prefix/$key_value",
+        hx_target = "#$target_id",
+        hx_swap = "innerHTML",
+        _ = "on click set my @hx-get to '$url_prefix/' + #$key_id.value",
+    ),
+)
+
+"Two-number-param input + run button. Wires `_=` so the button rebuilds `url_prefix/<steps>/<sleep>` on click."
+param_input_form(button_text, url_prefix, steps_id, sleep_id, target_id;
+                 steps_default=100, sleep_default=20) = h.fieldset(; role="group")(
+    h.input(; type="number", id=steps_id, value=string(steps_default), placeholder="Steps", class="tb-input-narrow"),
+    h.input(; type="number", id=sleep_id, value=string(sleep_default), placeholder="ms", class="tb-input-narrow"),
+    h.button(button_text;
+        hx_get = "$url_prefix/$steps_default/$sleep_default",
+        hx_target = "#$target_id",
+        hx_swap = "innerHTML",
+        _ = "on click set my @hx-get to '$url_prefix/' + #$steps_id.value + '/' + #$sleep_id.value",
+    ),
+)
+
 include("async.jl")
 include("nested.jl")
 include("phases.jl")
@@ -110,14 +140,7 @@ const APPDATA = AppData()
         h.p("All phases (Load / Preprocess / Fit / Evaluate / Save) are pre-enumerated as ",
             h.em("pending"), " children — they appear greyed-out from the outset and transition pending → running → done as execution reaches each marker.";
             class="u-text-sm u-text-muted"),
-        h.div(
-            h.fieldset(; role="group")(
-                h.input(; type="text", id="macro-key", value="macro-demo", placeholder="Key"),
-                h.button("Run pipeline"; hx_get="/phases/demo/macro-demo",
-                    hx_target="#macro-result", hx_swap="innerHTML",
-                    _="on click set my @hx-get to '/phases/demo/' + #macro-key.value"),
-            ),
-        ),
+        h.div(key_input_form("Run pipeline", "/phases/demo", "macro-key", "macro-demo", "macro-result")),
         h.div(; id="macro-result"),
 
         h.hr(),
@@ -148,14 +171,7 @@ const APPDATA = AppData()
         h.hr(),
         h.h3("1. HTTP polling"),
         h.p("Client polls every 200ms via hx-get + hx-trigger."; class="u-text-sm u-text-muted"),
-        h.div(
-            h.fieldset(; role="group")(
-                h.input(; type="text", id="poll-key", value="poll-demo", placeholder="Key"),
-                h.button("Run (polling)"; hx_get="/async/compute/poll-demo",
-                    hx_target="#poll-result", hx_swap="innerHTML",
-                    _="on click set my @hx-get to '/async/compute/' + #poll-key.value"),
-            ),
-        ),
+        h.div(key_input_form("Run (polling)", "/async/compute", "poll-key", "poll-demo", "poll-result")),
         h.div(; id="poll-result"),
 
         h.hr(),
@@ -174,14 +190,7 @@ const APPDATA = AppData()
         h.hr(),
         h.h3("3. Inline child substatus"),
         h.p("Inline Sub struct gets its own ProgressNode under the parent's status. No manual __substatus__ needed."; class="u-text-sm u-text-muted"),
-        h.div(
-            h.fieldset(; role="group")(
-                h.input(; type="text", id="nested-key", value="nested-demo", placeholder="Key"),
-                h.button("Run (nested)"; hx_get="/nested/compute/nested-demo",
-                    hx_target="#nested-result", hx_swap="innerHTML",
-                    _="on click set my @hx-get to '/nested/compute/' + #nested-key.value"),
-            ),
-        ),
+        h.div(key_input_form("Run (nested)", "/nested/compute", "nested-key", "nested-demo", "nested-result")),
         h.div(; id="nested-result"),
 
         h.hr(),
@@ -190,22 +199,12 @@ const APPDATA = AppData()
         h.div(; class="u-grid-2")(
             h.div(
                 h.h5("Without docstring"),
-                h.fieldset(; role="group")(
-                    h.input(; type="text", id="doc-cmp-key", value="compare", placeholder="Key"),
-                    h.button("Run"; hx_get="/async/compute/compare",
-                        hx_target="#doc-cmp-left", hx_swap="innerHTML",
-                        _="on click set my @hx-get to '/async/compute/' + #doc-cmp-key.value"),
-                ),
+                key_input_form("Run", "/async/compute", "doc-cmp-key", "compare", "doc-cmp-left"),
                 h.div(; id="doc-cmp-left"),
             ),
             h.div(
                 h.h5("With docstring"),
-                h.fieldset(; role="group")(
-                    h.input(; type="text", id="doc-cmp-key2", value="compare", placeholder="Key"),
-                    h.button("Run"; hx_get="/dsdemo/compute/compare",
-                        hx_target="#doc-cmp-right", hx_swap="innerHTML",
-                        _="on click set my @hx-get to '/dsdemo/compute/' + #doc-cmp-key2.value"),
-                ),
+                key_input_form("Run", "/dsdemo/compute", "doc-cmp-key2", "compare", "doc-cmp-right"),
                 h.div(; id="doc-cmp-right"),
             ),
         ),
@@ -213,24 +212,12 @@ const APPDATA = AppData()
         h.div(; class="u-grid-2")(
             h.div(
                 h.h5("Without docstring"),
-                h.fieldset(; role="group")(
-                    h.input(; type="number", id="doc-steps-l", value="100", placeholder="Steps", class="tb-input-narrow"),
-                    h.input(; type="number", id="doc-sleep-l", value="20", placeholder="ms", class="tb-input-narrow"),
-                    h.button("Run"; hx_get="/async/param/100/20",
-                        hx_target="#doc-param-left", hx_swap="innerHTML",
-                        _="on click set my @hx-get to '/async/param/' + #doc-steps-l.value + '/' + #doc-sleep-l.value"),
-                ),
+                param_input_form("Run", "/async/param", "doc-steps-l", "doc-sleep-l", "doc-param-left"),
                 h.div(; id="doc-param-left"),
             ),
             h.div(
                 h.h5("With docstring"),
-                h.fieldset(; role="group")(
-                    h.input(; type="number", id="doc-steps-r", value="100", placeholder="Steps", class="tb-input-narrow"),
-                    h.input(; type="number", id="doc-sleep-r", value="20", placeholder="ms", class="tb-input-narrow"),
-                    h.button("Run"; hx_get="/dsdemo/param/100/20",
-                        hx_target="#doc-param-right", hx_swap="innerHTML",
-                        _="on click set my @hx-get to '/dsdemo/param/' + #doc-steps-r.value + '/' + #doc-sleep-r.value"),
-                ),
+                param_input_form("Run", "/dsdemo/param", "doc-steps-r", "doc-sleep-r", "doc-param-right"),
                 h.div(; id="doc-param-right"),
             ),
         ),
