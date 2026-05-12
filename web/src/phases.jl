@@ -19,7 +19,7 @@ _dynamic_chain(preset) = preset == "short" ?
 
     "Pipeline '$key'"
     results(key) = begin
-        @progress __status__ "Pipeline" begin
+        @progress "Pipeline" begin
             @progress "Load data"
             sleep(0.5 + rand() * 0.5)
 
