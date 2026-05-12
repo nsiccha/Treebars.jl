@@ -3,7 +3,7 @@ import HTMXObjects
 import HTMXObjects: h, Node, fetchindex
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
-    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, duration, short_duration
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, duration, short_duration
 import Dates
 using Dates: Millisecond
 
@@ -166,11 +166,33 @@ htmx_treebar_script() = h.script("""
 })();
 """)
 
+# Walk `node.children` and replace each undisplayed child with its own
+# (recursively flattened) children. Pure render-time transformation; the
+# underlying tree is unchanged. Returns a flat Vector{ProgressNode} of
+# only-displayed nodes, preserving iteration order.
+function _flatten_displayed_children(node::ProgressNode)
+    out = ProgressNode[]
+    for child in node.children
+        if is_displayed(child)
+            push!(out, child)
+        else
+            append!(out, _flatten_displayed_children(child))
+        end
+    end
+    out
+end
+
 # Render a StateProgress node as HTML. `scoped=false` (used internally by
 # polling_fetchindex) suppresses data-show-* attrs on inner .treebar-children,
 # so the .treebar-poller wrapper's descendant CSS rule controls visibility
 # globally without inner direct-child rules fighting it.
+#
+# Transparent passthrough: an undisplayed node renders to the empty fragment.
+# Its children are hoisted to the parent's level by
+# `_flatten_displayed_children`, so a transparent node is normally never
+# reached here — this branch is the safety net for direct calls.
 function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, kwargs...)
+    is_displayed(node) || return ""
     sp = node.impl
     children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped)
     lock(sp.lock) do
@@ -213,9 +235,11 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
     end
 end
 
-# Render a full progress tree rooted at node
+# Render a full progress tree rooted at node. Top-level root is always
+# rendered (the wrapper div), but transparent children at this level are
+# flattened away — their grandchildren render in their place.
 function htmx_render(node::ProgressNode; scoped=true, kwargs...)
-    children_html = [htmx_render(child; scoped, kwargs...) for child in node.children]
+    children_html = [htmx_render(child; scoped, kwargs...) for child in _flatten_displayed_children(node)]
     h.div(class="treebar-root")(children_html...)
 end
 
@@ -237,15 +261,19 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller') || this.closest(
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
 function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true)
     sp = node.impl
-    if isempty(node.children) && !isempty(sp.message)
+    # Flatten transparent children: each undisplayed child contributes
+    # its own children at this level instead of itself. Grouping/pills/
+    # CSS classes all see the hoisted view, which is the whole point of
+    # the transparent flag.
+    children = _flatten_displayed_children(node)
+    if isempty(children) && !isempty(sp.message)
         return h.div(
             h.span(sp.message; class="u-text-muted"),
             h.span(" "; aria_busy="true"),
         )
     end
-    isempty(node.children) && return h.p("Starting..."; class="u-text-muted", aria_busy="true")
+    isempty(children) && return h.p("Starting..."; class="u-text-muted", aria_busy="true")
 
-    children = collect(node.children)
     n_finished = count(c -> is_finished(c), children)
     n_failed = count(c -> is_failed(c), children)
     n_pending = count(c -> is_pending(c), children)

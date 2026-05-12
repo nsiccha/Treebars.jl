@@ -49,11 +49,33 @@ istransient(node::ProgressNode) = get(node.meta, :transient, false)
 propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
 
-# Initialize a child progress node
-function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, kwargs...)
+"""
+    is_displayed(node) -> Bool
+
+Render-only flag. `true` (the default) means the node renders normally;
+`false` makes the node a **transparent passthrough** — it still exists in
+the tree (children can parent under it, the full
+`start_progress!` / `update_progress!` / `fail_progress!` /
+`finalize_progress!` lifecycle still runs), but at render time the node
+itself emits nothing and its children are hoisted one level up into the
+parent's children container.
+
+Set via `displayed=false` on [`initialize_progress!`](@ref) /
+[`prepare_progress!`](@ref) (or by constructing a `ProgressNode` with
+`meta` containing `:displayed => false`). Used by `htmx_render` /
+`htmx_render_children` in the HTMXObjects extension.
+
+Returns `false` for `nothing` (a no-op target has nothing to render).
+"""
+is_displayed(node::ProgressNode) = get(node.meta, :displayed, true)
+is_displayed(::Nothing) = false
+
+# Initialize a child progress node. `displayed=false` marks the node as a
+# transparent passthrough (lifecycle unaffected — render-side only).
+function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, displayed=true, kwargs...)
     ProgressNode(
         initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
-        (; propagates, transient, labels=ThreadsafeDict{Symbol,Any}());
+        (; propagates, transient, displayed, labels=ThreadsafeDict{Symbol,Any}());
         parent=node
     )
 end

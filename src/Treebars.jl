@@ -8,7 +8,7 @@ export @progress, @with_progress, with_progress, with_prepared_progress, with_pr
     add_child!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render,
     polling_fetchindex,
-    is_pending, is_running, is_finished, is_failed, duration, short_duration,
+    is_pending, is_running, is_finished, is_failed, is_displayed, duration, short_duration,
     prepare_progress!, start_progress!,
     round2, short_string, Fraction
 
