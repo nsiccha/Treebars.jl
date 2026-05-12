@@ -12,7 +12,7 @@
     parameterized(n_steps, sleep_per_step) = fake_sampling(__status__; n_steps, sleep_per_step)
 
     "Cached sampling for $(key)"
-    @cached cached_results(key) = fake_sampling(__status__)
+    @diskcached cached_results(key) = fake_sampling(__status__)
 end
 
 @htmx struct DocstringRoutes
