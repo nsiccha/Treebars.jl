@@ -211,15 +211,25 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 _is_progress_macrocall(x) =
     Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@progress")
 
+# True for both plain string literals (`"step"`) and interpolated string
+# literals (`"step $i"`, parsed as `Expr(:string, …)`). The downstream
+# emitter handles `description=$label` as a generic Expr, so the parser-level
+# dispatch arms only need to recognise that the label slot was a string at
+# the source level.
+_is_string_literal(x) = x isa AbstractString || Meta.isexpr(x, :string)
+
 # Phase-marker recognition. The structural shape is a `:macrocall` to
 # `@progress` with exactly one user argument; the *kind* of that argument
-# (String label vs anything else) is dispatched here. The thin
-# `_is_string(::AbstractString)` predicate this replaces only ever fed this
-# leaf check, so the type test is pulled to the method boundary.
-_phase_marker_label(::Any) = nothing
-_phase_marker_label(label::AbstractString) = label
-_phase_marker_label(x::Expr) =
-    _is_progress_macrocall(x) && length(x.args) == 3 ? _phase_marker_label(x.args[3]) : nothing
+# (string literal — plain or interpolated — vs anything else) determines
+# whether it acts as a marker. Returns either `nothing` or the raw label
+# expression (which downstream code splices into `description=$label`).
+function _phase_marker_label(x)
+    _is_string_literal(x) && return x
+    if x isa Expr && _is_progress_macrocall(x) && length(x.args) == 3
+        return _phase_marker_label(x.args[3])
+    end
+    return nothing
+end
 
 # User-supplied args of a @progress macrocall (strip macro name + LineNumberNode)
 _progress_user_args(x) = x.args[3:end]
@@ -251,18 +261,21 @@ function _parse_toplevel_args(args)
     error("@progress: too many arguments")
 end
 
-# Length-1 form: a body expression. A bare string here is a user error.
-_toplevel_one_arg(a) = (nothing, nothing, a)
-_toplevel_one_arg(a::AbstractString) =
-    error("@progress \"$(a)\": top-level @progress requires a body expression")
+# Length-1 form: a body expression. A bare string literal (plain or
+# interpolated) here is a user error.
+_toplevel_one_arg(a) =
+    _is_string_literal(a) ?
+        error("@progress with a string label requires a body expression: @progress \"label\" body") :
+        (nothing, nothing, a)
 
-# Two-arg @progress form: a string is the label; anything else is the backend.
-_split_two_args(a::AbstractString, b) = (nothing, a, b)
-_split_two_args(a, b) = (a, nothing, b)
+# Two-arg @progress form: a (plain or interpolated) string is the label;
+# anything else is the backend.
+_split_two_args(a, b) = _is_string_literal(a) ? (nothing, a, b) : (a, nothing, b)
 
-# Length-3 form: backend, label, body — label must be a literal string.
-_toplevel_three_args(backend, label::AbstractString, body) = (backend, label, body)
+# Length-3 form: backend, label, body — label must be a (plain or
+# interpolated) string literal.
 _toplevel_three_args(backend, label, body) =
+    _is_string_literal(label) ? (backend, label, body) :
     error("@progress: three-arg form expects @progress backend \"label\" body")
 
 # Rewrite a nested @progress macrocall (not top-level, so no backend allowed).
@@ -281,9 +294,10 @@ _nested_one_arg(a, ctx) = _build_body(a, nothing, ctx)
 _nested_one_arg(a::AbstractString, ctx) =
     error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
 
-# Length-2 nested form: label, body. Label must be a string.
-_nested_two_args(a::AbstractString, body, ctx) = _build_body(body, a, ctx)
+# Length-2 nested form: label, body. Label must be a (plain or interpolated)
+# string literal.
 _nested_two_args(a, body, ctx) =
+    _is_string_literal(a) ? _build_body(body, a, ctx) :
     error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
 
 # Dispatch on body shape
@@ -347,22 +361,24 @@ function _single_stmt_progress_expr(body, label, ctx)
 end
 
 # Per-block-arg fold for the phase splitter. Dispatched on the precomputed
-# `_phase_marker_label(a)` result: `AbstractString` ⇒ open a new phase;
-# `Nothing` ⇒ extend the current phase. Replaces the
-# `if _is_phase_marker(a) ... else ...` branch with method dispatch.
-_absorb_block_arg!(phases, cur_label, cur_stmts, a, label::AbstractString) = begin
-    push!(phases, (cur_label, cur_stmts))
-    (String(label), Any[])
-end
+# `_phase_marker_label(a)` result: `nothing` ⇒ extend the current phase;
+# anything else (a plain or interpolated string-literal expression) ⇒ open
+# a new phase using that label.
 _absorb_block_arg!(phases, cur_label, cur_stmts, a, ::Nothing) =
     (push!(cur_stmts, a); (cur_label, cur_stmts))
+_absorb_block_arg!(phases, cur_label, cur_stmts, a, label) = begin
+    push!(phases, (cur_label, cur_stmts))
+    (label, Any[])
+end
 
 # Block wrap — split at phase markers, pre-enumerate labeled phases as pending
 function _block_progress_expr(block::Expr, outer_label, ctx)
     # Split block.args into (label, [stmts]) phases at phase-marker statements.
-    # The first chunk has label=nothing (pre-first-marker stmts).
-    phases = Vector{Tuple{Union{Nothing,String},Vector{Any}}}()
-    cur_label::Union{Nothing,String} = nothing
+    # The first chunk has label=nothing (pre-first-marker stmts). Labels are
+    # the raw source-level expressions (plain string or `Expr(:string, …)`),
+    # spliced into `description=$label` downstream.
+    phases = Vector{Tuple{Any,Vector{Any}}}()
+    cur_label = nothing
     cur_stmts = Any[]
     for a in block.args
         cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a))
