@@ -409,10 +409,16 @@ function _block_progress_expr(block::Expr, outer_label, ctx)
     end
 end
 
-# Emit: prepare all pending phase nodes, then run phase bodies inside a single
-# try/catch so assignments flow naturally across phase boundaries (no per-phase
-# `try` scope means no surprise `UndefVarError` for variables set in one phase
-# and used in the next). Mirrors `_run_prepared_phases` for the dynamic form.
+# Emit: prepare all pending phase nodes, then run phase bodies inside a
+# single try/catch so assignments flow naturally across phase boundaries
+# (no per-phase `try` scope means no surprise `UndefVarError` for
+# variables set in one phase and used in the next). The previous phase
+# is finalized at the start of the next; the last running phase is
+# cleaned up by the caller's `finally` on the enclosing progress node
+# (the labeled-block wrapper at L389-405, or the property-body lifecycle
+# in callers like DynamicObjects). This keeps the user's last-stmt
+# value as the block's tail. Mirrors `_run_prepared_phases` for the
+# dynamic form.
 function _emit_phases(phases, ctx)
     labeled = [(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
     pending_syms = [gensym(:phase) for _ in labeled]
@@ -435,11 +441,11 @@ function _emit_phases(phases, ctx)
     for (idx, (lbl, stmts)) in enumerate(labeled)
         sym = pending_syms[idx]
         phase_ctx = (progress=sym, transient=ctx.transient)
+        idx > 1 && push!(phase_stmts, :( $finalize_progress!($(pending_syms[idx-1])) ))
         push!(phase_stmts, :( $start_progress!($sym) ))
         for s in stmts
             push!(phase_stmts, progress_expr(s, phase_ctx))
         end
-        push!(phase_stmts, :( $finalize_progress!($sym) ))
     end
 
     if isempty(pending_syms)
