@@ -1,6 +1,7 @@
 module HTMXObjectsExt
 import HTMXObjects
 import HTMXObjects: h, Node, fetchindex
+import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, duration, short_duration
@@ -445,5 +446,54 @@ _polling_inner_done(body) = h.div(class="treebar-poller-inner")(body)
 # Convenience: when called with an IndexableProperty (no render_result), default to identity.
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(identity, ip, keys...; kwargs...)
+
+"""
+    polling_fetchindex(ws::WebSocket, render_result, ip, keys...; id="treebar-progress", interval=0.1, force=false, kwargs...)
+
+WebSocket sibling of [`polling_fetchindex`](@ref). Same `fetchindex(ip, keys...) do rv, status`
+dispatch — but instead of returning a polling HTMX fragment, streams progress
+over `ws` via [`ws_progress`](@ref) and pushes the final rendered result as
+one last frame on completion.
+
+Producer task is NOT cancelled on client disconnect — `ws_progress` exits
+its send loop on WS error and leaves the task alone; the IP cache retains
+the running task, so the next visitor reuses it.
+
+Use inside an `@ws` route body, passing `__ws__` as the first argument:
+
+    @ws fit(; model, method, ...) = polling_fetchindex(__ws__, sc.fit, model, method; force, ...) do rv
+        render_fit(rv)
+    end
+
+Both progress frames and the final frame are wrapped in `<div id=\$id>…</div>`
+so the htmx ws-extension swaps by element id on the client.
+
+- `ws`: the WebSocket handle (from `__ws__`)
+- `render_result(rv)`: function rendering the final result Node (supports `do` syntax)
+- `ip`: IndexableProperty
+- `keys...`: cache key(s)
+- `id`: stable wrapper element id for ws-extension swap-by-id (default `"treebar-progress"`)
+- `interval`: progress push interval in seconds (default `0.1`)
+- `force`: force re-computation (default `false`)
+- `kwargs...`: passed through to `fetchindex`
+"""
+function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
+        id="treebar-progress", interval=0.1, force=false, kwargs...)
+    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
+    final_html(content)   = node_to_html(h.div(; id)(content))
+    fetchindex(ip, keys...; force, kwargs...) do rv, status
+        if rv isa Task
+            ws_progress(ws, status; render=progress_render, interval)
+            istaskfailed(rv) ||
+                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+        else
+            try; send(ws, final_html(render_result(rv))); catch; end
+        end
+    end
+end
+
+# Convenience: WS form with no render_result defaults to identity.
+polling_fetchindex(ws::WebSocket, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
+    polling_fetchindex(ws, identity, ip, keys...; kwargs...)
 
 end
