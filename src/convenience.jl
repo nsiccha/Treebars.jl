@@ -156,6 +156,46 @@ function _run_prepared_phases(f, phases)
     end
 end
 
+"""
+    progress_map(f, parent, itrs...; kwargs...)
+
+Like `map(f, itrs...)` but creates one child progress node under `parent` per
+element, passing it to `f` as the first argument: `f(child, xs...)`. Returns
+the mapped collection. Multiple iterables zip like `map`.
+
+`kwargs` are forwarded to each per-element [`initialize_progress!`](@ref)
+(e.g. `description=`, `transient=true`, `N=…` for a determinate child).
+
+`parent` is an explicit progress node. Inside a `@progress` block, pass
+`__progress__` (the walker rewrites it to the enclosing node). Outside a
+`@progress` block, pass any node, or `nothing` to disable progress (then
+`child === nothing`, all lifecycle ops no-op).
+
+Inside `f`, report sub-progress into the passed `child` — e.g.
+`@progress child for … end`, `with_progress(child, …)`, or
+`update_progress!(child, …)` — NOT `__progress__` (which refers to the outer
+node, not the per-element child).
+
+```julia
+progress_map(__progress__, chains) do child, c
+    @fetch!(child, c.df)
+end
+```
+"""
+function progress_map(f, parent, itrs...; kwargs...)
+    map(itrs...) do xs...
+        child = initialize_progress!(parent; kwargs...)
+        try
+            f(child, xs...)
+        catch e
+            fail_progress!(child, e)
+            rethrow()
+        finally
+            finalize_progress!(child)
+        end
+    end
+end
+
 struct IterableProgress{P,W}
     progress::P
     wrapped::W
