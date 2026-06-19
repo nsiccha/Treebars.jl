@@ -60,19 +60,34 @@ the tree (children can parent under it, the full
 itself emits nothing and its children are hoisted one level up into the
 parent's children container.
 
-Set via `displayed=false` on [`initialize_progress!`](@ref) /
-[`prepare_progress!`](@ref) (or by constructing a `ProgressNode` with
-`meta` containing `:displayed => false`). Used by `htmx_render` /
-`htmx_render_children` in the HTMXObjects extension.
+The display **preference** is three-state (`_display_pref`): `true` / `false`
+set explicitly via `displayed=` on [`initialize_progress!`](@ref) /
+[`prepare_progress!`](@ref), or *unset* (the default). `is_displayed`
+collapses that to a `Bool` — only an explicit `false` hides; unset and
+explicit `true` both report `true`.
+
+Note the render side (`_renders_self`) goes one step further: a node with
+**no preference set** that is also a bare wrapper (no description, message,
+or counter) is inlined just like an explicit `displayed=false`, so
+undecorated structural nodes don't add empty levels to the rendered tree.
 
 Returns `false` for `nothing` (a no-op target has nothing to render).
 """
-is_displayed(node::ProgressNode) = get(node.meta, :displayed, true)
+is_displayed(node::ProgressNode) = get(node.meta, :displayed, true) !== false
 is_displayed(::Nothing) = false
 
-# Initialize a child progress node. `displayed=false` marks the node as a
-# transparent passthrough (lifecycle unaffected — render-side only).
-function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, displayed=true, kwargs...)
+# Raw three-state display preference: `true`/`false` when set explicitly via
+# `displayed=`, or `nothing` when the caller expressed none. `_renders_self`
+# uses this to tell "explicitly show/hide" apart from "decide automatically".
+_display_pref(node::ProgressNode) = get(node.meta, :displayed, nothing)
+# `_is_bare_wrapper` / `_renders_self` are defined below, after the
+# `StateProgress` struct, since their dispatch mentions that type.
+
+# Initialize a child progress node. `displayed` is a three-state preference:
+# `false` = transparent passthrough, `true` = always render, `nothing`
+# (default) = let the render side decide (bare wrappers inline). Lifecycle is
+# unaffected either way — this is render-side only.
+function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, displayed=nothing, kwargs...)
     ProgressNode(
         initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
         (; propagates, transient, displayed, labels=ThreadsafeDict{Symbol,Any}());
@@ -196,6 +211,28 @@ mutable struct StateProgress
         !pending, false, pending ? nothing : now(), nothing
     )
 end
+
+# A node is a *bare wrapper* when it would render as a pure structural level —
+# no description, no running message, no counter — i.e. its only content is its
+# children. Such a node carries no information of its own, so with no explicit
+# display preference the render side inlines it (hoisting its children).
+# Non-`StateProgress` impls are never treated as bare. Defined here (after the
+# StateProgress struct) so the type is in scope for the method signature.
+_is_bare_wrapper(node::ProgressNode{<:StateProgress}) =
+    isempty(node.impl.description) && isempty(node.impl.message) && isnothing(node.impl.N)
+_is_bare_wrapper(::ProgressNode) = false
+
+# Render-side display decision, sharper than `is_displayed`: an explicit
+# `displayed=false` hides, an explicit `displayed=true` always shows, and with
+# no preference set the node shows iff it is not a bare wrapper. When `false`
+# the node emits nothing and its children hoist one level up.
+function _renders_self(node::ProgressNode)
+    pref = _display_pref(node)
+    pref === false && return false
+    pref === true && return true
+    !_is_bare_wrapper(node)
+end
+_renders_self(::Nothing) = false
 
 """
     is_pending(s)

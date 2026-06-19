@@ -4,7 +4,7 @@ import HTMXObjects: h, Node, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
-    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, duration, short_duration
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, _renders_self, duration, short_duration
 import Dates
 using Dates: Millisecond
 
@@ -167,14 +167,16 @@ htmx_treebar_script() = h.script("""
 })();
 """)
 
-# Walk `node.children` and replace each undisplayed child with its own
-# (recursively flattened) children. Pure render-time transformation; the
-# underlying tree is unchanged. Returns a flat Vector{ProgressNode} of
-# only-displayed nodes, preserving iteration order.
+# Walk `node.children` and replace each non-self-rendering child with its own
+# (recursively flattened) children. A child does not render itself when it is
+# explicitly `displayed=false` OR it is a bare wrapper with no display
+# preference set (see `Treebars._renders_self`). Pure render-time transform;
+# the underlying tree is unchanged. Returns a flat Vector{ProgressNode},
+# preserving iteration order.
 function _flatten_displayed_children(node::ProgressNode)
     out = ProgressNode[]
     for child in node.children
-        if is_displayed(child)
+        if _renders_self(child)
             push!(out, child)
         else
             append!(out, _flatten_displayed_children(child))
