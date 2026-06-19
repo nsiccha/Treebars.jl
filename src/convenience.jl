@@ -221,6 +221,8 @@ end
 Base.length(p::IterableProgress) = length(p.wrapped)
 Base.eltype(::Type{IterableProgress{P,W}}) where {P,W} = eltype(W)
 Base.IteratorSize(::Type{IterableProgress{P,W}}) where {P,W} = Base.IteratorSize(W)
+Base.size(p::IterableProgress) = size(p.wrapped)
+Base.axes(p::IterableProgress) = axes(p.wrapped)
 finalize_progress!(p::IterableProgress) = finalize_progress!(p.progress)
 fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progress, args...; kwargs...)
 
@@ -278,11 +280,63 @@ progress_expr(x, ctx) = x
 progress_expr(x::Symbol, ctx) =
     x === :__progress__ ? ctx.progress : x
 
+# True iff `x` is a `Threads.@threads` (qualified or bare) applied to a for loop.
+function _is_threads_for(x)
+    Meta.isexpr(x, :macrocall) || return false
+    name = x.args[1]
+    is_threads = (
+        (Meta.isexpr(name, :.) && name.args[1] === :Threads &&
+            name.args[2] isa QuoteNode && name.args[2].value === Symbol("@threads")) ||
+        name === Symbol("@threads")
+    )
+    is_threads && Meta.isexpr(x.args[end], :for)
+end
+
+# Threads.@threads for — determinate counter with a thread-safe per-iteration
+# increment injected into the loop body (the StateProgress lock makes concurrent
+# increments safe). The original macrocall is preserved (schedule arg and all);
+# only its for-loop body is rewritten. The increment is in a `finally` so it
+# still advances on `continue`.
+function _threads_for_progress_expr(x::Expr, ctx; description)
+    forexpr = x.args[end]
+    lhs, rhs = forexpr.args[1].args
+    body = forexpr.args[2]
+    sub = gensym(:threadsprogress)
+    itr = gensym(:itr)
+    child_ctx = (progress=sub, transient=ctx.transient)
+    wrapped_body = progress_expr(body, child_ctx)
+    desc = description === nothing ? "for $lhs in ..." : description
+    newfor = Expr(:for, Expr(:(=), lhs, itr),
+        quote
+            try
+                $wrapped_body
+            finally
+                $update_progress!($sub, $(IncrementBy)(1))
+            end
+        end)
+    newcall = Expr(:macrocall, x.args[1:end-1]..., newfor)
+    quote
+        local $itr = $rhs
+        $sub = $initialize_progress!($(ctx.progress), length($itr);
+            description=$desc, transient=$(ctx.transient))
+        try
+            $newcall
+        catch _e
+            $fail_progress!($sub, _e)
+            rethrow()
+        finally
+            $finalize_progress!($sub)
+        end
+    end
+end
+
 function progress_expr(x::Expr, ctx)
     # Nested @progress macrocall — rewrite in place using current context
     if _is_progress_macrocall(x)
         return _rewrite_nested_progress(x, ctx)
     end
+    # Threads.@threads for — determinate counter, thread-safe increment
+    _is_threads_for(x) && return _threads_for_progress_expr(x, ctx; description=nothing)
     # Bare for loop — wrap as iterable child (existing behavior)
     if x.head === :for
         return _for_progress_expr(x, ctx; description=nothing)
@@ -342,8 +396,18 @@ _nested_two_args(a, body, ctx) =
 
 # Dispatch on body shape
 function _build_body(body, label, ctx)
-    if Meta.isexpr(body, :for)
+    if _is_threads_for(body)
+        return _threads_for_progress_expr(body, ctx; description=label)
+    elseif _is_map_call(body)
+        return _map_progress_expr(body, label, ctx)
+    elseif Meta.isexpr(body, :for)
         return _for_progress_expr(body, ctx; description=label)
+    elseif Meta.isexpr(body, :comprehension)
+        return _comprehension_progress_expr(body, ctx; description=label)
+    elseif Meta.isexpr(body, :generator)
+        error("@progress over a bare generator `(f(x) for x in itr)` isn't supported — " *
+              "use a comprehension `[f(x) for x in itr]` for a counter, or " *
+              "`progress_map` / `@progress map(...) do … end` for per-element children")
     elseif Meta.isexpr(body, :block)
         return _block_progress_expr(body, label, ctx)
     elseif label === nothing
@@ -351,6 +415,23 @@ function _build_body(body, label, ctx)
         return progress_expr(body, ctx)
     else
         return _single_stmt_progress_expr(body, label, ctx)
+    end
+end
+
+# init → run → fail/finalize sandwich shared by the iterable @progress forms.
+# `subsym` is bound to `init_expr` (an IterableProgress or a ProgressNode), then
+# `run_expr` runs inside the lifecycle try/catch; its value is the block's value.
+function _iterprogress_sandwich(subsym, init_expr, run_expr)
+    quote
+        $subsym = $init_expr
+        try
+            $run_expr
+        catch _e
+            $fail_progress!($subsym, _e)
+            rethrow()
+        finally
+            $finalize_progress!($subsym)
+        end
     end
 end
 
@@ -364,22 +445,72 @@ function _for_progress_expr(x::Expr, ctx; description)
     subprogress = gensym(:iterprogress)
     child_ctx = (progress=:($subprogress.progress), transient=true)
     wrapped_body = progress_expr(body, child_ctx)
-    quote
-        $subprogress = $initialize_iterable_progress!(
-            $(ctx.progress), $rhs;
-            description=$desc, transient=$(ctx.transient),
-        )
-        try
-            for $lhs in $subprogress
-                $wrapped_body
-            end
-        catch _e
-            $fail_progress!($subprogress, _e)
-            rethrow()
-        finally
-            $finalize_progress!($subprogress)
-        end
+    init_expr = :($initialize_iterable_progress!(
+        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
+    ))
+    run_expr = :(for $lhs in $subprogress; $wrapped_body; end)
+    _iterprogress_sandwich(subprogress, init_expr, run_expr)
+end
+
+# comprehension wrap — per-element counter (eager). Single, unfiltered iterable
+# only; filtered / multi-dimensional comprehensions error rather than miscount.
+# (Bare lazy generators are rejected in `_build_body` — a counter on a value
+# consumed elsewhere would finalize before the work runs.)
+function _comprehension_progress_expr(x::Expr, ctx; description)
+    @assert x.head === :comprehension
+    gen = x.args[1]
+    if length(gen.args) != 2 || !Meta.isexpr(gen.args[2], :(=))
+        error("@progress: only single-iterable, unfiltered comprehensions are supported")
     end
+    elem_body = gen.args[1]
+    lhs, rhs = gen.args[2].args
+    desc = description === nothing ? "comprehension over $lhs" : description
+    sub = gensym(:iterprogress)
+    child_ctx = (progress=:($sub.progress), transient=true)
+    wrapped_elem = progress_expr(elem_body, child_ctx)
+    new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem, Expr(:(=), lhs, sub)))
+    init_expr = :($initialize_iterable_progress!(
+        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
+    ))
+    _iterprogress_sandwich(sub, init_expr, new_comp)
+end
+
+# Recognise a `map(...)` call — plain `map(f, itrs...)` or do-block form
+# `map(itrs...) do args... end` — for the opt-in @progress map-sugar.
+_is_map_name(n) = n === :map ||
+    (Meta.isexpr(n, :.) && n.args[2] isa QuoteNode && n.args[2].value === :map)
+function _is_map_call(x)
+    Meta.isexpr(x, :do) && return Meta.isexpr(x.args[1], :call) && _is_map_name(x.args[1].args[1])
+    Meta.isexpr(x, :call) && return _is_map_name(x.args[1])
+    return false
+end
+
+# @progress ["label"] map(itrs...) do args...; body; end   (opt-in magic sugar)
+# Rewrites `map` → `progress_map`, threading a fresh per-element child node as
+# the FIRST argument and walking the do-body so `__progress__` (and any nested
+# @progress) inside it bind to that child. The user-facing do-block stays
+# "childless": it lists only the element vars and refers to the node as
+# `__progress__`. A "label" wraps the per-element children under a named parent.
+function _map_progress_expr(x::Expr, label, ctx)
+    child = gensym(:mapchild)
+    if Meta.isexpr(x, :do)
+        callexpr = x.args[1]                 # Expr(:call, :map, itrs...)
+        lambda = x.args[2]                   # Expr(:->, params, body)
+        itrs = callexpr.args[2:end]
+        params = lambda.args[1]
+        elem_params = Meta.isexpr(params, :tuple) ? params.args : Any[params]
+        wrapped_body = progress_expr(lambda.args[2], (progress=child, transient=ctx.transient))
+        g = Expr(:->, Expr(:tuple, child, elem_params...), wrapped_body)
+    else                                     # Expr(:call, :map, f, itrs...)
+        f = x.args[2]
+        itrs = x.args[3:end]
+        a = gensym(:args)
+        g = Expr(:->, Expr(:tuple, child, Expr(:..., a)), Expr(:call, f, Expr(:..., a)))
+    end
+    label === nothing && return :($progress_map($g, $(ctx.progress), $(itrs...)))
+    outer = gensym(:mapouter)
+    init_expr = :($initialize_progress!($(ctx.progress); description=$label, transient=$(ctx.transient)))
+    _iterprogress_sandwich(outer, init_expr, :($progress_map($g, $outer, $(itrs...))))
 end
 
 # Single-stmt wrap (indeterminate child, runs for the duration of `body`)
