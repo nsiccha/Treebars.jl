@@ -298,8 +298,12 @@ is_failed(::Nothing) = false
 isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true
 
-initialize_progress!(::Val{:state}; kwargs...) = ProgressNode(
-    StateProgress(; kwargs...), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
+# Root initializer for the :state backend. Only `description`/`N`/`pending`
+# reach `StateProgress`; node-meta kwargs a caller might pass (`transient`,
+# `propagates`, `displayed`) are irrelevant to a parent-less root, so they are
+# dropped rather than splatted into the constructor (which would error).
+initialize_progress!(::Val{:state}; description="Running...", N=nothing, pending=false, kwargs...) = ProgressNode(
+    StateProgress(; description, N, pending), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
 function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, kwargs...)
     child = StateProgress(; description, N, pending)

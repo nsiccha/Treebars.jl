@@ -157,19 +157,27 @@ function _run_prepared_phases(f, phases)
 end
 
 """
-    progress_map(f, parent, itrs...; kwargs...)
+    progress_map(f, parent, itrs...; description="Running...", transient=false, kwargs...)
 
-Like `map(f, itrs...)` but creates one child progress node under `parent` per
-element, passing it to `f` as the first argument: `f(child, xs...)`. Returns
+Like `map(f, itrs...)`, but renders a **determinate progress bar** under
+`parent` for the whole map and gives each element its own child node beneath
+that bar, passing it to `f` as the first argument: `f(child, xs...)`. Returns
 the mapped collection. Multiple iterables zip like `map`.
 
-`kwargs` are forwarded to each per-element [`initialize_progress!`](@ref)
-(e.g. `description=`, `transient=true`, `N=…` for a determinate child).
+The loop (bar) node counts `0 … length` and advances by one as each element
+finishes; `description` is its label and `transient` its lifetime. When the
+iterables have no length (e.g. a bare generator) the loop node is indeterminate
+(no bar) but still brackets the per-element children.
+
+Each per-element `child` is created **label-less** so it stays out of the way
+until `f` gives it content (an empty child auto-inlines at render): report into
+it with `update_progress!(child, "msg")`, a nested `@progress child …`, etc.
+`kwargs` forward to each per-element [`initialize_progress!`](@ref).
 
 `parent` is an explicit progress node. Inside a `@progress` block, pass
 `__progress__` (the walker rewrites it to the enclosing node). Outside a
-`@progress` block, pass any node, or `nothing` to disable progress (then
-`child === nothing`, all lifecycle ops no-op).
+`@progress` block, pass any node, or `nothing` to disable progress (then both
+the loop node and `child` are `nothing`, all lifecycle ops no-op).
 
 Inside `f`, report sub-progress into the passed `child` — e.g.
 `@progress child for … end`, `with_progress(child, …)`, or
@@ -181,18 +189,33 @@ progress_map(__progress__, chains) do child, c
     @fetch!(child, c.df)
 end
 ```
+
+The `@progress [label] map(itrs...) do args… end` sugar lowers to this, threading
+the per-element `child` as `__progress__` for the do-body (see [`@progress`](@ref)).
 """
-function progress_map(f, parent, itrs...; kwargs...)
-    map(itrs...) do xs...
-        child = initialize_progress!(parent; kwargs...)
-        try
-            f(child, xs...)
-        catch e
-            fail_progress!(child, e)
-            rethrow()
-        finally
-            finalize_progress!(child)
+function progress_map(f, parent, itrs...; description="Running...", transient=false, kwargs...)
+    N = all(_has_length, itrs) ? minimum(length, itrs) : nothing
+    loop = isnothing(N) ?
+        initialize_progress!(parent; description, transient) :
+        initialize_progress!(parent, N; description, transient)
+    try
+        map(itrs...) do xs...
+            child = initialize_progress!(loop; description="", kwargs...)
+            try
+                f(child, xs...)
+            catch e
+                fail_progress!(child, e)
+                rethrow()
+            finally
+                finalize_progress!(child)
+                update_progress!(loop, IncrementBy(1))
+            end
         end
+    catch e
+        fail_progress!(loop, e)
+        rethrow()
+    finally
+        finalize_progress!(loop)
     end
 end
 
@@ -490,7 +513,8 @@ end
 # the FIRST argument and walking the do-body so `__progress__` (and any nested
 # @progress) inside it bind to that child. The user-facing do-block stays
 # "childless": it lists only the element vars and refers to the node as
-# `__progress__`. A "label" wraps the per-element children under a named parent.
+# `__progress__`. `progress_map` owns the loop (bar) node; `label` (or an auto
+# label) becomes its description, so a labeled map renders as a labeled bar.
 function _map_progress_expr(x::Expr, label, ctx)
     child = gensym(:mapchild)
     if Meta.isexpr(x, :do)
@@ -507,10 +531,8 @@ function _map_progress_expr(x::Expr, label, ctx)
         a = gensym(:args)
         g = Expr(:->, Expr(:tuple, child, Expr(:..., a)), Expr(:call, f, Expr(:..., a)))
     end
-    label === nothing && return :($progress_map($g, $(ctx.progress), $(itrs...)))
-    outer = gensym(:mapouter)
-    init_expr = :($initialize_progress!($(ctx.progress); description=$label, transient=$(ctx.transient)))
-    _iterprogress_sandwich(outer, init_expr, :($progress_map($g, $outer, $(itrs...))))
+    desc = label === nothing ? "map(...)" : label
+    :($progress_map($g, $(ctx.progress), $(itrs...); description=$desc, transient=$(ctx.transient)))
 end
 
 # Single-stmt wrap (indeterminate child, runs for the duration of `body`)
