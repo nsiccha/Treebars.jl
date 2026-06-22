@@ -80,20 +80,37 @@ htmx_treebar_styles() = h.style("""
 /* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
    .treebar-children for static one-shot renders). data-show-* values are "0" or
    "1" rather than "true"/"false" because Cobweb drops attrs whose value is the
-   string "false". CSS rules apply at both scopes. */
-.treebar-poller[data-show-finished="0"] .treebar-child-finished,
-.treebar-children[data-show-finished="0"] > .treebar-child-finished { display: none; }
-.treebar-poller[data-show-failed="0"] .treebar-child-failed,
-.treebar-children[data-show-failed="0"] > .treebar-child-failed { display: none; }
-.treebar-poller[data-show-pending="0"] .treebar-child-pending,
-.treebar-children[data-show-pending="0"] > .treebar-child-pending { display: none; }
+   string "false".
 
-.treebar-poller[data-show-finished="1"] .treebar-pill-finished,
-.treebar-children[data-show-finished="1"] > .treebar-pills .treebar-pill-finished,
-.treebar-poller[data-show-failed="1"] .treebar-pill-failed,
-.treebar-children[data-show-failed="1"] > .treebar-pills .treebar-pill-failed,
-.treebar-poller[data-show-pending="1"] .treebar-pill-pending,
-.treebar-children[data-show-pending="1"] > .treebar-pills .treebar-pill-pending { border-color: currentColor; }
+   Visibility is driven through INHERITED custom properties, NOT a descendant
+   combinator (`.treebar-poller[data-show-finished="0"] .treebar-child-finished`).
+   The combinator reached straight through *nested* pollers: an outer poller
+   stuck at "0" kept hiding finished nodes inside a nested poller even after
+   that inner poller's pill flipped it to "1" (the outer match still applied;
+   CSS descendant selectors have no nearest-ancestor-wins rule). Custom
+   properties inherit and the NEAREST definition wins, so each scope governs
+   its own subtree down to the next scope — nested-poller-correct by
+   construction. Only scopes that actually carry the data-show-* attribute set
+   the var, so a scopeless inner .treebar-children (scoped=false inside a
+   poller) is transparent to inheritance: the poller's value passes through. */
+.treebar-poller[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
+.treebar-poller[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
+.treebar-poller[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
+.treebar-poller[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
+.treebar-poller[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
+.treebar-poller[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
+.treebar-child-finished { display: var(--tb-finished-display, block); }
+.treebar-child-failed { display: var(--tb-failed-display, block); }
+.treebar-child-pending { display: var(--tb-pending-display, block); }
+
+/* Active-pill highlight, same nearest-scope-wins inheritance so a nested
+   poller's pills reflect that poller's own toggle, not an ancestor's. */
+.treebar-poller[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
+.treebar-poller[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
+.treebar-poller[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
+.treebar-pill-finished { border-color: var(--tb-finished-pill-border, transparent); }
+.treebar-pill-failed { border-color: var(--tb-failed-pill-border, transparent); }
+.treebar-pill-pending { border-color: var(--tb-pending-pill-border, transparent); }
 
 /* Demo helpers */
 .tb-input-narrow { max-width: 6rem; }
