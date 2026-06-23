@@ -3,7 +3,7 @@ module Treebars
 using Dates: DateTime, Millisecond, now, canonicalize, CompoundPeriod
 using OrderedCollections: OrderedSet, OrderedDict
 
-export @progress, @with_progress, with_progress, with_prepared_progress, with_prepared_phases, progress_map,
+export @progress, @phases, @with_progress, with_progress, with_prepared_progress, with_prepared_phases, progress_map,
     initialize_progress!, update_progress!, fail_progress!, finalize_progress!,
     add_child!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render,

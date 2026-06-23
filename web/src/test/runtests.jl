@@ -304,6 +304,83 @@ end
     @test length(only(root2.children).children) == 0
 end
 
+@testset "@phases explicit node — block" begin
+    # Each top-level statement of the block becomes its own pre-enumerated,
+    # timed phase (label = shortened source). All statements share one try-scope
+    # so assignments stay visible across phases, and the block is value-preserving.
+    root = initialize_progress!(:state; description="Root")
+    result = @phases root begin
+        x = 1 + 1
+        y = x * 10
+    end
+    @test result == 20                       # value-preserving + cross-phase visibility (y used x)
+    snap = Treebars.progress_state(root)     # wrapper already finalized by its own finally
+    finalize_progress!(root)
+
+    # root → label-less wrapper → [phase "x = 1 + 1", phase "y = x * 10"]
+    @test length(snap["children"]) == 1
+    wrap = snap["children"][1]
+    @test wrap["description"] == ""          # label-less ⇒ auto-inlines at render
+    @test wrap["running"] == false
+    phases = wrap["children"]
+    @test [c["description"] for c in phases] == ["x = 1 + 1", "y = x * 10"]
+    # Each phase was started AND finalized ⇒ it carries a per-statement duration.
+    @test all(c -> c["running"] == false && c["finalized_at"] !== nothing, phases)
+end
+
+@testset "@phases explicit node — for body (per-iteration phases)" begin
+    # In a for body, each statement becomes a per-iteration phase under the
+    # iteration counter; the per-iteration wrapper finalizes + detaches each
+    # iteration, so phases never accumulate. The loop-profiling use case.
+    root = initialize_progress!(:state; description="Root")
+    snap = Ref{Any}(nothing)
+    # Capture during the FIRST phase: phase 1 is running and the later phases are
+    # still pending — so all three are attached. (As phases finalize they detach,
+    # since for-body phases are transient — hence the in-body snapshot.)
+    @phases root for i in 1:3
+        i == 2 && (snap[] = Treebars.progress_state(root))
+        a = i + 1
+        b = a * 2
+    end
+    finalize_progress!(root)
+
+    # root → counter("for i in ...") → per-iteration label-less wrapper → phases
+    counter = only(root.children)
+    @test counter.impl.description == "for i in ..."
+    @test counter.impl.i == 3                # counter advanced once per iteration
+    @test length(counter.children) == 0      # per-iteration wrappers detached ⇒ no accumulation
+
+    # Mid-iteration: one wrapper carrying the three pre-enumerated per-statement
+    # phases; the last two have clean shortened-source labels.
+    counter_snap = snap[]["children"][1]
+    @test length(counter_snap["children"]) == 1
+    wrap = counter_snap["children"][1]
+    @test wrap["description"] == ""
+    @test length(wrap["children"]) == 3
+    @test [c["description"] for c in wrap["children"]][2:3] == ["a = i + 1", "b = a * 2"]
+end
+
+@testset "@phases bare (active node) inside @progress" begin
+    # The ergonomic bare form: `@phases body` with no node, eager-expanded by the
+    # @progress walker against the active node. Here the transparent
+    # `@progress root begin … end` makes root the active node, so the @phases
+    # wrapper attaches directly under root.
+    root = initialize_progress!(:state; description="Root")
+    @progress root begin
+        @phases begin
+            p = 3
+            q = p + 4
+        end
+    end
+    snap = Treebars.progress_state(root)
+    finalize_progress!(root)
+
+    @test length(snap["children"]) == 1
+    wrap = snap["children"][1]
+    @test wrap["description"] == ""
+    @test [c["description"] for c in wrap["children"]] == ["p = 3", "q = p + 4"]
+end
+
 @testset "IterableProgress" begin
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")

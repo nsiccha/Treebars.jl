@@ -276,6 +276,15 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 _is_progress_macrocall(x) =
     Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@progress")
 
+# @phases macrocall recognition (mirrors the @progress pair). The walker
+# (`progress_expr`) detects these and eager-expands them in place via the shared
+# `_phases_build`, so an `@phases` nested inside `@progress` binds the active node.
+_is_phases_macrocall(x) =
+    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@phases")
+
+# User-supplied args of an @phases macrocall (strip macro name + LineNumberNode)
+_phases_user_args(x) = x.args[3:end]
+
 # True for both plain string literals (`"step"`) and interpolated string
 # literals (`"step $i"`, parsed as `Expr(:string, …)`). The downstream
 # emitter handles `description=$label` as a generic Expr, so the parser-level
@@ -362,6 +371,14 @@ function progress_expr(x::Expr, ctx)
     # Nested @progress macrocall — rewrite in place using current context
     if _is_progress_macrocall(x)
         return _rewrite_nested_progress(x, ctx)
+    end
+    # Nested @phases macrocall — eager-expand in place against the active node
+    # via the shared builder (Strategy E). This is the ergonomic `@phases body`
+    # form: no literal `__progress__` survives; the active `ctx.progress` is
+    # substituted directly. The explicit `@phases node body` form also routes
+    # here when found during descent.
+    if _is_phases_macrocall(x)
+        return _phases_build(_phases_user_args(x), ctx)
     end
     # Threads.@threads for — determinate counter, thread-safe increment
     _is_threads_for(x) && return _threads_for_progress_expr(x, ctx; description=nothing)
@@ -723,4 +740,151 @@ macro progress(args...)
         transient = false,
     )
     esc(_build_body(body, label, ctx))
+end
+
+# ──────────────────────────────────────────────────────────────────────────────
+# @phases macro
+#
+# Auto-instruments each top-level statement of a `begin … end` block (or a
+# `for` / `Threads.@threads for` body) as its own pre-enumerated, timed phase —
+# conceptually inserting `@progress "<shortened source of stmt>"` before each
+# statement. Implemented by injecting bare-string phase markers and delegating to
+# the existing `@progress` lowering (`_build_body` → `_block_progress_expr` /
+# `_for_progress_expr` + `_wrap_for_body` + `_emit_phases`) — no forked walker.
+#
+# Surface:
+#     @phases body          — drives the ACTIVE progress node (only meaningful
+#                             inside @progress; standalone → BACKEND[] no-op)
+#     @phases node body     — drives an explicit ProgressNode (self-contained)
+#
+# Both the standalone macro and the `@progress`-walker hook funnel through the
+# single shared `_phases_build`, so the two surfaces lower identically.
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Shorten a statement's source to a phase label: stringify (line-numbers
+# stripped), collapse all whitespace/newlines to single spaces, truncate.
+const _PHASE_LABEL_MAXLEN = 60
+function _short_label(stmt)
+    clean = stmt isa Expr ? Base.remove_linenums!(deepcopy(stmt)) : stmt
+    s = strip(replace(string(clean), r"\s+" => " "))
+    length(s) > _PHASE_LABEL_MAXLEN ? first(s, _PHASE_LABEL_MAXLEN - 1) * "…" : String(s)
+end
+
+_as_block(x) = Meta.isexpr(x, :block) ? x : Expr(:block, x)
+
+# Interleave a bare-string phase marker (the shortened source) before each
+# top-level, non-LineNumberNode statement of a block. `_block_progress_expr`
+# splits these back out into one phase per statement.
+function _inject_block_markers(block::Expr)
+    @assert block.head === :block
+    out = Any[]
+    for a in block.args
+        a isa LineNumberNode ? push!(out, a) : append!(out, (_short_label(a), a))
+    end
+    Expr(:block, out...)
+end
+
+# Insert per-statement markers into the @phases body, preserving its shape so the
+# downstream `_build_body` dispatch picks the right lowering (block → split;
+# for / @threads for → per-iteration phase sub-tree via `_wrap_for_body`).
+function _inject_phase_markers(body)
+    if Meta.isexpr(body, :block)
+        return _inject_block_markers(body)
+    elseif Meta.isexpr(body, :for)
+        head, fbody = body.args
+        return Expr(:for, head, _inject_block_markers(_as_block(fbody)))
+    elseif _is_threads_for(body)
+        forexpr = body.args[end]
+        head, fbody = forexpr.args
+        newfor = Expr(:for, head, _inject_block_markers(_as_block(fbody)))
+        return Expr(:macrocall, body.args[1:end-1]..., newfor)
+    else
+        # A single non-block, non-for statement → one phase.
+        return _inject_block_markers(Expr(:block, body))
+    end
+end
+
+# Shared builder for both @phases surfaces. `args` are the user args (no macro
+# name / LineNumberNode). One arg → drive `ctx.progress` (the active node);
+# two args → drive the explicit node (run through `progress_expr` so an
+# `__progress__` node argument resolves to the active node when expanded by the
+# @progress walker). Markers are injected, then the existing @progress lowering
+# does the phase split.
+function _phases_build(args, ctx)
+    if length(args) == 1
+        node, body = ctx.progress, args[1]
+    elseif length(args) == 2
+        node, body = progress_expr(args[1], ctx), args[2]
+    else
+        error("@phases: expected `@phases body` or `@phases node body`")
+    end
+    child_ctx = (progress=node, transient=ctx.transient)
+    marked = _inject_phase_markers(body)
+    # Block / single-statement bodies go through `force_wrap=true` so they get a
+    # label-less wrapper with its own try/finally: the LAST phase finalizes at
+    # block exit (accurate per-statement timing, not deferred to a later parent
+    # finalize), and when this expansion is a for-body the transient wrapper
+    # finalizes + detaches its phases per iteration (no accumulation). For/
+    # @threads-for bodies route through `_build_body` → `_for_progress_expr`,
+    # which already applies the per-iteration `force_wrap` wrapper via
+    # `_wrap_for_body`.
+    if Meta.isexpr(marked, :block)
+        return _block_progress_expr(marked, nothing, child_ctx; force_wrap=true)
+    end
+    _build_body(marked, nothing, child_ctx)
+end
+
+"""
+    @phases body
+    @phases node body
+
+Auto-instrument **each top-level statement** of `body` as its own pre-enumerated,
+timed progress phase — as if a `@progress "<shortened source>"` phase marker were
+inserted before every statement. `body` is a `begin … end` block or a `for` /
+`Threads.@threads for` loop; in the loop forms each statement becomes a
+per-iteration phase under the iteration counter. Reach for it to profile a
+sequence/loop body and see which statement dominates.
+
+Two forms:
+
+- `@phases body` — drives the **active** progress node. Only meaningful inside an
+  enclosing `@progress` block (whose walker supplies the active node). Used
+  standalone it drives `BACKEND[]`, so it is a graceful no-op when progress is
+  disabled.
+- `@phases node body` — drives an explicit `ProgressNode` expression (`p`,
+  `__status__`, …). Self-contained; works anywhere. Mirrors the
+  `@progress <node> body` node form.
+
+```julia
+@progress "fit" for subject in subjects
+    @phases begin
+        data  = load(subject)     # phase "data = load(subject)"
+        model = build(data)       # phase "model = build(data)"   (data visible)
+        fit!(model)               # phase "fit!(model)"
+    end
+end
+
+# Explicit node, self-contained:
+with_progress(:state; description="pipeline") do p
+    @phases p begin
+        step_a()
+        step_b()
+    end
+end
+```
+
+Phase labels are the shortened statement source (whitespace collapsed, truncated).
+Compound statements (`if` / nested `for` / blocks) stay **one** phase each — the
+split is over top-level statements only, not recursive.
+
+!!! note
+    All statements run inside the phase machinery's single `try` scope, so
+    assignments stay mutually visible **across** phases but do not leak **past**
+    the `@phases` block. Fine for loop bodies (loop-scoped locals) and
+    side-effecting sequences; if post-block code needs a binding, set it outside
+    the `@phases` block (or use plain `@progress "label"` markers).
+"""
+macro phases(args...)
+    ctx = (progress = :($(BACKEND)[]), transient = false)
+    esc(_phases_build(args, ctx))
 end
