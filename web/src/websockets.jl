@@ -22,7 +22,7 @@ _ws_html(target_id, title, body...) =
     # Simple form submission: HTMX WS sends JSON with the form's `key` field;
     # parse it out, spawn a fake sampling task, stream progress via ws_progress,
     # then send the final result article.
-    @ws ws = begin
+    @ws ws() = begin
         for msg in __ws__
             m = match(r"\"key\"\s*:\s*\"([^\"]+)\"", msg)
             key = isnothing(m) ? msg : m.captures[1]

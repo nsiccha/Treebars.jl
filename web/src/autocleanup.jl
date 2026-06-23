@@ -41,7 +41,7 @@ end
         htmx_render(status_node),
     )
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h3("Auto-cleanup demo"),
         h.p("Fires N parallel ", h.code("autocleanup.results[randkey]"),
             " computations. With the transient-substatus detach hook, each substatus detaches from the root tree on success — watch the ",
@@ -54,7 +54,7 @@ end
         frame(),
     )
 
-    @get refresh = frame()
+    @get refresh() = frame()
 
     @get fire(n::Int) = begin
         for _ in 1:n
@@ -68,7 +68,7 @@ end
         frame("spawned $n tasks")
     end
 
-    @get fire_fail = begin
+    @get fire_fail() = begin
         k = "boom$(rand(1:1_000_000))"
         Threads.@spawn try
             failing[k]

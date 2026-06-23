@@ -129,7 +129,7 @@ const APPDATA = AppData()
     @include pills       = PillDemosRoutes()
     @include websockets  = WebSocketsRoutes()
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h1("Treebars Web Demo"),
         h.p(h.a(href="/tests")("Tests"), " | ",
             h.a(href="/pills")("Pill demos"), " | ",
