@@ -320,14 +320,26 @@ end
 # increments safe). The original macrocall is preserved (schedule arg and all);
 # only its for-loop body is rewritten. The increment is in a `finally` so it
 # still advances on `continue`.
+#
+# The body is routed through `_wrap_for_body` (the SAME helper the serial
+# `_for_progress_expr` uses), so bare `@progress "label"` phase markers in a
+# threaded body get a per-iteration, transient, label-less wrapper running the
+# `_emit_phases` machinery — each concurrent iteration builds its own phase
+# sub-tree, thread-safe by the StateProgress lock invariant. `transient=true`
+# mirrors the serial child ctx (`_for_progress_expr`): every per-iteration node
+# (phase wrapper or nested @progress) detaches on finalize, so nothing
+# accumulates under concurrency. The lifecycle try/fail/finally is shared via
+# `_iterprogress_sandwich` (same helper as the serial/comprehension forms);
+# this fn differs only in the irreducible init (`length(itr)` counter) and loop
+# emission (preserved macrocall + `finally` increment).
 function _threads_for_progress_expr(x::Expr, ctx; description)
     forexpr = x.args[end]
     lhs, rhs = forexpr.args[1].args
     body = forexpr.args[2]
     sub = gensym(:threadsprogress)
     itr = gensym(:itr)
-    child_ctx = (progress=sub, transient=ctx.transient)
-    wrapped_body = progress_expr(body, child_ctx)
+    child_ctx = (progress=sub, transient=true)
+    wrapped_body = _wrap_for_body(body, child_ctx)
     desc = description === nothing ? "for $lhs in ..." : description
     newfor = Expr(:for, Expr(:(=), lhs, itr),
         quote
@@ -338,18 +350,11 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
             end
         end)
     newcall = Expr(:macrocall, x.args[1:end-1]..., newfor)
+    init_expr = :($initialize_progress!($(ctx.progress), length($itr);
+        description=$desc, transient=$(ctx.transient)))
     quote
         local $itr = $rhs
-        $sub = $initialize_progress!($(ctx.progress), length($itr);
-            description=$desc, transient=$(ctx.transient))
-        try
-            $newcall
-        catch _e
-            $fail_progress!($sub, _e)
-            rethrow()
-        finally
-            $finalize_progress!($sub)
-        end
+        $(_iterprogress_sandwich(sub, init_expr, newcall))
     end
 end
 

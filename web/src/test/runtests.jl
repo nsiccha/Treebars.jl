@@ -259,6 +259,51 @@ end
     @test length(only(root3.children).children) == 0
 end
 
+@testset "@progress @threads for with bare phase markers" begin
+    # Mirror of the serial "@progress for with bare phase markers" testset, for the
+    # Threads.@threads form. Each concurrent iteration gets its own per-iteration,
+    # transient, label-less wrapper hosting the pre-enumerated phases; the wrapper
+    # finalizes + detaches per iteration so phases don't accumulate. Valid at any
+    # thread count (the lowering + no-accumulation hold under -t1); real concurrency
+    # is exercised when run with `julia -t2`.
+    root = initialize_progress!(:state; description="Root")
+    snap = Ref{Any}(nothing)
+    count = Threads.Atomic{Int}(0)
+    @progress root Threads.@threads for i in 1:3
+        @progress "load"
+        Threads.atomic_add!(count, 1)
+        i == 2 && (snap[] = Treebars.progress_state(root))
+        @progress "fit"
+    end
+    finalize_progress!(root)
+    @test count[] == 3
+
+    # The counter node is determinate (length 3) and labeled by the iteration var.
+    counter = only(root.children)
+    @test counter.impl.description == "for i in ..."
+    # Phases do not accumulate: each iteration's transient wrapper is detached.
+    @test length(counter.children) == 0
+
+    # Mid-run: at least one label-less wrapper sits under the counter, each carrying
+    # the two pre-enumerated phases. (Under concurrency >1 wrapper may coexist; the
+    # finished-pill filter hides completed ones at render — that's expected.)
+    counter_snap = snap[]["children"][1]
+    @test length(counter_snap["children"]) >= 1
+    for wrap_snap in counter_snap["children"]
+        @test wrap_snap["description"] == ""                    # label-less ⇒ auto-inlines
+        @test [c["description"] for c in wrap_snap["children"]] == ["load", "fit"]
+    end
+
+    # Bare @threads for WITHOUT markers (and no nested @progress) is unchanged: the
+    # body attaches straight to the counter, no wrapper, no phase children.
+    root2 = initialize_progress!(:state; description="Root2")
+    @progress root2 Threads.@threads for i in 1:3
+        i + 1
+    end
+    finalize_progress!(root2)
+    @test length(only(root2.children).children) == 0
+end
+
 @testset "IterableProgress" begin
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")
