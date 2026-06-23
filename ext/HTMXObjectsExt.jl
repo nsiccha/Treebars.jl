@@ -72,8 +72,20 @@ htmx_treebar_styles() = h.style("""
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
+.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
 .treebar-node { margin-bottom: 0.25rem; }
+
+/* Pause/resume control. Sits top-right of the persistent .treebar-poller
+   wrapper. The margin-right above keeps the (float:right) Stop button clear
+   of this absolutely-positioned button when cancel_url is set — a constant
+   margin, NOT the inherited-custom-prop visibility scheme, so it does not
+   interact with the nested-poller data-show-* logic below. */
+.treebar-poller { position: relative; }
+.treebar-pause {
+    position: absolute; top: 0.25rem; right: 0.4rem; z-index: 2;
+    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
+    width: auto; cursor: pointer;
+}
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 .treebar-label { padding-left: 1rem; margin-left: 0.25rem; }
 
@@ -155,6 +167,12 @@ htmx_treebar_script() = h.script("""
     }
     function tick(el){
         if (el.dataset.treebarStatus !== 'running') return;
+        // Freeze the duration while this span's poller is paused, so the
+        // inspected snapshot is genuinely still. On resume the ticker
+        // catches up to true elapsed (the work kept running — pause is not
+        // cancel) and the next server poll re-anchors.
+        var p = el.closest('.treebar-poller');
+        if (p && p.dataset.paused === '1') return;
         if (el._tbAnchor === undefined) anchor(el);
         var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
         // Only touch the DOM when the rendered string actually changes —
@@ -172,6 +190,19 @@ htmx_treebar_script() = h.script("""
     function reanchorAndTick(){ reanchorAll(); tickAll(); }
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
+    // Pause: cancel a poller's own `every Xs` poll request while its wrapper
+    // is data-paused. Scoped to the .treebar-poller-inner element, so the
+    // Stop/cancel request (a different element) still fires when paused. The
+    // `every` timer keeps rescheduling, so resume needs no re-arming. Keyed
+    // on closest('.treebar-poller') → self-contained per poller (nested
+    // pollers each govern their own polling).
+    document.addEventListener('htmx:beforeRequest', function(evt){
+        var el = evt.detail && evt.detail.elt;
+        if (el && el.classList.contains('treebar-poller-inner')){
+            var p = el.closest('.treebar-poller');
+            if (p && p.dataset.paused === '1') evt.preventDefault();
+        }
+    });
     function start(){
         reanchorAndTick();
         if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 100); }
@@ -429,7 +460,7 @@ function _polling_running(status; label, poll_url, poll_interval, cancel_url)
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
     inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
-    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body))
+    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body); pausable=true)
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
@@ -438,10 +469,22 @@ end
 # this wrapper into the DOM — subsequent polls only swap the inner, leaving
 # the original wrapper element (and its possibly-toggled data-show-* attrs)
 # untouched.
-_polling_wrap(inner) = h.div(class="treebar-poller",
+# A small, unobtrusive pause/resume control. onclick toggles `data-paused`
+# on the closest .treebar-poller — the persistent wrapper, so the paused
+# state survives polls exactly like the data-show-* pills. The
+# htmx:beforeRequest listener (htmx_treebar_script) reads that attr to cancel
+# this poller's poll requests, and the duration ticker freezes on it. Keyed
+# on closest('.treebar-poller') so nested pollers each pause independently.
+# The button persists across polls (it lives on the never-swapped wrapper),
+# so its JS-toggled label stays consistent.
+_pause_button() = h.button(class="treebar-pause", type="button",
+    onclick="var p=this.closest('.treebar-poller'); if(!p) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; this.textContent=v==='1'?'Resume':'Pause';")("Pause")
+
+_polling_wrap(inner; pausable=false) = h.div(class="treebar-poller",
+        data_paused="0",
         data_show_finished="0",
         data_show_pending="1",
-        data_show_failed="1")(inner)
+        data_show_failed="1")(pausable ? _pause_button() : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server
