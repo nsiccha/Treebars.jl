@@ -105,7 +105,7 @@ end
         htmx_render_children(root)
     end
 
-    @get index = h.div(
+    @get index() = h.div(
         h.h3("Pill Demos"),
         h.p("Various tree structures demonstrating pill filtering at different nesting levels.";
             class="u-text-sm u-text-muted"),
