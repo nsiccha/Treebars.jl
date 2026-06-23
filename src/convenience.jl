@@ -458,6 +458,21 @@ function _iterprogress_sandwich(subsym, init_expr, run_expr)
     end
 end
 
+# True iff the block has any bare `@progress "label"` phase markers as direct
+# statements (plain or interpolated string literals — `_phase_marker_label`
+# recognises both).
+_has_phase_marker(block::Expr) =
+    block.head === :block && any(a -> _phase_marker_label(a) !== nothing, block.args)
+
+# Route a for-loop body. A block carrying bare phase markers gets a per-iteration,
+# transient, LABEL-LESS wrapper node running the existing `_emit_phases` phase
+# machinery (auto-inlines at render, finalized + detached per iteration so phases
+# don't accumulate). Anything else recurses generically — unchanged behavior.
+_wrap_for_body(body, ctx) =
+    _has_phase_marker(body) ?
+        _block_progress_expr(body, nothing, ctx; force_wrap=true) :
+        progress_expr(body, ctx)
+
 # for-loop wrap — description from label (or auto from iteration var)
 function _for_progress_expr(x::Expr, ctx; description)
     @assert length(x.args) == 2
@@ -467,7 +482,7 @@ function _for_progress_expr(x::Expr, ctx; description)
     desc = description === nothing ? "for $lhs in ..." : description
     subprogress = gensym(:iterprogress)
     child_ctx = (progress=:($subprogress.progress), transient=true)
-    wrapped_body = progress_expr(body, child_ctx)
+    wrapped_body = _wrap_for_body(body, child_ctx)
     init_expr = :($initialize_iterable_progress!(
         $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
     ))
@@ -565,7 +580,7 @@ _absorb_block_arg!(phases, cur_label, cur_stmts, a, label) = begin
 end
 
 # Block wrap — split at phase markers, pre-enumerate labeled phases as pending
-function _block_progress_expr(block::Expr, outer_label, ctx)
+function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
     # Split block.args into (label, [stmts]) phases at phase-marker statements.
     # The first chunk has label=nothing (pre-first-marker stmts). Labels are
     # the raw source-level expressions (plain string or `Expr(:string, …)`),
@@ -578,14 +593,18 @@ function _block_progress_expr(block::Expr, outer_label, ctx)
     end
     push!(phases, (cur_label, cur_stmts))
 
-    # If an outer label was given, wrap everything in a running labeled node
-    if outer_label !== nothing
+    # Wrap everything in a per-block node when an outer label was given, or when
+    # `force_wrap` is set (the bare `@progress for`-body-with-phase-markers case,
+    # which needs a per-iteration LABEL-LESS wrapper). A label-less wrapper uses
+    # description="" so `_is_bare_wrapper`/`_renders_self` auto-inline it at render.
+    if outer_label !== nothing || force_wrap
+        wrapper_desc = outer_label === nothing ? "" : outer_label
         outer = gensym(:progressouter)
         inner_ctx = (progress=outer, transient=ctx.transient)
         inner = _emit_phases(phases, inner_ctx)
         return quote
             $outer = $initialize_progress!(
-                $(ctx.progress); description=$outer_label, transient=$(ctx.transient),
+                $(ctx.progress); description=$wrapper_desc, transient=$(ctx.transient),
             )
             try
                 $inner

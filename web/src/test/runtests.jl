@@ -206,6 +206,59 @@ end
     finalize_progress!(root)
 end
 
+@testset "@progress for with bare phase markers" begin
+    # Bare `@progress "label"` markers in a for body get an implicit per-iteration
+    # label-less wrapper node; phases enumerate per iteration and clean up (no
+    # accumulation), and the label-less wrapper auto-inlines at render.
+    root = initialize_progress!(:state; description="Root")
+    snap = Ref{Any}(nothing)
+    count = 0
+    @progress root for i in 1:3
+        @progress "load"
+        count += 1
+        i == 2 && (snap[] = Treebars.progress_state(root))
+        @progress "fit"
+    end
+    finalize_progress!(root)
+    @test count == 3
+
+    # Mid-iteration: under the counter node sits one label-less wrapper carrying
+    # the two pre-enumerated phases.
+    counter_snap = snap[]["children"][1]
+    @test length(counter_snap["children"]) == 1
+    wrap_snap = counter_snap["children"][1]
+    @test wrap_snap["description"] == ""                       # label-less ⇒ auto-inlines
+    @test [c["description"] for c in wrap_snap["children"]] == ["load", "fit"]
+
+    # The label-less wrapper is a bare wrapper that does not render itself.
+    counter = only(root.children)
+    @test counter.impl.description == "for i in ..."
+    # Phases do not accumulate: each iteration's transient wrapper is detached.
+    @test length(counter.children) == 0
+
+    # Bare for WITHOUT markers is unchanged: body attaches straight to the counter
+    # (no wrapper, no phase children).
+    root2 = initialize_progress!(:state; description="Root2")
+    @progress root2 for i in 1:3
+        i + 1
+    end
+    finalize_progress!(root2)
+    @test length(only(root2.children).children) == 0
+
+    # Interpolated bare markers are NOT a silent no-op — they pre-enumerate a real
+    # phase per iteration with the interpolated (loop-scope) label.
+    root3 = initialize_progress!(:state; description="Root3")
+    isnap = Ref{Any}(nothing)
+    @progress root3 for i in 1:3
+        @progress "phase $i"
+        i == 2 && (isnap[] = Treebars.progress_state(root3))
+    end
+    finalize_progress!(root3)
+    iwrap = isnap[]["children"][1]["children"][1]
+    @test [c["description"] for c in iwrap["children"]] == ["phase 2"]
+    @test length(only(root3.children).children) == 0
+end
+
 @testset "IterableProgress" begin
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")
