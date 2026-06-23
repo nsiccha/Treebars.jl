@@ -82,10 +82,20 @@ htmx_treebar_styles() = h.style("""
    interact with the nested-poller data-show-* logic below. */
 .treebar-poller { position: relative; }
 .treebar-pause {
+    display: none;
     position: absolute; top: 0.25rem; right: 0.4rem; z-index: 2;
     margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
     width: auto; cursor: pointer;
 }
+/* Reveal the pause control ONLY while this poller is actively polling — i.e. its
+   DIRECT-CHILD inner still carries hx-trigger (running). The done inner and the
+   error article (article[aria-invalid]) drop hx-trigger, so :has() goes false and
+   the button auto-hides with zero server change. The `>` is load-bearing: without
+   it an outer (done) poller would match a NESTED still-running inner and keep its
+   own button visible (the same nested-poller trap the data-show-* scheme avoids,
+   see comment below). Pause cancels the request via JS but keeps the element (and
+   its hx-trigger), so a paused poller still matches → button stays → Resume works. */
+.treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 .treebar-label { padding-left: 1rem; margin-left: 0.25rem; }
 
