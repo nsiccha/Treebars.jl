@@ -304,6 +304,61 @@ end
     @test length(only(root2.children).children) == 0
 end
 
+@testset "@progress block — leading stmts sort above labeled phases" begin
+    # Implicit leading-phase node: statements BEFORE the first phase marker run
+    # under an auto LABEL-LESS node created FIRST, so a progress child a leading
+    # statement creates (via __progress__) sorts ABOVE the labeled phases in the
+    # OrderedSet `children`. Without the fix the leading-created child was
+    # add_child!'d after the pending phase nodes and rendered below them.
+    root = initialize_progress!(:state; description="Root")
+    @progress root begin
+        lead = initialize_progress!(__progress__; description="lead-load")
+        finalize_progress!(lead)
+        @progress "Phase A"
+        1 + 1
+        @progress "Phase B"
+        2 + 2
+    end
+    snap = Treebars.progress_state(root)
+    finalize_progress!(root)
+
+    # root → [leading-wrapper(""), "Phase A", "Phase B"] — the leading wrapper is
+    # FIRST, carrying the leading-created child; the labeled phases follow.
+    @test [c["description"] for c in snap["children"]] == ["", "Phase A", "Phase B"]
+    lead_wrap = snap["children"][1]
+    @test lead_wrap["description"] == ""                       # label-less ⇒ auto-inlines
+    @test [c["description"] for c in lead_wrap["children"]] == ["lead-load"]
+    # Non-transient block: the finished leading child persists (not detached).
+    @test lead_wrap["running"] == false
+
+    # Leading stmts that create NO progress child: the leading wrapper still
+    # fires (a real pre-marker statement) but stays empty, so it auto-inlines to
+    # nothing at render and does not add to the visible tree.
+    root2 = initialize_progress!(:state; description="Root2")
+    @progress root2 begin
+        z = 41 + 1
+        @progress "Only"
+        z
+    end
+    snap2 = Treebars.progress_state(root2)
+    finalize_progress!(root2)
+    @test [c["description"] for c in snap2["children"]] == ["", "Only"]
+    # No "children" key ⇒ the wrapper has no children ⇒ auto-inlines to nothing.
+    @test !haskey(snap2["children"][1], "children")
+
+    # Marker-FIRST block (no leading stmts): unchanged — no leading wrapper.
+    root3 = initialize_progress!(:state; description="Root3")
+    @progress root3 begin
+        @progress "First"
+        1 + 1
+        @progress "Second"
+        2 + 2
+    end
+    snap3 = Treebars.progress_state(root3)
+    finalize_progress!(root3)
+    @test [c["description"] for c in snap3["children"]] == ["First", "Second"]
+end
+
 @testset "@phases explicit node — block" begin
     # Each top-level statement of the block becomes its own pre-enumerated,
     # timed phase (label = shortened source). All statements share one try-scope

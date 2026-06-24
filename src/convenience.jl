@@ -664,13 +664,44 @@ function _emit_phases(phases, ctx)
         for (sym, (lbl, _)) in zip(pending_syms, labeled)
     ]
 
-    # Pre-first-marker statements run in the outer ctx, before any phase is
-    # started. Keep them outside the try so their assignments remain visible
-    # in the enclosing scope (nothing to fail/clean up for them anyway).
-    # phases always starts with the (nothing, pre-marker stmts) entry (possibly
-    # empty); labeled phases follow. Pre-stmts stay outside the try so their
-    # assignments leak into the enclosing scope as before.
-    pre_stmts = Any[progress_expr(s, ctx) for s in first(phases)[2]]
+    # Pre-first-marker (leading) statements run before any labeled phase is
+    # started. Keep them outside the try so their assignments remain visible in
+    # the enclosing scope (nothing to fail/clean up for them anyway). phases
+    # always starts with the (nothing, pre-marker stmts) entry (possibly empty);
+    # labeled phases follow.
+    #
+    # When there ARE labeled phases AND leading statements, wrap the leading
+    # statements in an implicit LABEL-LESS node created FIRST — before the
+    # labeled phases are prepared — so any progress child a leading statement
+    # creates (via `__progress__`, e.g. a `@fetch!` disk-load substatus) sorts
+    # ABOVE the labeled phases in `ctx.progress.children` (an OrderedSet). The
+    # node is label-less (description="") so `_is_bare_wrapper`/`_renders_self`
+    # auto-inline it: with children they hoist to `ctx.progress` ordered first;
+    # with none it renders nothing. `transient=ctx.transient` mirrors the block,
+    # so a per-iteration (transient) block detaches its leading node each
+    # iteration (no accumulation) while a persistent block keeps a lingering
+    # finished child visible. The leading statements stay OUTSIDE any new
+    # try/let scope (we only rebind `__progress__`, not the variable scope), so
+    # their assignments still leak into the enclosing scope as before.
+    leading_stmts = first(phases)[2]
+    if !isempty(pending_syms) && any(s -> !(s isa LineNumberNode), leading_stmts)
+        leading_sym = gensym(:leading)
+        leading_ctx = (progress=leading_sym, transient=ctx.transient)
+        prepare_stmts = Any[
+            :( $leading_sym = $prepare_progress!(
+                $(ctx.progress); description="", transient=$(ctx.transient),
+            ) ),
+            prepare_stmts...,
+        ]
+        pre_stmts = Any[
+            :( $start_progress!($leading_sym) ),
+            (progress_expr(s, leading_ctx) for s in leading_stmts)...,
+            :( $finalize_progress!($leading_sym) ),
+        ]
+    else
+        pre_stmts = Any[progress_expr(s, ctx) for s in leading_stmts]
+    end
+
     phase_stmts = Any[]
     for (idx, (lbl, stmts)) in enumerate(labeled)
         sym = pending_syms[idx]
