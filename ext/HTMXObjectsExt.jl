@@ -97,7 +97,10 @@ htmx_treebar_styles() = h.style("""
    its hx-trigger), so a paused poller still matches → button stays → Resume works. */
 .treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
-.treebar-label { padding-left: 1rem; margin-left: 0.25rem; }
+/* .treebar-label intentionally carries NO self-indent: it inherits indentation
+   from the enclosing .treebar-children like every other node, so a nested label
+   aligns with its sibling .treebar-node instead of being double-indented. Its
+   flex layout lives in the `.treebar-header, .treebar-label` rule above. */
 
 /* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
    .treebar-children for static one-shot renders). data-show-* values are "0" or
@@ -145,16 +148,18 @@ htmx_treebar_styles() = h.style("""
 # counter advances smoothly between server polls instead of stuttering.
 htmx_treebar_script() = h.script("""
 (function(){
-    // Band-based formatter: only the most relevant unit (plus one finer for
-    // precision) is shown in any band, and each band's smallest displayed
-    // unit is an integer step. So the rendered string changes at most once
-    // per integer step of the smallest unit (per-100ms below 1s, per-second
-    // up to 1h, per-minute up to 1d, per-hour beyond) and length stays
-    // stable within a band.
+    // Band-based formatter mirroring the server-side short_duration: sub-100ms
+    // show whole milliseconds, sub-minute shows one-decimal seconds at 0.1s
+    // resolution ("13.9s"; FLOOR, so server-render and ticker never disagree at
+    // poll boundaries), and minute-and-up show the two most-significant units.
+    // Each band's smallest displayed unit steps by a fixed amount (per-100ms
+    // below 1min, per-second up to 1h, per-minute up to 1d, per-hour beyond) so
+    // the rendered string changes at most once per step and length stays stable
+    // within a band.
     function fmt(ms){
         if (ms < 0) ms = 0;
-        if (ms < 1000)        return (Math.floor(ms / 100) * 100) + 'ms';
-        if (ms < 60_000)      return Math.floor(ms / 1000) + 's';
+        if (ms < 100)         return ms + 'ms';
+        if (ms < 60_000)      return (Math.floor(ms / 100) / 10) + 's';
         if (ms < 3_600_000){
             var m = Math.floor(ms / 60_000);
             var s = Math.floor(ms / 1000) % 60;
@@ -186,9 +191,9 @@ htmx_treebar_script() = h.script("""
         if (el._tbAnchor === undefined) anchor(el);
         var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
         // Only touch the DOM when the rendered string actually changes —
-        // sub-second formatting steps in 100ms increments, second-and-up
-        // formatting only changes once per integer step, so most ticks at
-        // 100ms cadence are no-ops.
+        // below 1min the value steps every 100ms (matching the tick cadence,
+        // so each tick updates), while minute-and-up only change once per
+        // integer minute/hour, so those ticks are mostly no-ops.
         if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
     function reanchorAll(){
@@ -273,10 +278,15 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                 children_node,
             )
         elseif !isempty(sp.message)
-            # Label node (key: value)
+            # Message-bearing leaf. Show the duration suffix by default (a timed
+            # work-leaf like a disk-load substatus "from disk: 2.5 GB"), EXCEPT on
+            # `key: value` annotation labels (set by `_update_labels!`, meta flag
+            # `annotation=true`) whose "duration" is just the parent's lifetime and
+            # so misleading. Nodes whose meta lacks the flag default to showing it.
             h.div(class="treebar-label")(
                 h.span(class="treebar-description")(sp.description),
                 h.span(class="treebar-value")(sp.message),
+                get(node.meta, :annotation, false) ? "" : duration_node,
             )
         else
             if article

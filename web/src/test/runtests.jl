@@ -121,6 +121,47 @@ end
     @test short_duration(Dates.Millisecond(0)) == "0s"
     @test short_duration(Dates.Millisecond(50)) == "50ms"
     @test short_duration(Dates.Millisecond(500)) == "0.5s"
+    # Sub-minute: single one-decimal-second value (floor at 0.1s), not the old
+    # two-most-significant join (13900ms used to render "13s 0.9s").
+    @test short_duration(Dates.Millisecond(600)) == "0.6s"
+    @test short_duration(Dates.Millisecond(2700)) == "2.7s"
+    @test short_duration(Dates.Millisecond(13900)) == "13.9s"
+    @test short_duration(Dates.Millisecond(59900)) == "59.9s"
+    # Trailing .0 trimmed.
+    @test short_duration(Dates.Second(13)) == "13s"
+    @test short_duration(Dates.Millisecond(13000)) == "13s"
+    # Floor, not round: 13990ms truncates to 13.9s (would round up to 14.0s).
+    @test short_duration(Dates.Millisecond(13990)) == "13.9s"
+    # Sub-100ms keeps millisecond precision.
+    @test short_duration(Dates.Millisecond(99)) == "99ms"
+    # ≥ 1 min keeps the two-most-significant join.
+    @test short_duration(Dates.Minute(1) + Dates.Second(30)) == "1m 30s"
+    @test short_duration(Dates.Hour(1) + Dates.Minute(1)) == "1h 1m"
+end
+
+@testset "htmx_render duration suffix: work-leaf yes, annotation no" begin
+    # A message-bearing work-leaf (disk-load style: message, no counter, not an
+    # annotation) shows the duration suffix.
+    root = initialize_progress!(:state; description="Root")
+    leaf = initialize_progress!(root; description="from disk", value="2.5 GB")
+    finalize_progress!(leaf)
+    leaf_html = sprint(io -> show(io, MIME"text/html"(), htmx_render(leaf)))
+    @test occursin("treebar-duration", leaf_html)
+    @test occursin("done", leaf_html)
+
+    # A key:value annotation label (created by _update_labels! via update_progress!
+    # kwargs) is marked annotation=true and omits the suffix — its "duration" would
+    # just be the parent's lifetime.
+    root2 = initialize_progress!(:state; description="Root2")
+    update_progress!(root2, nothing; acceptance="0.95")
+    ann = first(root2.children)
+    @test get(ann.meta, :annotation, false) === true
+    ann_html = sprint(io -> show(io, MIME"text/html"(), htmx_render(ann)))
+    @test occursin("treebar-label", ann_html)
+    @test !occursin("treebar-duration", ann_html)
+
+    finalize_progress!(root)
+    finalize_progress!(root2)
 end
 
 @testset "labels create sub-nodes" begin
