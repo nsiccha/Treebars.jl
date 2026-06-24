@@ -5,7 +5,10 @@ using Dates: Millisecond, Second, Minute, Hour, value
 """
     short_duration(dt::Union{Dates.CompoundPeriod, Dates.Period}) -> String
 
-Human-friendly duration string: "4s", "1m 23s", "2h 5m".
+Human-friendly duration string. Sub-minute durations render as a single
+one-decimal-second value (`"0.6s"`, `"2.7s"`, `"13.9s"`, `"13s"`); sub-100ms
+keep millisecond precision (`"47ms"`); minute-and-up join the two most
+significant canonical parts (`"1m 30s"`, `"1h 1m"`).
 """
 _short_period(p::Hour)   = "$(value(p))h"
 _short_period(p::Minute) = "$(value(p))m"
@@ -14,13 +17,26 @@ _short_period(p::Millisecond) =
     let v = value(p); v >= 100 ? "$(div(v, 100) / 10)s" : "$(v)ms" end
 _short_period(p) = string(p)
 
+# Sub-minute label: <100ms keeps ms precision, otherwise a single decimal-second
+# value at 0.1s resolution, TRUNCATING (floor) not rounding — matches the JS
+# ticker's floor and the stopwatch convention (13.9s until 14.0s elapses).
+function _short_subminute(ms)
+    ms < 100 && return "$(ms)ms"
+    s = floor(ms / 100) / 10
+    str = string(s)
+    endswith(str, ".0") ? "$(str[1:end-2])s" : "$(str)s"
+end
+
 function short_duration(dt)
     cp = canonicalize(dt)
     parts = cp.periods
     isempty(parts) && return "0s"
-    # Map each period to a short label
+    # Total milliseconds — wall-clock durations are Millisecond-based, so every
+    # canonical part converts cleanly.
+    ms = sum(p -> value(convert(Millisecond, p)), parts)
+    ms < 60_000 && return _short_subminute(ms)
+    # ≥ 1 min: the two most-significant canonical parts.
     labels = map(_short_period, parts)
-    # Show at most 2 most-significant parts
     join(labels[1:min(2, length(labels))], " ")
 end
 

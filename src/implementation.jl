@@ -87,10 +87,15 @@ _display_pref(node::ProgressNode) = get(node.meta, :displayed, nothing)
 # `false` = transparent passthrough, `true` = always render, `nothing`
 # (default) = let the render side decide (bare wrappers inline). Lifecycle is
 # unaffected either way — this is render-side only.
-function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, displayed=nothing, kwargs...)
+#
+# `annotation` marks a `key: value` annotation label (set by `_update_labels!`):
+# its "duration" is just the parent's lifetime, so the render side suppresses
+# the duration suffix on it (a plain message work-leaf, `annotation=false`, keeps
+# the suffix). Consumed here (a render-side flag), not forwarded to the impl.
+function initialize_progress!(node::ProgressNode, args...; transient=false, propagates=false, displayed=nothing, annotation=false, kwargs...)
     ProgressNode(
         initialize_progress!(node.impl, args...; transient, propagates, kwargs...),
-        (; propagates, transient, displayed, labels=ThreadsafeDict{Symbol,Any}());
+        (; propagates, transient, displayed, annotation, labels=ThreadsafeDict{Symbol,Any}());
         parent=node
     )
 end
@@ -140,7 +145,7 @@ function _update_labels!(node::ProgressNode; kwargs...)
             nothing
         end
         if isnothing(sjob)
-            sjob = initialize_progress!(node; description, key, value=string(value), transient=false)
+            sjob = initialize_progress!(node; description, key, value=string(value), transient=false, annotation=true)
             !isnothing(labs) && (labs[key] = sjob)
         else
             update_progress!(sjob, string(value))
