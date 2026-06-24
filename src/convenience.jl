@@ -683,33 +683,20 @@ function _emit_phases(phases, ctx)
     # finished child visible. The leading statements stay OUTSIDE any new
     # try/let scope (we only rebind `__progress__`, not the variable scope), so
     # their assignments still leak into the enclosing scope as before.
-    #
-    # The LABELED-phase prepares evaluate each `description=` — possibly an
-    # interpolation like `@progress "Build ($x)"`. They MUST run AFTER the
-    # leading statements, else a description referencing a leading-bound variable
-    # throws `UndefVarError` (the prepare is emitted up front, before the leading
-    # statement that binds `x`). So only the label-LESS leading node is prepared
-    # up front (kept first, for the ordering above); the labeled prepares are
-    # deferred into `pre_stmts`, emitted AFTER the leading statements. Trade: the
-    # labeled phases aren't pending-visible DURING the (typically quick) leading
-    # statements — acceptable vs a hard crash. (A description interpolating a
-    # variable bound in a PRIOR PHASE BODY still can't pre-enumerate — that would
-    # need deferred-description thunks, a separate, larger change.)
     leading_stmts = first(phases)[2]
     if !isempty(pending_syms) && any(s -> !(s isa LineNumberNode), leading_stmts)
         leading_sym = gensym(:leading)
         leading_ctx = (progress=leading_sym, transient=ctx.transient)
-        labeled_prepares = prepare_stmts
         prepare_stmts = Any[
             :( $leading_sym = $prepare_progress!(
                 $(ctx.progress); description="", transient=$(ctx.transient),
             ) ),
+            prepare_stmts...,
         ]
         pre_stmts = Any[
             :( $start_progress!($leading_sym) ),
             (progress_expr(s, leading_ctx) for s in leading_stmts)...,
             :( $finalize_progress!($leading_sym) ),
-            labeled_prepares...,
         ]
     else
         pre_stmts = Any[progress_expr(s, ctx) for s in leading_stmts]
