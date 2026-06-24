@@ -145,6 +145,16 @@ const APPDATA = AppData()
         h.div(; id="macro-result"),
 
         h.hr(),
+        h.h3("0a. Leading statements before the first phase marker"),
+        h.p("A leading statement (here a ", h.code("@progress \"Leading load\""),
+            " child) runs before the first phase marker. The implicit leading-phase node ",
+            "sorts its child ", h.em("above"), " the labeled phases (Phase A / Phase B); ",
+            "without the fix it rendered below them.";
+            class="u-text-sm u-text-muted"),
+        h.div(key_input_form("Run leading pipeline", "/phases/leading", "lead-key", "lead-demo", "lead-result")),
+        h.div(; id="lead-result"),
+
+        h.hr(),
         h.h3("0b. Dynamic phases (with_prepared_phases + with_prepared_progress)"),
         h.p("Runtime-computed NamedTuple chain using the data-driven phase primitives. ",
             "Toggle fail-at to watch the outer handler fail any still-pending phases instead of orphaning them.";

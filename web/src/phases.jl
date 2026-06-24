@@ -42,6 +42,24 @@ _dynamic_chain(preset) = preset == "short" ?
         :done
     end
 
+    "Leading pipeline '$key'"
+    leading_results(key) = begin
+        @progress "Pipeline" begin
+            # LEADING statement (before the first phase marker) that creates its
+            # own child progress node. With the implicit leading-phase node it
+            # sorts ABOVE the labeled phases; without the fix it rendered below
+            # them. Mirrors a DO `@fetch!` disk-load substatus run before a marker.
+            @progress "Leading load" sleep(0.6)
+
+            @progress "Phase A"
+            sleep(0.5)
+
+            @progress "Phase B"
+            sleep(0.5)
+        end
+        :done
+    end
+
     "Dynamic pipeline '$preset' (fail_at=$fail_at)"
     dynamic_results(preset, fail_at=nothing) = begin
         chain = _dynamic_chain(preset)
@@ -59,7 +77,7 @@ end
 
 @htmx struct PhasesRoutes
     (; phases) = __appdata__
-    (; results, dynamic_results) = phases
+    (; results, leading_results, dynamic_results) = phases
 
     # Static phase markers — each @progress "label" pre-enumerates a pending child.
     @get demo(key; force::Bool=false) = polling_fetchindex(results, key;
@@ -73,6 +91,14 @@ end
     @get cancel(key) = begin
         cancel!(results, key)
         result_article("Cancelled '$key'")
+    end
+
+    # Leading statements before the first marker sort ABOVE the labeled phases.
+    @get leading(key; force::Bool=false) = polling_fetchindex(leading_results, key;
+        poll_url = query_url(__self__/"leading/$key"),
+        label = "Leading pipeline '$key'", force,
+    ) do rv
+        result_article("Leading pipeline '$key' — $rv"; rerun_url = __self__/"leading/$key")
     end
 
     # Data-driven phase chain — with_prepared_phases + with_prepared_progress.
