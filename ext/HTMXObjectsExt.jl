@@ -444,13 +444,13 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
   HTMXObjects renders the error article.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
     end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result)
+        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync)
     end
 end
 
@@ -460,19 +460,19 @@ end
 # in `polling_fetchindex`'s `do rv, status` block — the type test now
 # lives at the method boundary, and the failure-vs-running split inside
 # the Task method is a plain value test (`istaskfailed`).
-_polling_resolve(rv::Task, status; label, poll_url, poll_interval, cancel_url, render_result) =
-    # Restore the original throw-on-failure path. HTMXObjects' route-
-    # error machinery turns this into a 200 HTML response with the
-    # error rendered; the polling inner self-swaps with that content
-    # (no hx-trigger in the error HTML), and polling stops cleanly.
+# When `sync=true`, block on a running Task instead of returning polling
+# HTML — used by PDF export loopback (wants_markdown) and other callers
+# that need synchronous resolution.
+_polling_resolve(rv::Task, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
     istaskfailed(rv) ? throw(rv.result) :
+    sync ? _polling_resolve(fetch(rv), status; sync, label, poll_url, poll_interval, cancel_url, render_result) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
 # Done — already-cached or just-completed. The wrapper here is
 # vestigial on first-call-done (no polling ever happened) but
 # harmless; on running-then-done the response replaces the polling
 # inner so the wrapper persists with its UX state intact.
-_polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result) =
+_polling_resolve(rv, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
     _polling_wrap(_polling_inner_done(render_result(rv)))
 
 function _polling_running(status; label, poll_url, poll_interval, cancel_url)
