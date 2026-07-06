@@ -164,6 +164,102 @@ end
     finalize_progress!(root2)
 end
 
+@testset "_first_seen! render dedup helper (pure, no renderer/DO)" begin
+    # Unit-tests Treebars._first_seen! directly on hand-built ProgressNodes —
+    # no htmx_render, no HTMXObjects, no DynamicObjects involved.
+    root = initialize_progress!(:state; description="Root")
+    a = initialize_progress!(root; description="A")
+    b = initialize_progress!(root; description="B")
+
+    seen = Base.IdSet{Treebars.ProgressNode}()
+    @test Treebars._first_seen!(seen, a) == true    # first encounter -> render + mark
+    @test Treebars._first_seen!(seen, a) == false   # same node again in this pass -> skip
+    @test Treebars._first_seen!(seen, b) == true    # a distinct node is unaffected
+
+    # A different `seen` set (models a different render pass / different tree)
+    # has no memory of the first: this is what preserves DO's cross-tree sharing.
+    seen2 = Base.IdSet{Treebars.ProgressNode}()
+    @test Treebars._first_seen!(seen2, a) == true
+
+    finalize_progress!(root)
+end
+
+@testset "htmx_render dedup: same-tree duplicate renders once" begin
+    # (a) A node add_child!'d under TWO parents in the SAME tree: the doubled
+    # node's content must appear exactly once in the rendered HTML.
+    root = initialize_progress!(:state; description="Root")
+    a = initialize_progress!(root; description="HostA")
+    dup = initialize_progress!(root; description="DupNode")
+    add_child!(a, dup)   # dup is now reachable as BOTH root's direct child AND a's child
+    finalize_progress!(dup)
+    finalize_progress!(a)
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(root)))
+    @test count("DupNode", html) == 1
+
+    finalize_progress!(root)
+end
+
+@testset "htmx_render dedup: cross-tree same node renders in EACH (regression guard)" begin
+    # (b) THE critical case: the SAME node add_child!'d under two SEPARATE
+    # roots must still render once in EACH root's own render pass — proving
+    # per-tree (not global) dedup, which is what preserves DynamicObjects'
+    # intentional cross-tree substatus sharing.
+    root1 = initialize_progress!(:state; description="Root1")
+    root2 = initialize_progress!(:state; description="Root2")
+    shared = initialize_progress!(root1; description="SharedNode")
+    add_child!(root2, shared)   # shared is reachable from BOTH root1 and root2; .parent stays root1
+
+    html1 = sprint(io -> show(io, MIME"text/html"(), htmx_render(root1)))
+    html2 = sprint(io -> show(io, MIME"text/html"(), htmx_render(root2)))
+    @test occursin("SharedNode", html1)
+    @test occursin("SharedNode", html2)
+
+    finalize_progress!(shared)
+    finalize_progress!(root1)
+    finalize_progress!(root2)
+end
+
+@testset "htmx_render dedup: normal single-parent tree unchanged" begin
+    # (c) No regression: an ordinary tree with no shared nodes renders each
+    # child exactly once, same as before this feature.
+    root = initialize_progress!(:state; description="Root")
+    a = initialize_progress!(root; description="ChildA")
+    b = initialize_progress!(root; description="ChildB")
+    finalize_progress!(a)
+    finalize_progress!(b)
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(root)))
+    @test count("ChildA", html) == 1
+    @test count("ChildB", html) == 1
+
+    finalize_progress!(root)
+end
+
+@testset "htmx_render dedup: children fully deduped away -> header-only, no placeholder" begin
+    # Edge case folded in at plan-gate review: if a host node's entire child
+    # list dedupes away (every child already rendered elsewhere in this pass),
+    # the host's OWN header/duration must still render, but its children
+    # section must emit nothing rather than the misleading "Starting..." /
+    # message spinner fallback.
+    root = initialize_progress!(:state; description="Root")
+    a = initialize_progress!(root; description="HostA")
+    p = initialize_progress!(root; description="HostP")
+    shared = initialize_progress!(a; description="Shared2")
+    add_child!(p, shared)   # shared reachable from BOTH a (its real parent) and p
+
+    finalize_progress!(shared)
+    finalize_progress!(a)
+    finalize_progress!(p)
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(root)))
+    @test occursin("HostP", html)          # p's own header still renders
+    @test !occursin("Starting...", html)   # no misleading placeholder for p's deduped-away children
+    @test count("Shared2", html) == 1      # shared renders exactly once (under HostA, visited first)
+
+    finalize_progress!(root)
+end
+
 @testset "labels create sub-nodes" begin
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")

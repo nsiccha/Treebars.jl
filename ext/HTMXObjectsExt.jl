@@ -4,7 +4,7 @@ import HTMXObjects: h, Node, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
-    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, _renders_self, duration, short_duration
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_displayed, _renders_self, duration, short_duration, _first_seen!
 import Dates
 using Dates: Millisecond
 
@@ -253,14 +253,21 @@ end
 # so the .treebar-poller wrapper's descendant CSS rule controls visibility
 # globally without inner direct-child rules fighting it.
 #
+# `seen` is a per-render-pass identity set used to dedup a node that DO's
+# substatus fan-out attaches under more than one parent within one tree (see
+# `Treebars._first_seen!`). Defaulted fresh here so every top-level call to
+# `htmx_render` (a one-shot render, a poll, a ws frame) starts its own pass;
+# threaded explicitly into every recursive call below so the SAME pass shares
+# one `seen` all the way down.
+#
 # Transparent passthrough: an undisplayed node renders to the empty fragment.
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
-    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped)
+    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen)
     lock(sp.lock) do
         duration_node = _duration_span(sp)
         pending = is_pending(sp)
@@ -308,9 +315,12 @@ end
 
 # Render a full progress tree rooted at node. Top-level root is always
 # rendered (the wrapper div), but transparent children at this level are
-# flattened away — their grandchildren render in their place.
-function htmx_render(node::ProgressNode; scoped=true, kwargs...)
-    children_html = [htmx_render(child; scoped, kwargs...) for child in _flatten_displayed_children(node)]
+# flattened away — their grandchildren render in their place. Same per-pass
+# `seen` dedup as the StateProgress method above (kept in sync for any
+# non-StateProgress backend that reaches this fallback).
+function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
+    children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
+    children_html = [htmx_render(child; scoped, seen, kwargs...) for child in children]
     h.div(class="treebar-root")(children_html...)
 end
 
@@ -329,14 +339,30 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller') || this.closest(
 # .treebar-poller (polling_fetchindex passes `scoped=false`) we suppress
 # those attrs so the wrapper's descendant CSS rule controls visibility
 # without inner direct-child rules fighting it.
+#
+# `seen` (see `htmx_render` above) is applied HERE, in the child walk: the
+# flattened child list is filtered against the pass's `seen` set BEFORE pill
+# counts/grouping, so a node already rendered earlier in this same pass (a
+# different parent reached it first) is dropped from this level entirely —
+# no stray pill count, no duplicate render.
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true)
+function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}())
     sp = node.impl
     # Flatten transparent children: each undisplayed child contributes
     # its own children at this level instead of itself. Grouping/pills/
     # CSS classes all see the hoisted view, which is the whole point of
-    # the transparent flag.
-    children = _flatten_displayed_children(node)
+    # the transparent flag. Then dedup (first-seen-wins) against this pass's
+    # `seen` set.
+    raw = _flatten_displayed_children(node)
+    children = filter(c -> _first_seen!(seen, c), raw)
+    # All of this node's children were already rendered elsewhere in this same
+    # pass (DO's shared-substatus co-tree case) — the children SECTION is
+    # empty, but unlike "genuinely no children yet" this isn't a pending/
+    # spinner state, so emit nothing rather than fall into the message/
+    # "Starting..." fallback below. The node's own header/duration still
+    # render via the caller (`htmx_render`) — only this children section is
+    # suppressed.
+    isempty(children) && !isempty(raw) && return ""
     if isempty(children) && !isempty(sp.message)
         return h.div(
             h.span(sp.message; class="u-text-muted"),
@@ -365,13 +391,13 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true)
 
     rendered = map(children) do child
         if is_pending(child)
-            h.div(class="treebar-child-pending")(htmx_render(child; scoped))
+            h.div(class="treebar-child-pending")(htmx_render(child; scoped, seen))
         elseif is_running(child)
-            htmx_render(child; scoped)
+            htmx_render(child; scoped, seen)
         elseif is_finished(child)
-            h.div(class="treebar-child-finished")(htmx_render(child; scoped))
+            h.div(class="treebar-child-finished")(htmx_render(child; scoped, seen))
         else
-            h.div(class="treebar-child-failed")(htmx_render(child; scoped))
+            h.div(class="treebar-child-failed")(htmx_render(child; scoped, seen))
         end
     end
 
