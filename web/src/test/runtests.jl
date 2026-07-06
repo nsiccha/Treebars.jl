@@ -300,6 +300,86 @@ end
     @test length(only(root3.children).children) == 0
 end
 
+@testset "@progress compact multi-generator for (a bar at every level)" begin
+    # `for a in X, b in Y` — Julia's Cartesian sugar, whose header parses as an
+    # `Expr(:block, …)` — desugars to nested single-var loops so EVERY level
+    # gets its own progress bar (user decision 8fmgjl). Was a hard
+    # AssertionError on valid syntax.
+    root = initialize_progress!(:state; description="Root")
+    snap = Ref{Any}(nothing)
+    n = 0
+    @progress root for oi in 1:2, di in 1:3
+        n += 1
+        (oi == 1 && di == 2) && (snap[] = Treebars.progress_state(root))
+    end
+    finalize_progress!(root)
+    @test n == 6                                        # full Cartesian product ran
+
+    outer = snap[]["children"][1]
+    @test outer["description"] == "for oi in ..."       # outer bar
+    @test outer["N"] == 2
+    inner = outer["children"][1]
+    @test inner["description"] == "for di in ..."        # inner bar, nested under outer
+    @test inner["N"] == 3
+    # Inner bars are transient ⇒ detached each outer iteration, no accumulation.
+    @test length(only(root.children).children) == 0
+
+    # Three generators ⇒ three nested levels, each with its own bar.
+    root2 = initialize_progress!(:state; description="Root2")
+    snap2 = Ref{Any}(nothing)
+    @progress root2 for a in 1:2, b in 1:2, c in 1:2
+        (a == 1 && b == 1 && c == 1) && (snap2[] = Treebars.progress_state(root2))
+    end
+    finalize_progress!(root2)
+    l1 = snap2[]["children"][1]
+    l2 = l1["children"][1]
+    l3 = l2["children"][1]
+    @test [l1["description"], l2["description"], l3["description"]] ==
+          ["for a in ...", "for b in ...", "for c in ..."]
+
+    # Reporter's exact case: compact for inside `@progress "label" begin…end`.
+    root3 = initialize_progress!(:state; description="Root3")
+    hit = 0
+    @progress root3 begin
+        @progress "compute"
+        for oi in 1:2, di in 1:2
+            hit += 1
+        end
+    end
+    finalize_progress!(root3)
+    @test hit == 4
+end
+
+@testset "@progress @threads compact multi-generator → @threads' own error" begin
+    # Per user decision 8fmgjl, don't support under @threads what @threads
+    # itself rejects. The guardrail passes the compact `@threads for` macrocall
+    # through untouched, so @threads surfaces its own native error rather than a
+    # Treebars assert or silently-broken code.
+    compact = :(Threads.@threads for a in 1:2, b in 1:3
+        nothing
+    end)
+    @test Treebars._threads_for_progress_expr(
+        compact, (progress = :__p__, transient = false); description = nothing) === compact
+
+    # End-to-end: expanding the wrapped form raises @threads' native error.
+    err = try
+        include_string(Main, """
+            using Treebars
+            let r = initialize_progress!(:state; description="R")
+                @progress r Threads.@threads for a in 1:2, b in 1:3
+                    nothing
+                end
+            end
+        """)
+        nothing
+    catch e
+        e
+    end
+    @test err !== nothing
+    @test occursin("nested outer loops are not currently supported by @threads",
+                   sprint(showerror, err))
+end
+
 @testset "@progress @threads for with bare phase markers" begin
     # Mirror of the serial "@progress for with bare phase markers" testset, for the
     # Threads.@threads form. Each concurrent iteration gets its own per-iteration,

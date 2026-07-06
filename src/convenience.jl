@@ -343,6 +343,12 @@ end
 # emission (preserved macrocall + `finally` increment).
 function _threads_for_progress_expr(x::Expr, ctx; description)
     forexpr = x.args[end]
+    # Compact multi-generator header (`for a in X, b in Y`): `Threads.@threads`
+    # itself rejects this ("nested outer loops are not currently supported by
+    # @threads"). Per user decision `8fmgjl`, don't support under @threads what
+    # @threads doesn't — emit the macrocall untouched so @threads surfaces its
+    # own error (least surprising: identical to un-wrapped @threads).
+    Meta.isexpr(forexpr.args[1], :block) && return x
     lhs, rhs = forexpr.args[1].args
     body = forexpr.args[2]
     sub = gensym(:threadsprogress)
@@ -495,10 +501,29 @@ _wrap_for_body(body, ctx) =
         _block_progress_expr(body, nothing, ctx; force_wrap=true) :
         progress_expr(body, ctx)
 
+# Desugar a compact multi-generator for-header (`for a in X, b in Y, …`, whose
+# header Julia parses as `Expr(:block, =(a,X), =(b,Y), …)`) into nested
+# single-variable for loops: `for a in X; for b in Y; …; body; end; end`. The
+# existing walker then instruments every level (each nested `for` routes back
+# through `_for_progress_expr` via `_wrap_for_body`), so each nesting level gets
+# its own progress bar — the least-surprising behavior (user decision `8fmgjl`).
+function _nest_multifor(head::Expr, body)
+    gens = filter(a -> !(a isa LineNumberNode), head.args)
+    expr = body
+    for gen in reverse(gens)
+        expr = Expr(:for, gen, expr)
+    end
+    expr
+end
+
 # for-loop wrap — description from label (or auto from iteration var)
 function _for_progress_expr(x::Expr, ctx; description)
     @assert length(x.args) == 2
     head, body = x.args
+    # Compact multi-generator header (`for a in X, b in Y`) → desugar to nested
+    # single-var loops and recurse; each level then gets its own bar.
+    Meta.isexpr(head, :block) &&
+        return _for_progress_expr(_nest_multifor(head, body), ctx; description)
     @assert Meta.isexpr(head, :(=))
     lhs, rhs = head.args
     desc = description === nothing ? "for $lhs in ..." : description
