@@ -227,6 +227,21 @@ _is_bare_wrapper(node::ProgressNode{<:StateProgress}) =
     isempty(node.impl.description) && isempty(node.impl.message) && isnothing(node.impl.N)
 _is_bare_wrapper(::ProgressNode) = false
 
+# Render-time first-seen dedup for one render PASS (not a lifecycle op). DO
+# intentionally attaches the same substatus node under multiple caller trees
+# (`getstatus`/`_attach_fetched!` in DynamicObjects), so `.children`
+# reachability is a DAG, not a tree — a shared node can appear under more
+# than one parent within a single rendered tree. `.parent`/`add_child!` stay
+# untouched (reparenting would need retroactively removing edges once a
+# "proper" parent hangs in later); instead the renderer threads an identity
+# `seen` set through one descent and skips every encounter after the first.
+# A FRESH `seen` per top-level render call is what keeps the same node
+# rendering once per DIFFERENT tree (a different pass ⇒ a different `seen`).
+# `IdSet` (identity, not `==`/`hash`) so two structurally-equal-but-distinct
+# nodes never collide.
+_first_seen!(seen::Base.IdSet{ProgressNode}, node::ProgressNode) =
+    node in seen ? false : (push!(seen, node); true)
+
 # Render-side display decision, sharper than `is_displayed`: an explicit
 # `displayed=false` hides, an explicit `displayed=true` always shows, and with
 # no preference set the node shows iff it is not a bare wrapper. When `false`
