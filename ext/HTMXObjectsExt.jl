@@ -449,7 +449,8 @@ content (the rendered result), which naturally stops the loop. The wrapper
 itself is never touched by polling, so UX state on it (`data-show-finished`
 / `-failed` / `-pending`, set by pill clicks) persists across polls.
 
-Failure path: `throw(rv.result)`. HTMXObjects wraps user errors as a 200
+Failure path: a failed compute is re-thrown by `fetchindex` (the recorded
+error, not via this callback). HTMXObjects wraps user errors as a 200
 HTML response for HTMX requests; that response replaces the polling inner
 via the inner's own `hx-target="this" hx-swap="outerHTML"`, so polling
 stops naturally without any custom OOB / HX-Retarget gymnastics.
@@ -465,9 +466,10 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
 - `force`: force re-computation (default `false`). Ignored when `poll_context` is set.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
-  The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
-  After cancel, the task fails with `InterruptException`; next poll throws and
-  HTMXObjects renders the error article.
+  Treebars only renders the button (pointing at the caller-provided `cancel_url`).
+  NOTE: DynamicObjects' `cancel!` was removed with the compute-at-most-once
+  refactor, so an in-flight compute now always runs to completion — the button
+  is inert unless the caller's `cancel_url` route does something itself.
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, kwargs...)
@@ -480,17 +482,16 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     end
 end
 
-# Two-method dispatch on the IP's resolved value: a `Task` is still
-# running (or just failed); anything else is the final (done) result.
-# Replaces the `if _is_task(rv) … elseif _is_task(rv) … else …` chain
-# in `polling_fetchindex`'s `do rv, status` block — the type test now
-# lives at the method boundary, and the failure-vs-running split inside
-# the Task method is a plain value test (`istaskfailed`).
-# When `sync=true`, block on a running Task instead of returning polling
-# HTML — used by PDF export loopback (wants_markdown) and other callers
-# that need synchronous resolution.
-_polling_resolve(rv::Task, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
-    istaskfailed(rv) ? throw(rv.result) :
+# Two-method dispatch on the IP's resolved value: a `Pending` handle means the
+# compute is still in flight; anything else is the final (done) result.
+# DynamicObjects' compute-at-most-once cache no longer hands back a retained
+# `Task` — an in-flight compute is a `Pending`, and a FAILED compute is
+# re-thrown by `fetchindex`/`memoize!` (the recorded error) BEFORE this callback
+# runs, so there is no failure branch here. The type test lives at the method
+# boundary. When `sync=true`, block on the pending value (`fetch(::Pending)`)
+# instead of returning polling HTML — used by PDF export loopback
+# (wants_markdown) and other callers that need synchronous resolution.
+_polling_resolve(rv::HTMXObjects.DynamicObjects.Pending, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
     sync ? _polling_resolve(fetch(rv), status; sync, label, poll_url, poll_interval, cancel_url, render_result) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
@@ -564,8 +565,9 @@ over `ws` via [`ws_progress`](@ref) and pushes the final rendered result as
 one last frame on completion.
 
 Producer task is NOT cancelled on client disconnect — `ws_progress` exits
-its send loop on WS error and leaves the task alone; the IP cache retains
-the running task, so the next visitor reuses it.
+its send loop on WS error and leaves the compute alone; the in-flight compute
+runs to completion and its value lands in the IP cache, so the next visitor
+reuses it.
 
 Use inside an `@ws` route body, passing `__ws__` as the first argument:
 
@@ -590,10 +592,12 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
     progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if rv isa Task
+        if rv isa HTMXObjects.DynamicObjects.Pending
             ws_progress(ws, status; render=progress_render, interval)
-            istaskfailed(rv) ||
-                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+            # Block for the finished value and push the final frame. A failed
+            # compute makes `fetch(::Pending)` re-throw (caught here → no final
+            # frame sent), mirroring the old `istaskfailed(rv) ||` short-circuit.
+            try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
             try; send(ws, final_html(render_result(rv))); catch; end
         end

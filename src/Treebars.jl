@@ -33,10 +33,11 @@ Renders the running progress tree inside a `.treebar-poller` wrapper; each
 poll only swaps the inner fragment, so pill toggle state on the wrapper
 survives across polls. Three response shapes are handled automatically:
 
-- the IP's value is a still-running `Task` → renders the progress tree (and
-  an optional Stop button if `cancel_url` is provided);
-- the `Task` failed → re-throws so HTMXObjects' route-error machinery renders
-  the exception as an error article and the polling loop stops naturally;
+- the IP's value is a `Pending` handle (compute still in flight) → renders the
+  progress tree (and an optional Stop button if `cancel_url` is provided);
+- the compute failed → `fetchindex` re-throws so HTMXObjects' route-error
+  machinery renders the exception as an error article and the polling loop
+  stops naturally;
 - the value is done → calls `render_result(rv)`.
 
 Common kwargs:
