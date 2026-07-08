@@ -75,6 +75,15 @@ htmx_treebar_styles() = h.style("""
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
 .treebar-node { margin-bottom: 0.25rem; }
 
+/* Inline error box for the keep_progress failure path (see `_error_article`).
+   A dedicated class, NOT aria-invalid, to avoid a second hx-select match. */
+.treebar-error {
+    border: 1px solid var(--pico-del-color, #e74c3c);
+    background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 12%, transparent);
+}
+.treebar-error > header { color: var(--pico-del-color, #e74c3c); font-weight: 600; }
+.treebar-error > pre { white-space: pre-wrap; overflow-x: auto; margin: 0; }
+
 /* Pause/resume control. Sits top-right of the persistent .treebar-poller
    wrapper. The margin-right above keeps the (float:right) Stop button clear
    of this absolutely-positioned button when cancel_url is set — a constant
@@ -182,6 +191,10 @@ htmx_treebar_script() = h.script("""
     }
     function tick(el){
         if (el.dataset.treebarStatus !== 'running') return;
+        // Never tick inside a kept snapshot (.treebar-frozen, see _kept_progress):
+        // a terminal tree may still carry a "running" node, and a post-hoc
+        // inspection view must be static, not counting up forever.
+        if (el.closest('.treebar-frozen')) return;
         // Freeze the duration while this span's poller is paused, so the
         // inspected snapshot is genuinely still. On resume the ticker
         // catches up to true elapsed (the work kept running — pause is not
@@ -438,7 +451,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -468,15 +481,22 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
   The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
   After cancel, the task fails with `InterruptException`; next poll throws and
   HTMXObjects renders the error article.
+- `keep_progress`: keep the finished/failed progress tree around for post-hoc
+  inspection (default `true`). On success the frozen tree is appended below the
+  result in a collapsed `<details>`; on failure the tree (with the failed node)
+  is shown in an open `<details>` alongside an inline error article — instead of
+  `throw`ing to HTMXObjects' error handler, which would discard the tree. Set
+  `false` to restore the old result-only / throw-on-failure behavior. Ignored on
+  the `sync` path (no tree in the loopback result).
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
     end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync)
+        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress)
     end
 end
 
@@ -489,17 +509,57 @@ end
 # When `sync=true`, block on a running Task instead of returning polling
 # HTML — used by PDF export loopback (wants_markdown) and other callers
 # that need synchronous resolution.
-_polling_resolve(rv::Task, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
-    istaskfailed(rv) ? throw(rv.result) :
-    sync ? _polling_resolve(fetch(rv), status; sync, label, poll_url, poll_interval, cancel_url, render_result) :
+# Failed: with keep_progress (default) render an inline error article + the
+# frozen tree (failed node visible) so the run can be inspected — see
+# `_kept_progress`/`_error_article`. Without it, fall back to `throw`ing so
+# HTMXObjects renders its own recorded-error article (discards the tree).
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result) =
+    istaskfailed(rv) ?
+        (keep_progress ? _polling_wrap(_polling_inner_done(_error_article(rv), _kept_progress(status; open=true))) :
+                         throw(rv.result)) :
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
 # Done — already-cached or just-completed. The wrapper here is
 # vestigial on first-call-done (no polling ever happened) but
 # harmless; on running-then-done the response replaces the polling
-# inner so the wrapper persists with its UX state intact.
-_polling_resolve(rv, status; sync=false, label, poll_url, poll_interval, cancel_url, render_result) =
-    _polling_wrap(_polling_inner_done(render_result(rv)))
+# inner so the wrapper persists with its UX state intact. With
+# keep_progress (default, but not on the sync loopback), the frozen tree
+# is appended below the result in a collapsed <details> for inspection.
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result)
+    body = render_result(rv)
+    (keep_progress && !sync) ?
+        _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
+        _polling_wrap(_polling_inner_done(body))
+end
+
+# Frozen progress tree kept in the final (non-polling) response so a finished
+# or failed run can be inspected after polling stops. Rendered scoped=true so
+# the finished/failed/pending pills act as a static inspector, wrapped in a
+# <details> (collapsed on success — stays out of the way; open on failure —
+# failed node visible immediately). Empty string when there is no status node.
+function _kept_progress(status; open::Bool=false)
+    isnothing(status) && return ""
+    # `treebar-frozen`: the client ticker skips durations inside it, so this is a
+    # genuinely static snapshot. Needed because a terminal tree may still hold a
+    # node marked "running" (a consumer whose failure/finalization didn't
+    # propagate to every node) — without this it would tick forever.
+    body = (h.summary("Progress"), htmx_render(status; scoped=true))
+    open ? h.details(class="treebar-frozen", open=true)(body...) : h.details(class="treebar-frozen")(body...)
+end
+
+# Self-contained error article for the keep_progress failure path, rendered
+# inline here instead of `throw`ing (which hands control to HTMXObjects and
+# discards the kept tree). Carries the `treebar-error` class rather than
+# `aria-invalid="true"` ON PURPOSE: this article sits INSIDE the returned
+# `.treebar-poller-inner`, and the poller's `hx-select` second branch matches
+# `article[aria-invalid='true']` — so an aria-invalid here would be a SECOND
+# hx-select match and htmx would double-insert it. The class gets its own error
+# styling in `htmx_treebar_styles`. Prints the nested task error + backtrace.
+_error_article(t::Task) = h.article(class="treebar-error")(
+    h.header("Failed"),
+    h.pre(sprint(Base.showerror, Base.TaskFailedException(t))),
+)
 
 function _polling_running(status; label, poll_url, poll_interval, cancel_url)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
@@ -549,7 +609,7 @@ _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-i
         hx_swap="outerHTML",
         hx_select=".treebar-poller-inner, article[aria-invalid='true']")(body)
 
-_polling_inner_done(body) = h.div(class="treebar-poller-inner")(body)
+_polling_inner_done(body...) = h.div(class="treebar-poller-inner")(body...)
 
 # Convenience: when called with an IndexableProperty (no render_result), default to identity.
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
