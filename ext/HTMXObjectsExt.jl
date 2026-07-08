@@ -82,7 +82,9 @@ htmx_treebar_styles() = h.style("""
     background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 12%, transparent);
 }
 .treebar-error > header { color: var(--pico-del-color, #e74c3c); font-weight: 600; }
-.treebar-error > pre { white-space: pre-wrap; overflow-x: auto; margin: 0; }
+.treebar-error > .treebar-error-msg { white-space: pre-wrap; overflow-x: auto; margin: 0.25rem 0; font-size: 0.9em; }
+.treebar-error-trace > summary { cursor: pointer; font-size: 0.85em; color: var(--pico-muted-color, #888); }
+.treebar-error-trace > pre { white-space: pre; overflow: auto; max-height: 22rem; margin: 0.25rem 0 0; font-size: 0.8em; }
 
 /* Pause/resume control. Sits top-right of the persistent .treebar-poller
    wrapper. The margin-right above keeps the (float:right) Stop button clear
@@ -555,11 +557,19 @@ end
 # `.treebar-poller-inner`, and the poller's `hx-select` second branch matches
 # `article[aria-invalid='true']` — so an aria-invalid here would be a SECOND
 # hx-select match and htmx would double-insert it. The class gets its own error
-# styling in `htmx_treebar_styles`. Prints the nested task error + backtrace.
-_error_article(t::Task) = h.article(class="treebar-error")(
-    h.header("Failed"),
-    h.pre(sprint(Base.showerror, Base.TaskFailedException(t))),
-)
+# styling in `htmx_treebar_styles`. The concise reason (everything before the
+# first "Stacktrace:") shows inline; the full nested trace is tucked into a
+# collapsed, height-capped <details> so it does not bury the kept tree below it.
+function _error_article(t::Task)
+    full = sprint(Base.showerror, Base.TaskFailedException(t))
+    idx = findfirst("Stacktrace:", full)
+    reason = isnothing(idx) ? full : rstrip(full[1:prevind(full, first(idx))])
+    h.article(class="treebar-error")(
+        h.header("Failed"),
+        h.pre(class="treebar-error-msg")(reason),
+        h.details(class="treebar-error-trace")(h.summary("Full stacktrace"), h.pre(full)),
+    )
+end
 
 function _polling_running(status; label, poll_url, poll_interval, cancel_url)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
