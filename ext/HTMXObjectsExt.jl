@@ -75,17 +75,6 @@ htmx_treebar_styles() = h.style("""
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
 .treebar-node { margin-bottom: 0.25rem; }
 
-/* Inline error box for the keep_progress failure path (see `_error_article`).
-   A dedicated class, NOT aria-invalid, to avoid a second hx-select match. */
-.treebar-error {
-    border: 1px solid var(--pico-del-color, #e74c3c);
-    background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 12%, transparent);
-}
-.treebar-error > header { color: var(--pico-del-color, #e74c3c); font-weight: 600; }
-.treebar-error > .treebar-error-msg { white-space: pre-wrap; overflow-x: auto; margin: 0.25rem 0; font-size: 0.9em; }
-.treebar-error-trace > summary { cursor: pointer; font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-error-trace > pre { white-space: pre; overflow: auto; max-height: 22rem; margin: 0.25rem 0 0; font-size: 0.8em; }
-
 /* Pause/resume control. Sits top-right of the persistent .treebar-poller
    wrapper. The margin-right above keeps the (float:right) Stop button clear
    of this absolutely-positioned button when cancel_url is set — a constant
@@ -464,10 +453,14 @@ content (the rendered result), which naturally stops the loop. The wrapper
 itself is never touched by polling, so UX state on it (`data-show-finished`
 / `-failed` / `-pending`, set by pill clicks) persists across polls.
 
-Failure path: `throw(rv.result)`. HTMXObjects wraps user errors as a 200
-HTML response for HTMX requests; that response replaces the polling inner
-via the inner's own `hx-target="this" hx-swap="outerHTML"`, so polling
-stops naturally without any custom OOB / HX-Retarget gymnastics.
+Failure path (`keep_progress=true`, default): the error is recorded and rendered
+through HTMXObjects' `safely` (disk log + `@error` + the app's
+`__on_error__`/`__error__` hooks + the opaque "caught an error" article) and
+returned alongside the kept tree inside the polling inner — so polling stops and
+the tree survives. With `keep_progress=false` the old behavior applies:
+`throw(rv.result)`, and HTMXObjects' route-boundary catch wraps it as a 200 HTML
+error response that replaces the polling inner (discarding the tree). Either way
+polling stops naturally — no custom OOB / HX-Retarget gymnastics.
 
 - `render_result(rv)`: function that renders the final result (supports `do` syntax)
 - `ip`: IndexableProperty (e.g. `app.pathfinder`)
@@ -485,20 +478,32 @@ stops naturally without any custom OOB / HX-Retarget gymnastics.
   HTMXObjects renders the error article.
 - `keep_progress`: keep the finished/failed progress tree around for post-hoc
   inspection (default `true`). On success the frozen tree is appended below the
-  result in a collapsed `<details>`; on failure the tree (with the failed node)
-  is shown in an open `<details>` alongside an inline error article — instead of
-  `throw`ing to HTMXObjects' error handler, which would discard the tree. Set
-  `false` to restore the old result-only / throw-on-failure behavior. Ignored on
-  the `sync` path (no tree in the loopback result).
+  result in a collapsed `<details>`. On failure the tree (with the failed node)
+  is shown in an open `<details>` beside the error — and the error is recorded +
+  rendered through HTMXObjects' `safely`, so it gets the SAME disk log + opaque
+  "caught an error" article + `__on_error__`/`__error__` hooks as a normal
+  route-boundary throw, instead of `throw`ing (which would discard the tree).
+  Set `false` to restore the old result-only / throw-on-failure behavior;
+  ignored on the `sync` path (no tree in the loopback result).
+- `error_obj` / `req`: route context threaded to `safely` on the failure path
+  (its `obj` for `__on_error__`/`__error__` + its `req` for log metadata).
+  Auto-derived from `poll_context` when given; pass explicitly otherwise. Both
+  optional — without them the error is still recorded and the default article
+  rendered, just without req metadata or custom hooks.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
+        # The route struct doubles as the failure-path error context (its
+        # __on_error__/__error__ hooks + __req__ for the log), unless the caller
+        # passed error_obj/req explicitly.
+        isnothing(error_obj) && (error_obj = poll_context)
+        isnothing(req) && hasproperty(poll_context, :__req__) && (req = poll_context.__req__)
     end
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress)
+        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress, error_obj, req)
     end
 end
 
@@ -511,15 +516,16 @@ end
 # When `sync=true`, block on a running Task instead of returning polling
 # HTML — used by PDF export loopback (wants_markdown) and other callers
 # that need synchronous resolution.
-# Failed: with keep_progress (default) render an inline error article + the
-# frozen tree (failed node visible) so the run can be inspected — see
-# `_kept_progress`/`_error_article`. Without it, fall back to `throw`ing so
-# HTMXObjects renders its own recorded-error article (discards the tree).
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result) =
+# Failed: with keep_progress (default) render the recorded error + the frozen
+# tree (failed node visible) so the run can be inspected — see `_caught_error`
+# (which routes through HTMXObjects' `safely` for disk log + opaque article +
+# hooks) and `_kept_progress`. Without it, fall back to `throw`ing so
+# HTMXObjects' route-boundary catch renders the error article (discards the tree).
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, error_obj=nothing, req=nothing, label, poll_url, poll_interval, cancel_url, render_result) =
     istaskfailed(rv) ?
-        (keep_progress ? _polling_wrap(_polling_inner_done(_error_article(rv), _kept_progress(status; open=true))) :
-                         throw(rv.result)) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result) :
+        ((keep_progress && !sync) ? _polling_wrap(_polling_inner_done(_caught_error(rv, error_obj, req), _kept_progress(status; open=true))) :
+                                    throw(rv.result)) :
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, error_obj, req, label, poll_url, poll_interval, cancel_url, render_result) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
 # Done — already-cached or just-completed. The wrapper here is
@@ -528,7 +534,9 @@ _polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_u
 # inner so the wrapper persists with its UX state intact. With
 # keep_progress (default, but not on the sync loopback), the frozen tree
 # is appended below the result in a collapsed <details> for inspection.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result)
+# (error_obj/req are unused here — success records no error — but are accepted
+# so the sync recursion in the Task method can thread them uniformly.)
+function _polling_resolve(rv, status; sync=false, keep_progress=true, error_obj=nothing, req=nothing, label, poll_url, poll_interval, cancel_url, render_result)
     body = render_result(rv)
     (keep_progress && !sync) ?
         _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
@@ -550,26 +558,22 @@ function _kept_progress(status; open::Bool=false)
     open ? h.details(class="treebar-frozen", open=true)(body...) : h.details(class="treebar-frozen")(body...)
 end
 
-# Self-contained error article for the keep_progress failure path, rendered
-# inline here instead of `throw`ing (which hands control to HTMXObjects and
-# discards the kept tree). Carries the `treebar-error` class rather than
-# `aria-invalid="true"` ON PURPOSE: this article sits INSIDE the returned
-# `.treebar-poller-inner`, and the poller's `hx-select` second branch matches
-# `article[aria-invalid='true']` — so an aria-invalid here would be a SECOND
-# hx-select match and htmx would double-insert it. The class gets its own error
-# styling in `htmx_treebar_styles`. The concise reason (everything before the
-# first "Stacktrace:") shows inline; the full nested trace is tucked into a
-# collapsed, height-capped <details> so it does not bury the kept tree below it.
-function _error_article(t::Task)
-    full = sprint(Base.showerror, Base.TaskFailedException(t))
-    idx = findfirst("Stacktrace:", full)
-    reason = isnothing(idx) ? full : rstrip(full[1:prevind(full, first(idx))])
-    h.article(class="treebar-error")(
-        h.header("Failed"),
-        h.pre(class="treebar-error-msg")(reason),
-        h.details(class="treebar-error-trace")(h.summary("Full stacktrace"), h.pre(full)),
-    )
-end
+# Record + render the failed task's error THROUGH HTMXObjects' public `safely`
+# (exported), so a keep_progress failure gets the SAME treatment as a
+# route-boundary throw — disk log (ERROR_DIR/<uid>.log) + @error line + the app's
+# __on_error__/__error__ hooks + the opaque "caught an error" article — WITHOUT
+# discarding the tree. We re-raise rv.result inside safely (rather than hand it
+# the Task) so the caught error IS the original exception (e.g. a
+# PropertyComputationError, which logs its own filtered backtrace); safely's own
+# catch_backtrace() is unused for those. `error_obj`/`req` carry the route
+# context when available; both may be nothing (safely still records + returns
+# the default article). The returned article carries aria-invalid="true" and
+# sits INSIDE the poller inner — the poller's hx-select excludes nested matches
+# (see `_polling_inner_running`) so htmx does not double-insert it.
+_caught_error(rv::Task, error_obj, req) =
+    HTMXObjects.safely(; obj=error_obj, req=req) do
+        throw(rv.result)
+    end
 
 function _polling_running(status; label, poll_url, poll_interval, cancel_url)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
@@ -606,18 +610,23 @@ _polling_wrap(inner; pausable=false) = h.div(class="treebar-poller",
 # `hx-select` strips the wrapper out of the response on each poll (the server
 # always emits wrapper > inner — initial calls need the wrapper, polls don't —
 # and selecting just the inner keeps the live wrapper untouched, which is what
-# preserves `data-show-*` UX state across polls). The selector also matches
-# HTMXObjects' default error article shape (`article[aria-invalid="true"]`),
-# so a thrown task failure — which HTMXObjects turns into a 200 with that
-# article — still lands inside the wrapper, replaces this polling element
-# (no `hx-trigger` in the error article → polling stops naturally), and is
-# visible to the user. No request-sniffing, no OOB, no JS state hacks needed.
+# preserves `data-show-*` UX state across polls). The second branch matches
+# HTMXObjects' bare error article (`article[aria-invalid="true"]`) so a
+# `keep_progress=false` thrown failure — a 200 carrying just that article —
+# still lands in the wrapper, replaces this polling element (no `hx-trigger` →
+# polling stops), and shows. The `:not(.treebar-poller-inner article)` is
+# load-bearing: with keep_progress the failure response IS a `.treebar-poller-inner`
+# that CONTAINS an aria-invalid article (the opaque one from `safely`, see
+# `_caught_error`); without the exclusion, hx-select's querySelectorAll matches
+# BOTH the inner and that nested article and htmx inserts the article twice.
+# Excluding nested matches leaves only the inner selected. No request-sniffing,
+# no OOB, no JS state hacks needed.
 _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
         hx_trigger="every $interval",
         hx_target="this",
         hx_swap="outerHTML",
-        hx_select=".treebar-poller-inner, article[aria-invalid='true']")(body)
+        hx_select=".treebar-poller-inner, article[aria-invalid='true']:not(.treebar-poller-inner article)")(body)
 
 _polling_inner_done(body...) = h.div(class="treebar-poller-inner")(body...)
 
