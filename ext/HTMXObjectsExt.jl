@@ -70,7 +70,7 @@ htmx_treebar_styles() = h.style("""
 .treebar-pending { opacity: 0.55; }
 .treebar-pending .treebar-progress { opacity: 0.5; }
 .treebar-pill:hover { opacity: 0.8; }
-.treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
+.treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
 .treebar-node { margin-bottom: 0.25rem; }
@@ -97,10 +97,9 @@ htmx_treebar_styles() = h.style("""
    its hx-trigger), so a paused poller still matches → button stays → Resume works. */
 .treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
-/* .treebar-label intentionally carries NO self-indent: it inherits indentation
-   from the enclosing .treebar-children like every other node, so a nested label
-   aligns with its sibling .treebar-node instead of being double-indented. Its
-   flex layout lives in the `.treebar-header, .treebar-label` rule above. */
+/* Message-bearing nodes now use the same treebar-node + treebar-header structure
+   as container nodes, so treebar-label/treebar-value/treebar-description classes
+   are no longer emitted. */
 
 /* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
    .treebar-children for static one-shot renders). data-show-* values are "0" or
@@ -289,15 +288,10 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                 children_node,
             )
         elseif !isempty(sp.message)
-            # Message-bearing node. Show the duration suffix by default (a timed
-            # work-leaf like a disk-load substatus "from disk: 2.5 GB"), EXCEPT on
-            # `key: value` annotation labels (set by `_update_labels!`, meta flag
-            # `annotation=true`) whose "duration" is just the parent's lifetime and
-            # so misleading. Nodes whose meta lacks the flag default to showing it.
-            h.div(class="treebar-label")(
-                h.span(class="treebar-description")(sp.description),
-                h.span(class="treebar-value")(sp.message),
-                get(node.meta, :annotation, false) ? "" : duration_node,
+            header_text = isempty(sp.description) ? sp.message : "$(sp.description) $(sp.message)"
+            h.div(class=node_class)(
+                h.div(class="treebar-header")(header_text,
+                    get(node.meta, :annotation, false) ? "" : duration_node),
                 children_node,
             )
         else

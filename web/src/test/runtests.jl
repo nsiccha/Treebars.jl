@@ -157,7 +157,7 @@ end
     ann = first(root2.children)
     @test get(ann.meta, :annotation, false) === true
     ann_html = sprint(io -> show(io, MIME"text/html"(), htmx_render(ann)))
-    @test occursin("treebar-label", ann_html)
+    @test occursin("treebar-header", ann_html)
     @test !occursin("treebar-duration", ann_html)
 
     finalize_progress!(root)
