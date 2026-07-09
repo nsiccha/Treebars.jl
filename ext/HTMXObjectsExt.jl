@@ -289,7 +289,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                 children_node,
             )
         elseif !isempty(sp.message)
-            # Message-bearing leaf. Show the duration suffix by default (a timed
+            # Message-bearing node. Show the duration suffix by default (a timed
             # work-leaf like a disk-load substatus "from disk: 2.5 GB"), EXCEPT on
             # `key: value` annotation labels (set by `_update_labels!`, meta flag
             # `annotation=true`) whose "duration" is just the parent's lifetime and
@@ -298,6 +298,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                 h.span(class="treebar-description")(sp.description),
                 h.span(class="treebar-value")(sp.message),
                 get(node.meta, :annotation, false) ? "" : duration_node,
+                children_node,
             )
         else
             if article
