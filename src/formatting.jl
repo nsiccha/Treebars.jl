@@ -65,8 +65,12 @@ round2(x::String) = x
 
 Compact string form for progress display:
 
-- Reals are rounded via [`round2`](@ref), trailing `".0"` trimmed.
-- Integers are abbreviated with `k`/`M`/`G` suffixes (`1_500_000 → "1.5M"`).
+- Reals and Integers alike are abbreviated with `k`/`M`/`G` suffixes once
+  `abs(x)` reaches the corresponding threshold (`1_500_000 → "1.5M"`,
+  `72000.0 → "72k"`, `-72000.0 → "-72k"`). The same numeric value therefore
+  renders identically whatever its type.
+- Below `1e3` a Real is rounded via [`round2`](@ref) with a trailing `".0"`
+  trimmed; an Integer renders as-is. Non-finite Reals pass through.
 - Vectors of length > 7 are summarized as `[first 3, ..., last 3]`.
 - Pairs render as `"k => v"`; named tuples as `"(;k=v, …)"`.
 - A wrapped [`Fraction`](@ref) renders as a percentage.
@@ -74,21 +78,31 @@ Compact string form for progress display:
 Extend with package-specific methods in consuming packages.
 """
 short_string(x) = string(x)
-function short_string(x::Real)
+
+# Round-to-2-sig-figs with a trailing ".0" trimmed: the un-suffixed core shared
+# by the Real and Integer methods. It must NOT recurse back into `short_string`,
+# or a scaled value ≥ 1e3 would be abbreviated a second time (`10^12` → "1.0kG").
+function _short_significand(x::Real)
     rv = string(round2(x))
     endswith(rv, ".0") && length(rv) > 3 ? rv[1:end-2] : rv
 end
-function short_string(x::Integer)
-    if x >= 1e9
-        short_string(x / 1e9) * "G"
-    elseif x >= 1e6
-        short_string(x / 1e6) * "M"
-    elseif x >= 1e3
-        short_string(x / 1e3) * "k"
-    else
-        string(x)
+
+const _SI_SUFFIXES = ((1e9, "G"), (1e6, "M"), (1e3, "k"))
+
+# `float` before `abs` so `abs(typemin(Int))` can't wrap around to a negative.
+function _si_suffixed(x::Real)
+    ax = abs(float(x))
+    for (scale, suffix) in _SI_SUFFIXES
+        ax >= scale && return _short_significand(x / scale) * suffix
     end
+    nothing
 end
+
+function short_string(x::Real)
+    isfinite(x) || return string(x)
+    something(_si_suffixed(x), _short_significand(x))
+end
+short_string(x::Integer) = something(_si_suffixed(x), string(x))
 function short_string(x::AbstractVector)
     "[" * if length(x) > 7
         join(map(short_string, x[1:3]), ", ") * ", ..., " * join(map(short_string, x[end-2:end]), ", ")

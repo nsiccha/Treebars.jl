@@ -742,6 +742,21 @@ end
     @test short_string(1_500_000) == "1.5M"
     @test short_string(2_000_000_000) == "2.0G"
     @test short_string(42) == "42"
+    # Reals abbreviate exactly like Integers — same value, same rendering.
+    @test short_string(72000.0) == "72k"
+    @test short_string(72000) == short_string(72000.0)
+    @test short_string(1.5e6) == "1.5M"
+    @test short_string(-72000.0) == "-72k"
+    @test short_string(-72000) == "-72k"
+    @test short_string(500.0) == "500"      # below the 1e3 threshold: round2, no suffix
+    # round2 may round *up* across the threshold; the suffix keys off the raw value.
+    @test short_string(999.0) == "1000"
+    # A scaled value ≥ 1e3 must not be abbreviated twice ("1.0kG").
+    @test short_string(10^12) == "1000G"
+    @test short_string(1e12) == "1000G"
+    # Non-finite Reals pass through untouched.
+    @test short_string(NaN) == "NaN"
+    @test short_string(Inf) == "Inf"
     @test short_string([1, 2, 3]) == "[1, 2, 3]"
     @test short_string(:a => 1) == "a => 1"
     @test short_string((; x=1, y=2)) == "(;x=1, y=2)"
