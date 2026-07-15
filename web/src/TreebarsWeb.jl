@@ -235,12 +235,16 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("5. WebSocket with kwargs"),
-        h.p("Kwargs from query string."; class="u-text-sm u-text-muted"),
-        h.form(; _="on submit halt the event then set key to #param-key.value then set steps to #param-steps.value then set spd to #param-speed.value then set url to '/websockets/run?key=' + key + '&n_steps=' + steps + '&speed=' + spd then set #param-ws-container @ws-connect to url then js(htmx) htmx.process(document.getElementById('param-ws-container'))")(
+        h.p("Kwargs from query string. Submitting swaps a fresh ", h.code("ws-connect"),
+            " element into the socket container, so htmx opens the connection reliably — ",
+            "mutating ", h.code("ws-connect"), " on an already-processed element does not reconnect.";
+            class="u-text-sm u-text-muted"),
+        h.form(; hx_get = __self__ / "websockets/connect",
+                 hx_target = "#param-ws-container", hx_swap = "innerHTML")(
             h.fieldset(; role="group")(
-                h.input(; type="text", id="param-key", value="param-demo", placeholder="Key"),
-                h.input(; type="number", id="param-steps", value="100", placeholder="Steps", class="tb-input-narrow"),
-                h.input(; type="number", id="param-speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
+                h.input(; type="text", name="key", value="param-demo", placeholder="Key"),
+                h.input(; type="number", name="n_steps", value="100", placeholder="Steps", class="tb-input-narrow"),
+                h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
                 h.button("Run"; type="submit"),
             ),
         ),
