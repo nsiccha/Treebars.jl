@@ -887,3 +887,105 @@ end
     @test poll_count[] > 0
     finalize_progress!(root)
 end
+
+@testset "render_text: labels, nesting, counters, state, duration" begin
+    root = initialize_progress!(:state; description="probe")
+    done = initialize_progress!(root; description="load data")
+    finalize_progress!(done)
+    running = initialize_progress!(root, 10; description="fit")
+    update_progress!(running, 3)
+    update_progress!(running, "chain 2")
+    pending = prepare_progress!(root; description="plot")
+
+    txt = render_text(root)
+    lines = split(txt, "\n")
+
+    @test occursin("probe", lines[1])
+    @test any(l -> occursin("✓", l) && occursin("load data", l), lines)
+    @test any(l -> occursin("▶", l) && occursin("fit", l) && occursin("(3/10)", l) &&
+                   occursin("chain 2", l), lines)
+    # A pending node shows its marker but NO duration (it has not started).
+    plot_line = only(filter(l -> occursin("plot", l), lines))
+    @test occursin("·", plot_line)
+    @test !occursin("[", plot_line)
+    # Children are nested under the root, not flattened into it.
+    @test all(l -> occursin("─", l), lines[2:end])
+
+    fail_progress!(pending, ErrorException("boom"))
+    @test occursin("✗", render_text(root))
+
+    @test render_text(nothing) == "(no progress tree)"
+    finalize_progress!(root)
+
+    # `show(::MIME"text/plain")` delegates to render_text. Asserted on a fully
+    # FINALIZED tree so the durations are frozen — a running node's duration
+    # counts up to `now()`, so two renders of a live tree legitimately differ.
+    frozen = initialize_progress!(:state; description="frozen")
+    leaf = initialize_progress!(frozen; description="leaf")
+    finalize_progress!(leaf)
+    finalize_progress!(frozen)
+    @test sprint(show, MIME"text/plain"(), frozen) == render_text(frozen)
+    # Compact 2-arg show stays a single line.
+    @test !occursin("\n", sprint(show, frozen))
+end
+
+@testset "render_text display semantics match the HTML renderer" begin
+    # Both renderers go through `_flatten_displayed_children` + `_first_seen!`,
+    # so a text dump can be trusted to predict what the browser shows. These
+    # are the three behaviors that would silently diverge if they ever forked.
+    root = initialize_progress!(:state; description="Root")
+
+    # (a) A bare wrapper (no description/message/counter) inlines, hoisting.
+    bare = initialize_progress!(root; description="")
+    initialize_progress!(bare; description="hoisted")
+    txt = render_text(root)
+    @test occursin("hoisted", txt)
+    @test count("\n", txt) == 1   # root + hoisted child only — no wrapper level
+
+    # (b) An explicit `displayed=false` node hoists the same way.
+    hidden = initialize_progress!(root; description="HIDDENNODE", displayed=false)
+    initialize_progress!(hidden; description="VISIBLECHILD")
+    txt = render_text(root)
+    @test !occursin("HIDDENNODE", txt)
+    # …and its child hoists to root's level: a top-level connector, no indent.
+    @test any(l -> startswith(l, "└─ ") && occursin("VISIBLECHILD", l), split(txt, "\n"))
+
+    # (c) A node reachable from two parents (DO's substatus fan-out) renders
+    # once per tree — matching the htmx_render dedup testset above.
+    host = initialize_progress!(root; description="HostA")
+    dup = initialize_progress!(root; description="DupNode")
+    add_child!(host, dup)
+    @test count("DupNode", render_text(root)) == 1
+
+    finalize_progress!(root)
+end
+
+@testset "@progress warns on a docstring-swallowed phase marker" begin
+    # A bare `"label"` before a statement inside a `begin…end` is rewritten by
+    # the PARSER into `Core.@doc`, so it never reaches the macro as a marker and
+    # renders nothing — parse-clean and precompile-clean, the one @progress
+    # failure mode no offline check catches. Expansion must warn.
+    swallowed = quote
+        @progress p begin
+            "swallowed marker"
+            x = 1
+        end
+    end
+    @test_logs (:warn,) match_mode = :any macroexpand(@__MODULE__, swallowed)
+
+    # The macro form must stay silent — no false positive on correct code.
+    proper = quote
+        @progress p begin
+            @progress "real marker"
+            x = 1
+        end
+    end
+    @test_logs macroexpand(@__MODULE__, proper)
+
+    # A docstring at `@dynamicstruct` struct-body level (the legitimate DO
+    # pattern used throughout this repo's demos) is NOT inside a @progress
+    # block body, so it must not warn either.
+    @test !Treebars._is_doc_macrocall(:(x = 1))
+    @test Treebars._is_doc_macrocall(
+        Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), nothing, "d", :(f() = 1)))
+end
