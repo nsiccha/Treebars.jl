@@ -487,7 +487,8 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     # would discard the tree). keep_progress=false (or sync) re-throws as before.
     try
         fetchindex(ip, keys...; force, kwargs...) do rv, status
-            _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress)
+            _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
+                             ip_ctx=_ip_ctx(ip, keys, kwargs))
         end
     catch err
         (keep_progress && !sync) || rethrow()
@@ -502,17 +503,73 @@ end
 # the failure is handled in `polling_fetchindex`'s catch, not here. When
 # `sync=true`, block on the pending value (`fetch(::Pending)`) instead of
 # returning polling HTML — used by PDF export loopback (wants_markdown).
-_polling_resolve(rv::HTMXObjects.DynamicObjects.Pending, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result) =
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result) :
+_polling_resolve(rv::HTMXObjects.DynamicObjects.Pending, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
+
+# Human-readable "which IP, which key" for the unresolved-handle error below.
+# Best-effort: an IP that does not expose `name`/`o` still yields a usable string.
+function _ip_ctx(ip, keys, kwargs)
+    ipname = try
+        string(HTMXObjects.DynamicObjects.name(ip))
+    catch
+        string(typeof(ip))
+    end
+    kwstr = isempty(kwargs) ? "" : "; " * join(("$k=$(repr(v))" for (k, v) in pairs(kwargs)), ", ")
+    "$ipname($(join((repr(k) for k in keys), ", "))$kwstr)"
+end
+
+# Readiness guard for the done path.
+#
+# `_polling_resolve`'s done method is a CATCH-ALL by construction: whatever DO
+# hands back that no in-flight-handle method matched is treated as the finished
+# value and passed to `render_result`. That is precisely how DO's Task→Pending
+# contract change surfaced downstream (snag `polling-fetchind-dd65fe41`): a
+# Treebars built for the `Task` contract met a DO that returns `Pending`, no
+# method matched, and the raw handle flowed into consumer code — dying far away
+# with `type Pending has no field results`, naming neither Treebars nor the IP.
+#
+# Guard with a DUCK-TEST, not a type whitelist — a whitelist is exactly what
+# failed, and it would fail again on the next handle type. DO's handles (and
+# `Task`/`Future`/`Channel`) implement BOTH `Base.isready` and `Base.fetch`;
+# ordinary values implement neither, since Base defines no `Any` fallback for
+# either. So an `rv` answering both AND reporting not-ready is an unresolved
+# handle we have no method for. Fail loudly HERE rather than downstream.
+#
+# The `isready` check keeps the false-positive surface small: a value that
+# genuinely IS a ready Channel/Future passes through untouched. An IP whose
+# value is a legitimately-unready Channel would now error — exotic enough to be
+# worth the trade, and the message says what to do about it.
+#
+# `Task` needs its OWN method: Base defines `istaskdone` for it, NOT `isready`
+# (which covers Channel/Future and DO's `Pending`), so the duck-test misses it —
+# and `Task` is exactly the PREVIOUS generation of DO's contract, i.e. the skew
+# most likely to be met in the wild. Caught by the extension-load test; a
+# precompile-only check does not see it.
+_is_unresolved_handle(rv::Task) = !istaskdone(rv)
+_is_unresolved_handle(rv) =
+    applicable(Base.isready, rv) && applicable(Base.fetch, rv) && !Base.isready(rv)
+
+function _assert_resolved(rv, ip_ctx)
+    _is_unresolved_handle(rv) && error("""
+        Treebars.polling_fetchindex: $(ip_ctx) handed back an UNRESOLVED handle of \
+        type `$(typeof(rv))`, so its value is not ready and `render_result` must not \
+        be called with it.
+
+        This means no in-flight-handle method of `_polling_resolve` matched, which \
+        almost always indicates Treebars and DynamicObjects are from different \
+        generations of DO's fetch contract (`rv isa Task` before compute-at-most-once, \
+        `rv isa Pending` after). Pin both packages to the same line.""")
+    rv
+end
 
 # Done — already-cached or just-completed. The wrapper here is vestigial on
 # first-call-done (no polling ever happened) but harmless; on running-then-done
 # the response replaces the polling inner so the wrapper persists with its UX
 # state intact. With keep_progress (default, but not on the sync loopback), the
 # frozen tree is appended below the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result)
-    body = render_result(rv)
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
+    body = render_result(_assert_resolved(rv, ip_ctx))
     (keep_progress && !sync) ?
         _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
         _polling_wrap(_polling_inner_done(body))
@@ -649,7 +706,13 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
             # frame sent), mirroring the old `istaskfailed(rv) ||` short-circuit.
             try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
-            try; send(ws, final_html(render_result(rv))); catch; end
+            # Same catch-all trap as the HTTP done path — an unrecognised in-flight
+            # handle would be rendered as if it were the value. See `_assert_resolved`.
+            # The guard runs OUTSIDE the `try`: that catch exists to swallow WebSocket
+            # send failures on a dropped client, and it would swallow this diagnostic
+            # too — reinstating the exact silent failure the guard exists to prevent.
+            val = _assert_resolved(rv, _ip_ctx(ip, keys, kwargs))
+            try; send(ws, final_html(render_result(val))); catch; end
         end
     end
 end
