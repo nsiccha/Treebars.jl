@@ -65,8 +65,16 @@ round2(x::String) = x
 
 Compact string form for progress display:
 
-- Reals are rounded via [`round2`](@ref), trailing `".0"` trimmed.
-- Integers are abbreviated with `k`/`M`/`G` suffixes (`1_500_000 → "1.5M"`).
+- Reals and Integers alike are abbreviated with `k`/`M`/`G`/`T`/`P`/`E` suffixes
+  once `abs(x)` reaches the corresponding threshold (`1_500_000 → "1.5M"`,
+  `72000.0 → "72k"`, `-72000.0 → "-72k"`, `1e12 → "1.0T"`). The same numeric
+  value renders identically whatever its type, and `-x` always renders as `x`
+  with a leading `"-"`.
+- Below `1e3` a Real is rounded via [`round2`](@ref) with a trailing `".0"`
+  trimmed; an Integer renders as-is. Non-finite Reals pass through.
+- Thresholds key off the *raw* value, so rounding may carry a mantissa up to
+  `"1000"` (`999.0 → "1000"`, `999_999 → "1000k"`). Magnitudes past the largest
+  suffix (`≥ 1e21`, BigInt only) render un-suffixed.
 - Vectors of length > 7 are summarized as `[first 3, ..., last 3]`.
 - Pairs render as `"k => v"`; named tuples as `"(;k=v, …)"`.
 - A wrapped [`Fraction`](@ref) renders as a percentage.
@@ -74,21 +82,42 @@ Compact string form for progress display:
 Extend with package-specific methods in consuming packages.
 """
 short_string(x) = string(x)
-function short_string(x::Real)
+
+# Round-to-2-sig-figs with a trailing ".0" trimmed: the un-suffixed core shared
+# by the Real and Integer methods. It must NOT recurse back into `short_string`,
+# or a scaled value ≥ 1e3 would be abbreviated a second time (`10^12` → "1.0kG").
+function _short_significand(x::Real)
     rv = string(round2(x))
-    endswith(rv, ".0") && length(rv) > 3 ? rv[1:end-2] : rv
+    # Trim on the DIGIT count, not the raw length: a leading "-" must not tip the
+    # threshold, else "1.0" is kept while "-1.0" becomes "-1" (so 1000 → "1.0k"
+    # but -1000 → "-1k").
+    ndigits = length(rv) - (startswith(rv, "-") ? 1 : 0)
+    endswith(rv, ".0") && ndigits > 3 ? rv[1:end-2] : rv
 end
-function short_string(x::Integer)
-    if x >= 1e9
-        short_string(x / 1e9) * "G"
-    elseif x >= 1e6
-        short_string(x / 1e6) * "M"
-    elseif x >= 1e3
-        short_string(x / 1e3) * "k"
-    else
-        string(x)
+
+# Largest-first. Full SI range: stopping at "G" made anything ≥ 1e12 scale into a
+# mantissa that itself needed a suffix ("1000G") or that `string` rendered in
+# scientific notation ("9.2e9G" for typemax(Int64)).
+const _SI_SUFFIXES = ((1e18, "E"), (1e15, "P"), (1e12, "T"), (1e9, "G"), (1e6, "M"), (1e3, "k"))
+
+# `float` before `abs` so `abs(typemin(Int))` can't wrap around to a negative.
+# The upper bound keeps the mantissa in [1, 1000) — beyond the largest suffix
+# (≥ 1e21, reachable only by BigInt) we fall back to the un-suffixed form rather
+# than emit "1000E". Thresholds key off the RAW value, so round2 may still carry a
+# mantissa up to "1000" (999_999 → "1000k"); that is the documented behavior.
+function _si_suffixed(x::Real)
+    ax = abs(float(x))
+    for (scale, suffix) in _SI_SUFFIXES
+        scale <= ax < 1000scale && return _short_significand(x / scale) * suffix
     end
+    nothing
 end
+
+function short_string(x::Real)
+    isfinite(x) || return string(x)
+    @something _si_suffixed(x) _short_significand(x)
+end
+short_string(x::Integer) = @something _si_suffixed(x) string(x)
 function short_string(x::AbstractVector)
     "[" * if length(x) > 7
         join(map(short_string, x[1:3]), ", ") * ", ..., " * join(map(short_string, x[end-2:end]), ", ")

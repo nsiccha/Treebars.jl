@@ -157,7 +157,7 @@ end
     ann = first(root2.children)
     @test get(ann.meta, :annotation, false) === true
     ann_html = sprint(io -> show(io, MIME"text/html"(), htmx_render(ann)))
-    @test occursin("treebar-label", ann_html)
+    @test occursin("treebar-header", ann_html)
     @test !occursin("treebar-duration", ann_html)
 
     finalize_progress!(root)
@@ -742,6 +742,39 @@ end
     @test short_string(1_500_000) == "1.5M"
     @test short_string(2_000_000_000) == "2.0G"
     @test short_string(42) == "42"
+    # Reals abbreviate exactly like Integers — same value, same rendering.
+    @test short_string(72000.0) == "72k"
+    @test short_string(72000) == short_string(72000.0)
+    @test short_string(1.5e6) == "1.5M"
+    @test short_string(-72000.0) == "-72k"
+    @test short_string(-72000) == "-72k"
+    @test short_string(500.0) == "500"      # below the 1e3 threshold: round2, no suffix
+    # round2 may round *up* across the threshold; the suffix keys off the raw value.
+    @test short_string(999.0) == "1000"
+    @test short_string(999_999) == "1000k"
+    # A scaled value ≥ 1e3 must not be abbreviated twice ("1.0kG"), and must not
+    # fall back to scientific notation ("9.2e9G") — the SI table runs to E.
+    @test short_string(10^12) == "1.0T"
+    @test short_string(1e12) == "1.0T"
+    @test short_string(1e15) == "1.0P"
+    @test short_string(9.2e18) == "9.2E"
+    @test short_string(typemax(Int64)) == "9.2E"
+    @test short_string(typemin(Int64)) == "-9.2E"   # float() before abs(): no wraparound
+    @test short_string(big(10)^15) == "1.0P"
+    # Past the largest suffix, render un-suffixed rather than emit "1000E".
+    @test short_string(big(10)^24) == string(big(10)^24)
+    # -x always renders as x with a leading "-" (the ".0" trim must ignore the sign).
+    for v in Any[1.0, 10.0, 0.0, 1000, 1000.0, 2_000_000_000, 2.0e9, 72000.0, 1.5e6, 1e12]
+        @test short_string(-v) == "-" * short_string(v)
+    end
+    @test short_string(-1.0) == "-1.0"
+    @test short_string(-1000) == "-1.0k"
+    # Non-finite Reals pass through untouched.
+    @test short_string(NaN) == "NaN"
+    @test short_string(Inf) == "Inf"
+    @test short_string(-Inf) == "-Inf"
+    # Bool is an Integer but must not be abbreviated or numeric-ified.
+    @test short_string(true) == "true"
     @test short_string([1, 2, 3]) == "[1, 2, 3]"
     @test short_string(:a => 1) == "a => 1"
     @test short_string((; x=1, y=2)) == "(;x=1, y=2)"

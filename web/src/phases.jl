@@ -88,10 +88,9 @@ end
         result_article("Pipeline '$key' — $rv"; rerun_url = __self__/"demo/$key")
     end
 
-    @get cancel(key) = begin
-        cancel!(results, key)
-        result_article("Cancelled '$key'")
-    end
+    # See async.jl — `cancel!` is gone; stopping only detaches this view.
+    @get cancel(key) = result_article("Stopped watching '$key'",
+        h.p("The compute keeps running to completion — cancellation is not supported."))
 
     # Leading statements before the first marker sort ABOVE the labeled phases.
     @get leading(key; force::Bool=false) = polling_fetchindex(leading_results, key;

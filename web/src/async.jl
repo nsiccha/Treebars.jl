@@ -23,10 +23,10 @@ end
         )
     end
 
-    @get cancel(key) = begin
-        cancel!(results, key)
-        result_article("Cancelled '$key'", h.p("Task was cancelled."))
-    end
+    # `cancel!` went away with the compute-at-most-once refactor, so an in-flight
+    # compute always runs to completion. Stopping only detaches this view.
+    @get cancel(key) = result_article("Stopped watching '$key'",
+        h.p("The compute keeps running to completion — cancellation is not supported."))
 
     @get param(n_steps::Int, sleep_ms::Int; force::Bool=false) = begin
         sleep_per_step = sleep_ms / 1000.0

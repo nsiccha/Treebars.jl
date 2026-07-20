@@ -41,6 +41,14 @@ _ws_html(target_id, title, body...) =
         end
     end
 
+    # Fresh `ws-connect` element for the chosen kwargs. The index form `hx-get`s
+    # this and swaps the result into the persistent `hx-ext=ws` container; htmx
+    # processes the swapped-in child, so the (already-active) ws extension opens
+    # the socket. This is the reliable way to (re)connect with dynamic params —
+    # mutating `ws-connect` on an already-processed element does NOT reconnect.
+    @get connect(; key="default", n_steps::Int=200, speed::Int=20) =
+        h.div(; ws_connect = query_url(__self__ / "run"; key, n_steps, speed))
+
     # Kwargs pulled from the query string (key/n_steps/speed).
     @ws run(; key="default", n_steps::Int=200, speed::Int=20) = begin
         sleep_per_step = speed / 1000.0

@@ -71,7 +71,7 @@ htmx_treebar_styles() = h.style("""
 .treebar-pending { opacity: 0.55; }
 .treebar-pending .treebar-progress { opacity: 0.5; }
 .treebar-pill:hover { opacity: 0.8; }
-.treebar-header, .treebar-label { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
+.treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
 .treebar-node { margin-bottom: 0.25rem; }
@@ -98,10 +98,9 @@ htmx_treebar_styles() = h.style("""
    its hx-trigger), so a paused poller still matches → button stays → Resume works. */
 .treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
-/* .treebar-label intentionally carries NO self-indent: it inherits indentation
-   from the enclosing .treebar-children like every other node, so a nested label
-   aligns with its sibling .treebar-node instead of being double-indented. Its
-   flex layout lives in the `.treebar-header, .treebar-label` rule above. */
+/* Message-bearing nodes now use the same treebar-node + treebar-header structure
+   as container nodes, so treebar-label/treebar-value/treebar-description classes
+   are no longer emitted. */
 
 /* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
    .treebar-children for static one-shot renders). data-show-* values are "0" or
@@ -276,15 +275,11 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                 children_node,
             )
         elseif !isempty(sp.message)
-            # Message-bearing leaf. Show the duration suffix by default (a timed
-            # work-leaf like a disk-load substatus "from disk: 2.5 GB"), EXCEPT on
-            # `key: value` annotation labels (set by `_update_labels!`, meta flag
-            # `annotation=true`) whose "duration" is just the parent's lifetime and
-            # so misleading. Nodes whose meta lacks the flag default to showing it.
-            h.div(class="treebar-label")(
-                h.span(class="treebar-description")(sp.description),
-                h.span(class="treebar-value")(sp.message),
-                get(node.meta, :annotation, false) ? "" : duration_node,
+            header_text = isempty(sp.description) ? sp.message : "$(sp.description) $(sp.message)"
+            h.div(class=node_class)(
+                h.div(class="treebar-header")(header_text,
+                    get(node.meta, :annotation, false) ? "" : duration_node),
+                children_node,
             )
         else
             if article
@@ -429,7 +424,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -440,14 +435,15 @@ content (the rendered result), which naturally stops the loop. The wrapper
 itself is never touched by polling, so UX state on it (`data-show-finished`
 / `-failed` / `-pending`, set by pill clicks) persists across polls.
 
-Failure path (`keep_progress=true`, default): the error is recorded and rendered
-through HTMXObjects' `safely` (disk log + `@error` + the app's
-`__on_error__`/`__error__` hooks + the opaque "caught an error" article) and
-returned alongside the kept tree inside the polling inner — so polling stops and
-the tree survives. With `keep_progress=false` the old behavior applies:
-`throw(rv.result)`, and HTMXObjects' route-boundary catch wraps it as a 200 HTML
-error response that replaces the polling inner (discarding the tree). Either way
-polling stops naturally — no custom OOB / HX-Retarget gymnastics.
+Failure path (`keep_progress=true`, default): the compute error — re-thrown by
+`fetchindex` before this callback runs (compute-at-most-once) — is caught in
+`polling_fetchindex`, recorded + rendered through HTMXObjects' `safely` (disk
+log + `@error` + the app's `__on_error__`/`__error__` hooks + the opaque "caught
+an error" article), and returned alongside the kept tree inside the polling
+inner, so polling stops and the tree survives. With `keep_progress=false` the
+error propagates to HTMXObjects' route-boundary catch (a 200 HTML error article
+that replaces the polling inner, discarding the tree). Either way polling stops
+naturally — no custom OOB / HX-Retarget gymnastics.
 
 - `render_result(rv)`: function that renders the final result (supports `do` syntax)
 - `ip`: IndexableProperty (e.g. `app.pathfinder`)
@@ -460,23 +456,18 @@ polling stops naturally — no custom OOB / HX-Retarget gymnastics.
 - `force`: force re-computation (default `false`). Ignored when `poll_context` is set.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
-  The actual cancel logic lives in DynamicObjects (`cancel!`) — Treebars just renders the button.
-  After cancel, the task fails with `InterruptException`; next poll throws and
-  HTMXObjects renders the error article.
-- `keep_progress`: keep the finished/failed progress tree around for post-hoc
-  inspection (default `true`). On success the frozen tree is appended below the
-  result in a collapsed `<details>`. On failure the tree (with the failed node)
-  is shown in an open `<details>` beside the error — and the error is recorded +
-  rendered through HTMXObjects' `safely`, so it gets the SAME disk log + opaque
-  "caught an error" article + `__on_error__`/`__error__` hooks as a normal
-  route-boundary throw, instead of `throw`ing (which would discard the tree).
-  Set `false` to restore the old result-only / throw-on-failure behavior;
-  ignored on the `sync` path (no tree in the loopback result).
+  Treebars only renders the button (pointing at the caller-provided `cancel_url`).
+  NOTE: DynamicObjects' `cancel!` was removed with the compute-at-most-once
+  refactor, so an in-flight compute now always runs to completion — the button
+  is inert unless the caller's `cancel_url` route does something itself.
+- `keep_progress`: keep the finished/failed tree for post-hoc inspection (default
+  `true`). On success the frozen tree is appended below the result in a collapsed
+  `<details>`. On failure the tree (with the failed node) is shown in an open
+  `<details>` beside the recorded error. Set `false` for the old result-only /
+  propagate-on-failure behavior; ignored on the `sync` path.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
-  (its `obj` for `__on_error__`/`__error__` + its `req` for log metadata).
-  Auto-derived from `poll_context` when given; pass explicitly otherwise. Both
-  optional — without them the error is still recorded and the default article
-  rendered, just without req metadata or custom hooks.
+  (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
+  Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
@@ -489,77 +480,128 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
         isnothing(error_obj) && (error_obj = poll_context)
         isnothing(req) && hasproperty(poll_context, :__req__) && (req = poll_context.__req__)
     end
-    fetchindex(ip, keys...; force, kwargs...) do rv, status
-        _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress, error_obj, req)
+    # keep_progress: a failed compute is re-thrown by fetchindex BEFORE the
+    # callback runs (compute-at-most-once), so wrap the call to catch it, pull
+    # the (failed) tree via getstatus, and render the recorded error + tree
+    # rather than let the throw reach HTMXObjects' route-boundary catch (which
+    # would discard the tree). keep_progress=false (or sync) re-throws as before.
+    try
+        fetchindex(ip, keys...; force, kwargs...) do rv, status
+            _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
+                             ip_ctx=_ip_ctx(ip, keys, kwargs))
+        end
+    catch err
+        (keep_progress && !sync) || rethrow()
+        _polling_wrap(_polling_inner_done(_caught_error_ex(err, error_obj, req),
+                                          _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true)))
     end
 end
 
-# Two-method dispatch on the IP's resolved value: a `Task` is still
-# running (or just failed); anything else is the final (done) result.
-# Replaces the `if _is_task(rv) … elseif _is_task(rv) … else …` chain
-# in `polling_fetchindex`'s `do rv, status` block — the type test now
-# lives at the method boundary, and the failure-vs-running split inside
-# the Task method is a plain value test (`istaskfailed`).
-# When `sync=true`, block on a running Task instead of returning polling
-# HTML — used by PDF export loopback (wants_markdown) and other callers
-# that need synchronous resolution.
-# Failed: with keep_progress (default) render the recorded error + the frozen
-# tree (failed node visible) so the run can be inspected — see `_caught_error`
-# (which routes through HTMXObjects' `safely` for disk log + opaque article +
-# hooks) and `_kept_progress`. Without it, fall back to `throw`ing so
-# HTMXObjects' route-boundary catch renders the error article (discards the tree).
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, error_obj=nothing, req=nothing, label, poll_url, poll_interval, cancel_url, render_result) =
-    istaskfailed(rv) ?
-        ((keep_progress && !sync) ? _polling_wrap(_polling_inner_done(_caught_error(rv, error_obj, req), _kept_progress(status; open=true))) :
-                                    throw(rv.result)) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, error_obj, req, label, poll_url, poll_interval, cancel_url, render_result) :
+# Dispatch on the IP's resolved value: a `Pending` handle means the compute is
+# still in flight; anything else is the final (done) result. A FAILED compute is
+# re-thrown by `fetchindex` BEFORE this callback runs (compute-at-most-once), so
+# the failure is handled in `polling_fetchindex`'s catch, not here. When
+# `sync=true`, block on the pending value (`fetch(::Pending)`) instead of
+# returning polling HTML — used by PDF export loopback (wants_markdown).
+_polling_resolve(rv::HTMXObjects.DynamicObjects.Pending, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
-# Done — already-cached or just-completed. The wrapper here is
-# vestigial on first-call-done (no polling ever happened) but
-# harmless; on running-then-done the response replaces the polling
-# inner so the wrapper persists with its UX state intact. With
-# keep_progress (default, but not on the sync loopback), the frozen tree
-# is appended below the result in a collapsed <details> for inspection.
-# (error_obj/req are unused here — success records no error — but are accepted
-# so the sync recursion in the Task method can thread them uniformly.)
-function _polling_resolve(rv, status; sync=false, keep_progress=true, error_obj=nothing, req=nothing, label, poll_url, poll_interval, cancel_url, render_result)
-    body = render_result(rv)
+# Human-readable "which IP, which key" for the unresolved-handle error below.
+# Best-effort: an IP that does not expose `name`/`o` still yields a usable string.
+function _ip_ctx(ip, keys, kwargs)
+    ipname = try
+        string(HTMXObjects.DynamicObjects.name(ip))
+    catch
+        string(typeof(ip))
+    end
+    kwstr = isempty(kwargs) ? "" : "; " * join(("$k=$(repr(v))" for (k, v) in pairs(kwargs)), ", ")
+    "$ipname($(join((repr(k) for k in keys), ", "))$kwstr)"
+end
+
+# Readiness guard for the done path.
+#
+# `_polling_resolve`'s done method is a CATCH-ALL by construction: whatever DO
+# hands back that no in-flight-handle method matched is treated as the finished
+# value and passed to `render_result`. That is precisely how DO's Task→Pending
+# contract change surfaced downstream (snag `polling-fetchind-dd65fe41`): a
+# Treebars built for the `Task` contract met a DO that returns `Pending`, no
+# method matched, and the raw handle flowed into consumer code — dying far away
+# with `type Pending has no field results`, naming neither Treebars nor the IP.
+#
+# Guard with a DUCK-TEST, not a type whitelist — a whitelist is exactly what
+# failed, and it would fail again on the next handle type. DO's handles (and
+# `Task`/`Future`/`Channel`) implement BOTH `Base.isready` and `Base.fetch`;
+# ordinary values implement neither, since Base defines no `Any` fallback for
+# either. So an `rv` answering both AND reporting not-ready is an unresolved
+# handle we have no method for. Fail loudly HERE rather than downstream.
+#
+# The `isready` check keeps the false-positive surface small: a value that
+# genuinely IS a ready Channel/Future passes through untouched. An IP whose
+# value is a legitimately-unready Channel would now error — exotic enough to be
+# worth the trade, and the message says what to do about it.
+#
+# `Task` needs its OWN method: Base defines `istaskdone` for it, NOT `isready`
+# (which covers Channel/Future and DO's `Pending`), so the duck-test misses it —
+# and `Task` is exactly the PREVIOUS generation of DO's contract, i.e. the skew
+# most likely to be met in the wild. Caught by the extension-load test; a
+# precompile-only check does not see it.
+_is_unresolved_handle(rv::Task) = !istaskdone(rv)
+_is_unresolved_handle(rv) =
+    applicable(Base.isready, rv) && applicable(Base.fetch, rv) && !Base.isready(rv)
+
+function _assert_resolved(rv, ip_ctx)
+    _is_unresolved_handle(rv) && error("""
+        Treebars.polling_fetchindex: $(ip_ctx) handed back an UNRESOLVED handle of \
+        type `$(typeof(rv))`, so its value is not ready and `render_result` must not \
+        be called with it.
+
+        This means no in-flight-handle method of `_polling_resolve` matched, which \
+        almost always indicates Treebars and DynamicObjects are from different \
+        generations of DO's fetch contract (`rv isa Task` before compute-at-most-once, \
+        `rv isa Pending` after). Pin both packages to the same line.""")
+    rv
+end
+
+# Done — already-cached or just-completed. The wrapper here is vestigial on
+# first-call-done (no polling ever happened) but harmless; on running-then-done
+# the response replaces the polling inner so the wrapper persists with its UX
+# state intact. With keep_progress (default, but not on the sync loopback), the
+# frozen tree is appended below the result in a collapsed <details>.
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
+    body = render_result(_assert_resolved(rv, ip_ctx))
     (keep_progress && !sync) ?
         _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
         _polling_wrap(_polling_inner_done(body))
 end
 
-# Frozen progress tree kept in the final (non-polling) response so a finished
-# or failed run can be inspected after polling stops. Rendered scoped=true so
-# the finished/failed/pending pills act as a static inspector, wrapped in a
+# Frozen progress tree kept in the final (non-polling) response so a finished or
+# failed run can be inspected after polling stops. scoped=true → the
+# finished/failed/pending pills act as a static inspector; wrapped in a
 # <details> (collapsed on success — stays out of the way; open on failure —
-# failed node visible immediately). Empty string when there is no status node.
+# failed node visible). `treebar-frozen` makes the client ticker skip it, so a
+# terminal tree still holding a "running" node is static, not counting up.
+# Empty string when there is no status node.
 function _kept_progress(status; open::Bool=false)
     isnothing(status) && return ""
-    # `treebar-frozen`: the client ticker skips durations inside it, so this is a
-    # genuinely static snapshot. Needed because a terminal tree may still hold a
-    # node marked "running" (a consumer whose failure/finalization didn't
-    # propagate to every node) — without this it would tick forever.
     body = (h.summary("Progress"), htmx_render(status; scoped=true))
     open ? h.details(class="treebar-frozen", open=true)(body...) : h.details(class="treebar-frozen")(body...)
 end
 
-# Record + render the failed task's error THROUGH HTMXObjects' public `safely`
-# (exported), so a keep_progress failure gets the SAME treatment as a
-# route-boundary throw — disk log (ERROR_DIR/<uid>.log) + @error line + the app's
-# __on_error__/__error__ hooks + the opaque "caught an error" article — WITHOUT
-# discarding the tree. We re-raise rv.result inside safely (rather than hand it
-# the Task) so the caught error IS the original exception (e.g. a
-# PropertyComputationError, which logs its own filtered backtrace); safely's own
-# catch_backtrace() is unused for those. `error_obj`/`req` carry the route
-# context when available; both may be nothing (safely still records + returns
-# the default article). The returned article carries aria-invalid="true" and
-# sits INSIDE the poller inner — the poller's hx-select excludes nested matches
-# (see `_polling_inner_running`) so htmx does not double-insert it.
-_caught_error(rv::Task, error_obj, req) =
+# Record + render a caught compute error THROUGH HTMXObjects' exported `safely`,
+# so a keep_progress failure gets the SAME treatment as a route-boundary throw —
+# disk log (ERROR_DIR/<uid>.log) + @error + the app's __on_error__/__error__
+# hooks + the opaque "caught an error" article — WITHOUT discarding the tree. On
+# the compute-at-most-once (Pending) model the failure is re-thrown by fetchindex
+# before our callback, so polling_fetchindex catches it and hands the exception
+# here; we re-raise inside safely to reuse its record+render. error_obj/req carry
+# route context (both may be nothing → default article, no hooks/req-meta). The
+# returned article is aria-invalid and sits INSIDE the poller inner — the
+# poller's hx-select excludes nested matches (see `_polling_inner_running`) so
+# htmx does not double-insert it.
+_caught_error_ex(err, error_obj, req) =
     HTMXObjects.safely(; obj=error_obj, req=req) do
-        throw(rv.result)
+        throw(err)
     end
 
 function _polling_running(status; label, poll_url, poll_interval, cancel_url)
@@ -599,12 +641,12 @@ _polling_wrap(inner; pausable=false) = h.div(class="treebar-poller",
 # and selecting just the inner keeps the live wrapper untouched, which is what
 # preserves `data-show-*` UX state across polls). The second branch matches
 # HTMXObjects' bare error article (`article[aria-invalid="true"]`) so a
-# `keep_progress=false` thrown failure — a 200 carrying just that article —
+# `keep_progress=false` propagated failure — a 200 carrying just that article —
 # still lands in the wrapper, replaces this polling element (no `hx-trigger` →
 # polling stops), and shows. The `:not(.treebar-poller-inner article)` is
 # load-bearing: with keep_progress the failure response IS a `.treebar-poller-inner`
 # that CONTAINS an aria-invalid article (the opaque one from `safely`, see
-# `_caught_error`); without the exclusion, hx-select's querySelectorAll matches
+# `_caught_error_ex`); without the exclusion, hx-select's querySelectorAll matches
 # BOTH the inner and that nested article and htmx inserts the article twice.
 # Excluding nested matches leaves only the inner selected. No request-sniffing,
 # no OOB, no JS state hacks needed.
@@ -630,8 +672,9 @@ over `ws` via [`ws_progress`](@ref) and pushes the final rendered result as
 one last frame on completion.
 
 Producer task is NOT cancelled on client disconnect — `ws_progress` exits
-its send loop on WS error and leaves the task alone; the IP cache retains
-the running task, so the next visitor reuses it.
+its send loop on WS error and leaves the compute alone; the in-flight compute
+runs to completion and its value lands in the IP cache, so the next visitor
+reuses it.
 
 Use inside an `@ws` route body, passing `__ws__` as the first argument:
 
@@ -656,12 +699,20 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
     progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if rv isa Task
+        if rv isa HTMXObjects.DynamicObjects.Pending
             ws_progress(ws, status; render=progress_render, interval)
-            istaskfailed(rv) ||
-                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+            # Block for the finished value and push the final frame. A failed
+            # compute makes `fetch(::Pending)` re-throw (caught here → no final
+            # frame sent), mirroring the old `istaskfailed(rv) ||` short-circuit.
+            try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
-            try; send(ws, final_html(render_result(rv))); catch; end
+            # Same catch-all trap as the HTTP done path — an unrecognised in-flight
+            # handle would be rendered as if it were the value. See `_assert_resolved`.
+            # The guard runs OUTSIDE the `try`: that catch exists to swallow WebSocket
+            # send failures on a dropped client, and it would swallow this diagnostic
+            # too — reinstating the exact silent failure the guard exists to prevent.
+            val = _assert_resolved(rv, _ip_ctx(ip, keys, kwargs))
+            try; send(ws, final_html(render_result(val))); catch; end
         end
     end
 end
