@@ -254,6 +254,31 @@ function _renders_self(node::ProgressNode)
 end
 _renders_self(::Nothing) = false
 
+# Walk `node.children` and replace each non-self-rendering child with its own
+# (recursively flattened) children. A child does not render itself when it is
+# explicitly `displayed=false` OR it is a bare wrapper with no display
+# preference set (see `_renders_self`). Pure render-time transform; the
+# underlying tree is unchanged. Returns a flat Vector{ProgressNode},
+# preserving iteration order.
+#
+# Lives HERE rather than in a render backend because both renderers need it —
+# the HTMXObjects extension's `htmx_render` and the core text renderer
+# (`render_text`, src/text.jl). Two copies would be free to drift, and a text
+# dump that disagreed with the browser about which nodes exist is worse than
+# no text dump at all: the whole point of the text form is to verify what the
+# live render will show.
+function _flatten_displayed_children(node::ProgressNode)
+    out = ProgressNode[]
+    for child in node.children
+        if _renders_self(child)
+            push!(out, child)
+        else
+            append!(out, _flatten_displayed_children(child))
+        end
+    end
+    out
+end
+
 """
     is_pending(s)
 

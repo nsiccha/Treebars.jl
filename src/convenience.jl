@@ -626,8 +626,46 @@ _absorb_block_arg!(phases, cur_label, cur_stmts, a, label) = begin
     (label, Any[])
 end
 
+# The docstring trap. Inside a `begin … end` (also `quote` / module / file
+# top-level), Julia's PARSER rewrites a string literal immediately followed by
+# another statement into `Core.@doc "label" stmt`. So a bare `"label"` written
+# as a phase marker is swallowed before `@progress` ever sees it: no node, no
+# error, no warning. The code is parse-clean and precompile-clean, which makes
+# this the one `@progress` failure mode no offline check can catch — it has
+# already cost a real DO property four silently-missing phases.
+#
+# We do NOT recover the intent by treating it as a marker: a genuine docstring
+# is legal here, and silently redefining what it means would trade a visible
+# bug for an invisible one. Warning at macro-expansion is enough to kill the
+# class — the author sees it the first time the block is compiled, with the
+# exact replacement spelled out.
+_is_doc_macrocall(x) =
+    Meta.isexpr(x, :macrocall) && length(x.args) == 4 &&
+    (x.args[1] === GlobalRef(Core, Symbol("@doc")) || x.args[1] === Symbol("@doc")) &&
+    _is_string_literal(x.args[3])
+
+function _warn_swallowed_markers(block::Expr)
+    line = nothing
+    for a in block.args
+        a isa LineNumberNode && (line = a; continue)
+        _is_doc_macrocall(a) || continue
+        label = a.args[3]
+        @warn """
+            @progress: a bare string literal inside a `begin … end` block was parsed as a \
+            DOCSTRING (`Core.@doc`), not a phase marker — it will create no node and render \
+            nothing. Write the macro form instead:
+
+                @progress $(label isa AbstractString ? repr(label) : string(label))
+
+            (If you really meant a docstring, this warning is expected — move it out of the \
+            `@progress` block to silence it.)
+            """ location = line
+    end
+end
+
 # Block wrap — split at phase markers, pre-enumerate labeled phases as pending
 function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
+    _warn_swallowed_markers(block)
     # Split block.args into (label, [stmts]) phases at phase-marker statements.
     # The first chunk has label=nothing (pre-first-marker stmts). Labels are
     # the raw source-level expressions (plain string or `Expr(:string, …)`),
