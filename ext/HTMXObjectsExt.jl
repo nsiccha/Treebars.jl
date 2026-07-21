@@ -497,13 +497,18 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     end
 end
 
-# Dispatch on the IP's resolved value: a `Pending` handle means the compute is
-# still in flight; anything else is the final (done) result. A FAILED compute is
-# re-thrown by `fetchindex` BEFORE this callback runs (compute-at-most-once), so
-# the failure is handled in `polling_fetchindex`'s catch, not here. When
-# `sync=true`, block on the pending value (`fetch(::Pending)`) instead of
-# returning polling HTML — used by PDF export loopback (wants_markdown).
-_polling_resolve(rv::HTMXObjects.DynamicObjects.Pending, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+# DynamicObjects' in-flight handles implement both `Base.isready` and
+# `Base.fetch`. Detect that protocol instead of resolving a concrete `Pending`
+# type while this extension module is being defined: Treebars should still load
+# when HTMXObjects changes where (or whether) it exposes DynamicObjects' handle
+# type. `Task` is the previous fetch contract and needs its own readiness test.
+_is_unresolved_handle(rv::Task) = !istaskdone(rv)
+_is_unresolved_handle(rv) =
+    applicable(Base.isready, rv) && applicable(Base.fetch, rv) && !Base.isready(rv)
+
+# Keep the old Task contract working while DynamicObjects consumers migrate.
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+    istaskfailed(rv) ? throw(rv.result) :
     sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
 
@@ -519,57 +524,18 @@ function _ip_ctx(ip, keys, kwargs)
     "$ipname($(join((repr(k) for k in keys), ", "))$kwstr)"
 end
 
-# Readiness guard for the done path.
-#
-# `_polling_resolve`'s done method is a CATCH-ALL by construction: whatever DO
-# hands back that no in-flight-handle method matched is treated as the finished
-# value and passed to `render_result`. That is precisely how DO's Task→Pending
-# contract change surfaced downstream (snag `polling-fetchind-dd65fe41`): a
-# Treebars built for the `Task` contract met a DO that returns `Pending`, no
-# method matched, and the raw handle flowed into consumer code — dying far away
-# with `type Pending has no field results`, naming neither Treebars nor the IP.
-#
-# Guard with a DUCK-TEST, not a type whitelist — a whitelist is exactly what
-# failed, and it would fail again on the next handle type. DO's handles (and
-# `Task`/`Future`/`Channel`) implement BOTH `Base.isready` and `Base.fetch`;
-# ordinary values implement neither, since Base defines no `Any` fallback for
-# either. So an `rv` answering both AND reporting not-ready is an unresolved
-# handle we have no method for. Fail loudly HERE rather than downstream.
-#
-# The `isready` check keeps the false-positive surface small: a value that
-# genuinely IS a ready Channel/Future passes through untouched. An IP whose
-# value is a legitimately-unready Channel would now error — exotic enough to be
-# worth the trade, and the message says what to do about it.
-#
-# `Task` needs its OWN method: Base defines `istaskdone` for it, NOT `isready`
-# (which covers Channel/Future and DO's `Pending`), so the duck-test misses it —
-# and `Task` is exactly the PREVIOUS generation of DO's contract, i.e. the skew
-# most likely to be met in the wild. Caught by the extension-load test; a
-# precompile-only check does not see it.
-_is_unresolved_handle(rv::Task) = !istaskdone(rv)
-_is_unresolved_handle(rv) =
-    applicable(Base.isready, rv) && applicable(Base.fetch, rv) && !Base.isready(rv)
-
-function _assert_resolved(rv, ip_ctx)
-    _is_unresolved_handle(rv) && error("""
-        Treebars.polling_fetchindex: $(ip_ctx) handed back an UNRESOLVED handle of \
-        type `$(typeof(rv))`, so its value is not ready and `render_result` must not \
-        be called with it.
-
-        This means no in-flight-handle method of `_polling_resolve` matched, which \
-        almost always indicates Treebars and DynamicObjects are from different \
-        generations of DO's fetch contract (`rv isa Task` before compute-at-most-once, \
-        `rv isa Pending` after). Pin both packages to the same line.""")
-    rv
-end
-
 # Done — already-cached or just-completed. The wrapper here is vestigial on
 # first-call-done (no polling ever happened) but harmless; on running-then-done
 # the response replaces the polling inner so the wrapper persists with its UX
 # state intact. With keep_progress (default, but not on the sync loopback), the
 # frozen tree is appended below the result in a collapsed <details>.
 function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
-    body = render_result(_assert_resolved(rv, ip_ctx))
+    if _is_unresolved_handle(rv)
+        return sync ?
+            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
+            _polling_running(status; label, poll_url, poll_interval, cancel_url)
+    end
+    body = render_result(rv)
     (keep_progress && !sync) ?
         _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
         _polling_wrap(_polling_inner_done(body))
@@ -699,20 +665,17 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
     progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if rv isa HTMXObjects.DynamicObjects.Pending
+        if rv isa Task
+            ws_progress(ws, status; render=progress_render, interval)
+            istaskfailed(rv) ||
+                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+        elseif _is_unresolved_handle(rv)
             ws_progress(ws, status; render=progress_render, interval)
             # Block for the finished value and push the final frame. A failed
-            # compute makes `fetch(::Pending)` re-throw (caught here → no final
-            # frame sent), mirroring the old `istaskfailed(rv) ||` short-circuit.
+            # compute makes `fetch` re-throw (caught here → no final frame sent).
             try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
-            # Same catch-all trap as the HTTP done path — an unrecognised in-flight
-            # handle would be rendered as if it were the value. See `_assert_resolved`.
-            # The guard runs OUTSIDE the `try`: that catch exists to swallow WebSocket
-            # send failures on a dropped client, and it would swallow this diagnostic
-            # too — reinstating the exact silent failure the guard exists to prevent.
-            val = _assert_resolved(rv, _ip_ctx(ip, keys, kwargs))
-            try; send(ws, final_html(render_result(val))); catch; end
+            try; send(ws, final_html(render_result(rv))); catch; end
         end
     end
 end
