@@ -1,6 +1,6 @@
 module HTMXObjectsExt
 import HTMXObjects
-import HTMXObjects: h, Node, fetchindex
+import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
@@ -47,7 +47,7 @@ function _duration_span(sp::StateProgress)
 end
 
 # Global stylesheet for treebar components — include via extra_head in htmx()
-htmx_treebar_styles() = h.style("""
+htmx_treebar_styles() = h.style(Raw("""
 .treebar-pills { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
 .treebar-pill {
     display: inline-block;
@@ -140,13 +140,13 @@ htmx_treebar_styles() = h.style("""
 /* Demo helpers */
 .tb-input-narrow { max-width: 6rem; }
 .tb-input-narrow-7 { max-width: 7rem; }
-""")
+"""))
 
 # Client-side duration ticker. Anchors each running .treebar-duration on first
 # sight (and re-anchors after every htmx swap, since data-elapsed-ms comes back
 # fresh from the server) then ticks textContent every 250ms locally — so the
 # counter advances smoothly between server polls instead of stuttering.
-htmx_treebar_script() = h.script("""
+htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
     // show whole milliseconds, sub-minute shows one-decimal seconds at 0.1s
@@ -232,7 +232,7 @@ htmx_treebar_script() = h.script("""
         start();
     }
 })();
-""")
+"""))
 
 # `_flatten_displayed_children` now lives in Treebars core (src/implementation.jl)
 # and is imported above — the core text renderer (`render_text`) shares it, so
