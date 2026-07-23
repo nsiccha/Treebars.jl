@@ -6,7 +6,12 @@ Initialize progress, call `f(progress_node)`, finalize on completion or fail on 
 function with_progress(f, args...; kwargs...)
     progress = initialize_progress!(args...; kwargs...)
     try
-        return f(progress)
+        # Bind the AMBIENT node as well as passing the lexical one, so frames
+        # inside `f` that take no progress argument still nest correctly (see
+        # `ambient.jl`). Skipped when progress is off, otherwise binding
+        # `nothing` would shadow an enclosing ambient node.
+        return progress === nothing ? f(progress) :
+            with_current_progress(() -> f(progress), progress)
     catch e
         fail_progress!(progress, e)
         rethrow()
@@ -202,7 +207,10 @@ function progress_map(f, parent, itrs...; description="Running...", transient=fa
         map(itrs...) do xs...
             child = initialize_progress!(loop; description="", kwargs...)
             try
-                f(child, xs...)
+                # Ambient-bind the per-element node (see `ambient.jl`) so work
+                # reached from the do-body nests under this element rather than
+                # under the loop. `f` is already a closure, so no scope change.
+                with_current_progress(() -> f(child, xs...), child)
             catch e
                 fail_progress!(child, e)
                 rethrow()
