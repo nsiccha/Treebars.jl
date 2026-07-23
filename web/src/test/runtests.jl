@@ -1128,3 +1128,69 @@ end
     @test err !== nothing
     @test occursin("detached tree", sprint(showerror, err))
 end
+
+@testset "@progress recognises an EMITTED GlobalRef head (the DO wrap)" begin
+    # Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
+    # EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
+    # head shape. DynamicObjects emits exactly this for its property-body wrap at
+    # three sites (DynamicObjects.jl:5708/:5725/:5760 @ 9f9c8a5: the @progress-,
+    # @PROGRESS- and UNMARKED paths), and since it wraps EVERY unmarked property
+    # body the GlobalRef is the dominant emitted head in the ecosystem.
+    # Reported by DynamicObjects:sbpmx-reflect — not visible from this side.
+    gr_progress = GlobalRef(Treebars, Symbol("@progress"))
+    gr_phases = GlobalRef(Treebars, Symbol("@phases"))
+
+    # The exact AST DO emits: `@progress __status__ begin … end`, label-less.
+    do_wrap = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                   :__status__, Expr(:block, :(1 + 1)))
+    @test Treebars._is_progress_macrocall(do_wrap)
+    @test Treebars._is_phases_macrocall(
+        Expr(:macrocall, gr_phases, LineNumberNode(0, :unknown), Expr(:block, :(x = 1))))
+
+    # A GlobalRef into ANOTHER module is not ours, even with the same macro name.
+    @test !Treebars._is_progress_macrocall(
+        Expr(:macrocall, GlobalRef(Base, Symbol("@progress")), nothing, "lbl"))
+
+    # Now the behavioural half. A GlobalRef-headed wrap NESTED inside a @progress
+    # block is what the walker newly sees. It must attach to the node the wrap
+    # names (`__status__`) — not error, and not detach to BACKEND[]. This is why
+    # the nested node-argument arm has to exist: before it, the walker seeing this
+    # head would have raised "nested form does not accept a backend argument" on
+    # every DO property nested inside a progress block.
+    # Evaluated at module scope, because DO's wrap names the node with the literal
+    # SYMBOL `__status__` and that has to resolve the way it does in a real
+    # property body — not as a testset-local.
+    nested = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                  :__status__,
+                  Expr(:block,
+                       Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown), "inner"),
+                       :(1 + 1)))
+    txt = @eval begin
+        _gr_root = initialize_progress!(:state; description="GlobalRefRoot")
+        __status__ = initialize_progress!(_gr_root; description="PropertyNode")
+        @progress _gr_root begin
+            $nested
+        end
+        finalize_progress!(__status__)
+        finalize_progress!(_gr_root)
+        render_text(_gr_root)
+    end
+    @test occursin("PropertyNode", txt)
+    @test occursin("inner", txt)
+
+    # And the reporter's other concern: DO's wrap is emitted LABEL-LESS and bare so
+    # the renderer inlines it away and it adds no row. A label-less wrap the walker
+    # now sees must still not grow one.
+    bare = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                :__progress__, Expr(:block, :(1 + 1)))
+    txt2 = @eval begin
+        _bw_root = initialize_progress!(:state; description="BareWrapRoot")
+        @progress _bw_root begin
+            $bare
+        end
+        finalize_progress!(_bw_root)
+        render_text(_bw_root)
+    end
+    # One line only: the root. The label-less wrap contributed no row.
+    @test length(split(strip(txt2), '\n')) == 1
+end

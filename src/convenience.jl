@@ -297,6 +297,19 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 # match while another package's same-named macro (ProgressLogging.jl exports a
 # `@progress` too) nested inside our block is left untouched. Same shape as the
 # `Threads.@threads` head test below.
+#
+# THIRD form: `GlobalRef(Treebars, Symbol("@progress"))`. Source-level
+# `Treebars.@progress` parses to the dotted Expr, but a macro that EMITS the call
+# writes a GlobalRef instead — which is neither of the above. DynamicObjects emits
+# exactly this at three sites (`DynamicObjects.jl:5708/:5725/:5760` @ `9f9c8a5` —
+# the `@progress`-marked, `@PROGRESS`-marked and UNMARKED property-body wraps),
+# and since it wraps EVERY unmarked property body the GlobalRef is now the
+# ecosystem's dominant emitted head by a wide margin. A GlobalRef needs no
+# `Treebars`-tail guard: it carries the resolved module itself, so it cannot be
+# confused with another package's `@progress`. `_is_doc_macrocall` below already
+# matches `GlobalRef(Core, Symbol("@doc"))` alongside the bare symbol — same idea.
+# (Reported by DynamicObjects:sbpmx-reflect on the snag decision; the emitted AST
+# is not visible from this side.)
 _qualifier_tail(m::Symbol) = m
 _qualifier_tail(m::Expr) =
     Meta.isexpr(m, :.) && m.args[2] isa QuoteNode ? m.args[2].value : nothing
@@ -307,6 +320,8 @@ _is_macro_head(name, mac::Symbol) =
         Meta.isexpr(name, :.) && name.args[2] isa QuoteNode &&
         name.args[2].value === mac && _qualifier_tail(name.args[1]) === :Treebars
     )
+_is_macro_head(name::GlobalRef, mac::Symbol) =
+    name.mod === (@__MODULE__) && name.name === mac
 
 _is_progress_macrocall(x) =
     Meta.isexpr(x, :macrocall) && length(x.args) >= 2 &&
