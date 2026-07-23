@@ -989,3 +989,142 @@ end
     @test Treebars._is_doc_macrocall(
         Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), nothing, "d", :(f() = 1)))
 end
+
+@testset "@progress / @phases accept a module-qualified head" begin
+    # The walker only ever sees SOURCE, so `Treebars.@progress` is a different
+    # macro head from `@progress`. Matching only the bare Symbol made every
+    # qualified spelling invisible to it, and the three failure modes differed:
+    # a 1-arg marker died with an ARITY error describing a different mistake,
+    # while the 2-arg wrap and `@phases` silently built against `BACKEND[]`
+    # (nothing in a web app) and produced NO node at all. Snag
+    # `used-an-inline-p-baab62f1` — the qualified spelling is what a
+    # `using DynamicObjects` consumer reaches for, since DO's `@progress` is
+    # only its LHS parse-marker and no bare `@progress` is in scope.
+
+    # (a) Qualified phase MARKERS split the block, exactly like bare ones.
+    root = initialize_progress!(:state; description="QualMarkers")
+    val = Treebars.@progress root begin
+        Treebars.@progress "first"
+        x = 1
+        Treebars.@progress "second"
+        x * 2
+    end
+    finalize_progress!(root)
+    @test val == 2
+    txt = render_text(root)
+    @test occursin("first", txt)
+    @test occursin("second", txt)
+
+    # Bare and qualified must lower to the SAME tree — the whole point.
+    # Durations are wall-clock, so compare the structure with them stripped.
+    bare_root = initialize_progress!(:state; description="QualMarkers")
+    @progress bare_root begin
+        @progress "first"
+        y = 1
+        @progress "second"
+        y * 2
+    end
+    finalize_progress!(bare_root)
+    undated(s) = replace(s, r"\[[^\]]*\]" => "[]")
+    @test undated(render_text(bare_root)) == undated(txt)
+
+    # (b) The qualified 2-arg wrap attaches to the ENCLOSING node, not BACKEND[].
+    #     This was the silent one: no node, no error.
+    w = initialize_progress!(:state; description="QualWrap")
+    Treebars.@progress w begin
+        Treebars.@progress "sub" begin
+            1 + 1
+        end
+    end
+    finalize_progress!(w)
+    @test occursin("sub", render_text(w))
+
+    # (c) Qualified @phases likewise binds the active node.
+    ph = initialize_progress!(:state; description="QualPhases")
+    Treebars.@progress ph begin
+        Treebars.@phases begin
+            a = 1
+            b = a + 1
+        end
+    end
+    finalize_progress!(ph)
+    @test occursin("a = 1", render_text(ph))
+
+    # (d) A longer path whose LAST module component is Treebars also matches —
+    #     `DynamicObjects.Treebars.@progress` is the spelling available to a
+    #     consumer that only did `using DynamicObjects`.
+    @test Treebars._is_progress_macrocall(
+        Expr(:macrocall,
+             Expr(:., Expr(:., :DynamicObjects, QuoteNode(:Treebars)),
+                  QuoteNode(Symbol("@progress"))),
+             nothing, "lbl"))
+    @test Treebars._is_phases_macrocall(
+        Expr(:macrocall, Expr(:., :Treebars, QuoteNode(Symbol("@phases"))),
+             nothing, :(begin end)))
+
+    # (e) Anchoring on a trailing `Treebars` is deliberate: another package's
+    #     same-named macro (ProgressLogging.jl exports a `@progress`) must NOT
+    #     be hijacked when nested inside our block.
+    @test !Treebars._is_progress_macrocall(
+        Expr(:macrocall, Expr(:., :ProgressLogging, QuoteNode(Symbol("@progress"))),
+             nothing, "lbl"))
+
+    # (f) An UNRECOGNISED head still falls through to the standalone path — the
+    #     error there must name the marker/import cause, not just the arity.
+    stray = quote
+        @progress "orphan"
+    end
+    err = try
+        macroexpand(@__MODULE__, stray); nothing
+    catch e
+        e
+    end
+    @test err !== nothing
+    msg = sprint(showerror, err)
+    @test occursin("PHASE MARKER", msg)
+    @test occursin("using Treebars: @progress", msg)
+end
+
+@testset "@progress nested node argument" begin
+    # `@progress node body` in nested position targets that node. Previously
+    # only reachable by writing the head qualified (which the walker could not
+    # see, so it expanded standalone); now both spellings agree.
+    root = initialize_progress!(:state; description="NestedNode")
+    side = initialize_progress!(root; description="sidecar")
+    @progress root begin
+        @progress side begin
+            1 + 1
+        end
+    end
+    finalize_progress!(side)
+    finalize_progress!(root)
+    @test occursin("sidecar", render_text(root))
+
+    # `__progress__` still resolves in the node slot.
+    r2 = initialize_progress!(:state; description="NestedAmbient")
+    @progress r2 begin
+        @progress __progress__ begin
+            @progress "inner"
+            1 + 1
+        end
+    end
+    finalize_progress!(r2)
+    @test occursin("inner", render_text(r2))
+
+    # A backend LITERAL stays rejected — nested, it would root a second,
+    # detached tree rather than attach to the block.
+    bad = quote
+        @progress p begin
+            @progress :state begin
+                1 + 1
+            end
+        end
+    end
+    err = try
+        macroexpand(@__MODULE__, bad); nothing
+    catch e
+        e
+    end
+    @test err !== nothing
+    @test occursin("detached tree", sprint(showerror, err))
+end
