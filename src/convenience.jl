@@ -6,7 +6,12 @@ Initialize progress, call `f(progress_node)`, finalize on completion or fail on 
 function with_progress(f, args...; kwargs...)
     progress = initialize_progress!(args...; kwargs...)
     try
-        return f(progress)
+        # Bind the AMBIENT node as well as passing the lexical one, so frames
+        # inside `f` that take no progress argument still nest correctly (see
+        # `ambient.jl`). Skipped when progress is off, otherwise binding
+        # `nothing` would shadow an enclosing ambient node.
+        return progress === nothing ? f(progress) :
+            with_current_progress(() -> f(progress), progress)
     catch e
         fail_progress!(progress, e)
         rethrow()
@@ -202,7 +207,10 @@ function progress_map(f, parent, itrs...; description="Running...", transient=fa
         map(itrs...) do xs...
             child = initialize_progress!(loop; description="", kwargs...)
             try
-                f(child, xs...)
+                # Ambient-bind the per-element node (see `ambient.jl`) so work
+                # reached from the do-body nests under this element rather than
+                # under the loop. `f` is already a closure, so no scope change.
+                with_current_progress(() -> f(child, xs...), child)
             catch e
                 fail_progress!(child, e)
                 rethrow()
@@ -273,14 +281,58 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 #     other expr    → indeterminate (spinner) child; only created if labeled
 # ──────────────────────────────────────────────────────────────────────────────
 
+# Macro-head recognition, bare OR module-qualified. The walker only ever sees
+# SOURCE, so `Treebars.@progress "x"` is a different head from `@progress "x"` —
+# matching only the bare Symbol made every qualified spelling invisible to it and
+# left it to expand as a STANDALONE call: a 1-arg marker died with an arity error
+# that described a different mistake, while `Treebars.@progress "l" body` and
+# `Treebars.@phases body` silently built against `BACKEND[]` (a process-global
+# root, `nothing` in a web app) instead of the enclosing node — no node, no error.
+# The qualified spelling is not exotic: a consumer whose imports are
+# `using DynamicObjects` has no bare `@progress` in scope (DO's `@progress` is
+# only its LHS parse-marker), so it is the first thing they reach for.
+#
+# The path is anchored on a trailing `Treebars` component rather than accepting
+# any qualifier, so `Treebars.@progress` and `DynamicObjects.Treebars.@progress`
+# match while another package's same-named macro (ProgressLogging.jl exports a
+# `@progress` too) nested inside our block is left untouched. Same shape as the
+# `Threads.@threads` head test below.
+#
+# THIRD form: `GlobalRef(Treebars, Symbol("@progress"))`. Source-level
+# `Treebars.@progress` parses to the dotted Expr, but a macro that EMITS the call
+# writes a GlobalRef instead — which is neither of the above. DynamicObjects emits
+# exactly this at three sites (`DynamicObjects.jl:5708/:5725/:5760` @ `9f9c8a5` —
+# the `@progress`-marked, `@PROGRESS`-marked and UNMARKED property-body wraps),
+# and since it wraps EVERY unmarked property body the GlobalRef is now the
+# ecosystem's dominant emitted head by a wide margin. A GlobalRef needs no
+# `Treebars`-tail guard: it carries the resolved module itself, so it cannot be
+# confused with another package's `@progress`. `_is_doc_macrocall` below already
+# matches `GlobalRef(Core, Symbol("@doc"))` alongside the bare symbol — same idea.
+# (Reported by DynamicObjects:sbpmx-reflect on the snag decision; the emitted AST
+# is not visible from this side.)
+_qualifier_tail(m::Symbol) = m
+_qualifier_tail(m::Expr) =
+    Meta.isexpr(m, :.) && m.args[2] isa QuoteNode ? m.args[2].value : nothing
+_qualifier_tail(_) = nothing
+
+_is_macro_head(name, mac::Symbol) =
+    name === mac || (
+        Meta.isexpr(name, :.) && name.args[2] isa QuoteNode &&
+        name.args[2].value === mac && _qualifier_tail(name.args[1]) === :Treebars
+    )
+_is_macro_head(name::GlobalRef, mac::Symbol) =
+    name.mod === (@__MODULE__) && name.name === mac
+
 _is_progress_macrocall(x) =
-    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@progress")
+    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 &&
+    _is_macro_head(x.args[1], Symbol("@progress"))
 
 # @phases macrocall recognition (mirrors the @progress pair). The walker
 # (`progress_expr`) detects these and eager-expands them in place via the shared
 # `_phases_build`, so an `@phases` nested inside `@progress` binds the active node.
 _is_phases_macrocall(x) =
-    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 && x.args[1] === Symbol("@phases")
+    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 &&
+    _is_macro_head(x.args[1], Symbol("@phases"))
 
 # User-supplied args of an @phases macrocall (strip macro name + LineNumberNode)
 _phases_user_args(x) = x.args[3:end]
@@ -407,10 +459,22 @@ function _parse_toplevel_args(args)
 end
 
 # Length-1 form: a body expression. A bare string literal (plain or
-# interpolated) here is a user error.
+# interpolated) here is a user error — but which one is ambiguous, so name both.
+# Reaching expansion at all means no enclosing `@progress` walker claimed this as
+# a phase marker, and the likeliest reason is a head the walker cannot see: it
+# matches `@progress` and `Treebars.@progress` (see `_is_macro_head`), so a
+# marker written through any other alias falls through to here. The old message
+# named only the arity, which points at adding a body — exactly the wrong fix for
+# a marker (snag `used-an-inline-p-baab62f1`).
 _toplevel_one_arg(a) =
-    _is_string_literal(a) ?
-        error("@progress with a string label requires a body expression: @progress \"label\" body") :
+    _is_string_literal(a) ? error("""
+        @progress $(a isa AbstractString ? repr(a) : string(a)) reached expansion as a STANDALONE call. Either:
+          • it was meant as a PHASE MARKER inside a `@progress [begin … end]` block — then the \
+        enclosing block did not recognise it, because a marker must be spelled `@progress "label"` \
+        or `Treebars.@progress "label"`. Import the macro with `using Treebars: @progress` (from a \
+        `using DynamicObjects` consumer: `using DynamicObjects.Treebars: @progress`); or
+          • you meant the wrapping form, which needs a body: `@progress "label" body`.
+        """) :
         (nothing, nothing, a)
 
 # Two-arg @progress form: a (plain or interpolated) string is the label;
@@ -439,11 +503,24 @@ _nested_one_arg(a, ctx) = _build_body(a, nothing, ctx)
 _nested_one_arg(a::AbstractString, ctx) =
     error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
 
-# Length-2 nested form: label, body. Label must be a (plain or interpolated)
-# string literal.
+# Length-2 nested form: `"label" body`, or `node body` for an explicit target.
+# The node arm mirrors `@phases node body` (`_phases_build`) exactly, including
+# the `progress_expr` pass so an `__progress__` node argument still resolves to
+# the enclosing node. It is not new surface: `Treebars.@progress q body` nested
+# in a block already behaved this way, because the walker could not see the
+# qualified head and left it to expand standalone against `q`. Now that the head
+# IS seen, the arm has to exist or that working spelling would start erroring —
+# and having the bare form agree is the point of the fix.
+#
+# A backend LITERAL (`:state`, `:term` — a QuoteNode in the AST) is the one thing
+# still rejected: nested, it would silently root a SECOND, detached tree.
 _nested_two_args(a, body, ctx) =
     _is_string_literal(a) ? _build_body(body, a, ctx) :
-    error("@progress: nested form does not accept a backend argument; use @progress \"label\" body")
+    _build_body(body, nothing, (progress=progress_expr(a, ctx), transient=ctx.transient))
+_nested_two_args(a::QuoteNode, body, ctx) =
+    error("@progress: nested form does not accept a backend argument (`:$(a.value)`) — it would " *
+          "start a second, detached tree; use `@progress \"label\" body`, or pass a ProgressNode " *
+          "to attach the body elsewhere")
 
 # Dispatch on body shape
 function _build_body(body, label, ctx)
@@ -825,7 +902,18 @@ Wrap `body` with automatic progress tracking. Supports:
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 
 The `backend` argument is only accepted at the outermost call (defaults to
-`Treebars.BACKEND[]`). Nested `@progress` calls use the enclosing progress node.
+`Treebars.BACKEND[]`). Nested `@progress` calls use the enclosing progress node —
+or an explicit one, `@progress node body`, mirroring [`@phases`](@ref).
+
+**Nested calls may be written module-qualified.** The walker rewrites nested
+`@progress` / [`@phases`](@ref) by matching the macro head in SOURCE, and accepts
+`@progress`, `Treebars.@progress`, and any path ending in `Treebars`
+(`DynamicObjects.Treebars.@progress` — the spelling available to a consumer that
+only did `using DynamicObjects`, whose own `@progress` is an unrelated LHS
+parse-marker). Reaching it through a different alias is NOT recognised: import it
+instead, with `using Treebars: @progress` (or `using DynamicObjects.Treebars:
+@progress`). A marker whose head the walker cannot see expands as a standalone
+call and errors, naming this cause.
 """
 macro progress(args...)
     backend, label, body = _parse_toplevel_args(args)

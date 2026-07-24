@@ -989,3 +989,208 @@ end
     @test Treebars._is_doc_macrocall(
         Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), nothing, "d", :(f() = 1)))
 end
+
+@testset "@progress / @phases accept a module-qualified head" begin
+    # The walker only ever sees SOURCE, so `Treebars.@progress` is a different
+    # macro head from `@progress`. Matching only the bare Symbol made every
+    # qualified spelling invisible to it, and the three failure modes differed:
+    # a 1-arg marker died with an ARITY error describing a different mistake,
+    # while the 2-arg wrap and `@phases` silently built against `BACKEND[]`
+    # (nothing in a web app) and produced NO node at all. Snag
+    # `used-an-inline-p-baab62f1` — the qualified spelling is what a
+    # `using DynamicObjects` consumer reaches for, since DO's `@progress` is
+    # only its LHS parse-marker and no bare `@progress` is in scope.
+
+    # (a) Qualified phase MARKERS split the block, exactly like bare ones.
+    root = initialize_progress!(:state; description="QualMarkers")
+    val = Treebars.@progress root begin
+        Treebars.@progress "first"
+        x = 1
+        Treebars.@progress "second"
+        x * 2
+    end
+    finalize_progress!(root)
+    @test val == 2
+    txt = render_text(root)
+    @test occursin("first", txt)
+    @test occursin("second", txt)
+
+    # Bare and qualified must lower to the SAME tree — the whole point.
+    # Durations are wall-clock, so compare the structure with them stripped.
+    bare_root = initialize_progress!(:state; description="QualMarkers")
+    @progress bare_root begin
+        @progress "first"
+        y = 1
+        @progress "second"
+        y * 2
+    end
+    finalize_progress!(bare_root)
+    undated(s) = replace(s, r"\[[^\]]*\]" => "[]")
+    @test undated(render_text(bare_root)) == undated(txt)
+
+    # (b) The qualified 2-arg wrap attaches to the ENCLOSING node, not BACKEND[].
+    #     This was the silent one: no node, no error.
+    w = initialize_progress!(:state; description="QualWrap")
+    Treebars.@progress w begin
+        Treebars.@progress "sub" begin
+            1 + 1
+        end
+    end
+    finalize_progress!(w)
+    @test occursin("sub", render_text(w))
+
+    # (c) Qualified @phases likewise binds the active node.
+    ph = initialize_progress!(:state; description="QualPhases")
+    Treebars.@progress ph begin
+        Treebars.@phases begin
+            a = 1
+            b = a + 1
+        end
+    end
+    finalize_progress!(ph)
+    @test occursin("a = 1", render_text(ph))
+
+    # (d) A longer path whose LAST module component is Treebars also matches —
+    #     `DynamicObjects.Treebars.@progress` is the spelling available to a
+    #     consumer that only did `using DynamicObjects`.
+    @test Treebars._is_progress_macrocall(
+        Expr(:macrocall,
+             Expr(:., Expr(:., :DynamicObjects, QuoteNode(:Treebars)),
+                  QuoteNode(Symbol("@progress"))),
+             nothing, "lbl"))
+    @test Treebars._is_phases_macrocall(
+        Expr(:macrocall, Expr(:., :Treebars, QuoteNode(Symbol("@phases"))),
+             nothing, :(begin end)))
+
+    # (e) Anchoring on a trailing `Treebars` is deliberate: another package's
+    #     same-named macro (ProgressLogging.jl exports a `@progress`) must NOT
+    #     be hijacked when nested inside our block.
+    @test !Treebars._is_progress_macrocall(
+        Expr(:macrocall, Expr(:., :ProgressLogging, QuoteNode(Symbol("@progress"))),
+             nothing, "lbl"))
+
+    # (f) An UNRECOGNISED head still falls through to the standalone path — the
+    #     error there must name the marker/import cause, not just the arity.
+    stray = quote
+        @progress "orphan"
+    end
+    err = try
+        macroexpand(@__MODULE__, stray); nothing
+    catch e
+        e
+    end
+    @test err !== nothing
+    msg = sprint(showerror, err)
+    @test occursin("PHASE MARKER", msg)
+    @test occursin("using Treebars: @progress", msg)
+end
+
+@testset "@progress nested node argument" begin
+    # `@progress node body` in nested position targets that node. Previously
+    # only reachable by writing the head qualified (which the walker could not
+    # see, so it expanded standalone); now both spellings agree.
+    root = initialize_progress!(:state; description="NestedNode")
+    side = initialize_progress!(root; description="sidecar")
+    @progress root begin
+        @progress side begin
+            1 + 1
+        end
+    end
+    finalize_progress!(side)
+    finalize_progress!(root)
+    @test occursin("sidecar", render_text(root))
+
+    # `__progress__` still resolves in the node slot.
+    r2 = initialize_progress!(:state; description="NestedAmbient")
+    @progress r2 begin
+        @progress __progress__ begin
+            @progress "inner"
+            1 + 1
+        end
+    end
+    finalize_progress!(r2)
+    @test occursin("inner", render_text(r2))
+
+    # A backend LITERAL stays rejected — nested, it would root a second,
+    # detached tree rather than attach to the block.
+    bad = quote
+        @progress p begin
+            @progress :state begin
+                1 + 1
+            end
+        end
+    end
+    err = try
+        macroexpand(@__MODULE__, bad); nothing
+    catch e
+        e
+    end
+    @test err !== nothing
+    @test occursin("detached tree", sprint(showerror, err))
+end
+
+@testset "@progress recognises an EMITTED GlobalRef head (the DO wrap)" begin
+    # Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
+    # EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
+    # head shape. DynamicObjects emits exactly this for its property-body wrap at
+    # three sites (DynamicObjects.jl:5708/:5725/:5760 @ 9f9c8a5: the @progress-,
+    # @PROGRESS- and UNMARKED paths), and since it wraps EVERY unmarked property
+    # body the GlobalRef is the dominant emitted head in the ecosystem.
+    # Reported by DynamicObjects:sbpmx-reflect — not visible from this side.
+    gr_progress = GlobalRef(Treebars, Symbol("@progress"))
+    gr_phases = GlobalRef(Treebars, Symbol("@phases"))
+
+    # The exact AST DO emits: `@progress __status__ begin … end`, label-less.
+    do_wrap = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                   :__status__, Expr(:block, :(1 + 1)))
+    @test Treebars._is_progress_macrocall(do_wrap)
+    @test Treebars._is_phases_macrocall(
+        Expr(:macrocall, gr_phases, LineNumberNode(0, :unknown), Expr(:block, :(x = 1))))
+
+    # A GlobalRef into ANOTHER module is not ours, even with the same macro name.
+    @test !Treebars._is_progress_macrocall(
+        Expr(:macrocall, GlobalRef(Base, Symbol("@progress")), nothing, "lbl"))
+
+    # Now the behavioural half. A GlobalRef-headed wrap NESTED inside a @progress
+    # block is what the walker newly sees. It must attach to the node the wrap
+    # names (`__status__`) — not error, and not detach to BACKEND[]. This is why
+    # the nested node-argument arm has to exist: before it, the walker seeing this
+    # head would have raised "nested form does not accept a backend argument" on
+    # every DO property nested inside a progress block.
+    # Evaluated at module scope, because DO's wrap names the node with the literal
+    # SYMBOL `__status__` and that has to resolve the way it does in a real
+    # property body — not as a testset-local.
+    nested = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                  :__status__,
+                  Expr(:block,
+                       Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown), "inner"),
+                       :(1 + 1)))
+    txt = @eval begin
+        _gr_root = initialize_progress!(:state; description="GlobalRefRoot")
+        __status__ = initialize_progress!(_gr_root; description="PropertyNode")
+        @progress _gr_root begin
+            $nested
+        end
+        finalize_progress!(__status__)
+        finalize_progress!(_gr_root)
+        render_text(_gr_root)
+    end
+    @test occursin("PropertyNode", txt)
+    @test occursin("inner", txt)
+
+    # And the reporter's other concern: DO's wrap is emitted LABEL-LESS and bare so
+    # the renderer inlines it away and it adds no row. A label-less wrap the walker
+    # now sees must still not grow one.
+    bare = Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown),
+                :__progress__, Expr(:block, :(1 + 1)))
+    txt2 = @eval begin
+        _bw_root = initialize_progress!(:state; description="BareWrapRoot")
+        @progress _bw_root begin
+            $bare
+        end
+        finalize_progress!(_bw_root)
+        render_text(_bw_root)
+    end
+    # One line only: the root. The label-less wrap contributed no row.
+    @test length(split(strip(txt2), '\n')) == 1
+end
