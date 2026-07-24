@@ -105,5 +105,24 @@ check("_ip_ctx is best-effort and never throws", () -> begin
     println("     _ip_ctx -> ", s)
 end)
 
+# --- 7. Terminal success has no live-poller identity or transport ---
+check("terminal success is visibly complete with an optional frozen record", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    Treebars.finalize_progress!(status)
+    node = ext._polling_resolve(:done, status;
+        sync=false, keep_progress=true, label="probe", poll_url="/poll",
+        poll_interval="200ms", cancel_url="", ip_ctx="ctx",
+        render_result = _ -> ext.h.p("done"))
+    html = ext.node_to_html(node)
+    occursin("class=\"treebar-terminal\"", html) || error("terminal wrapper missing")
+    occursin("treebar-terminal-content", html) || error("terminal content marker missing")
+    occursin("treebar-frozen", html) || error("frozen progress record missing")
+    occursin("class=\"treebar-poller\"", html) && error("live poller wrapper survived")
+    occursin("treebar-poller-inner", html) && error("live poller inner survived")
+    occursin("treebar-pause", html) && error("Pause control survived")
+    occursin("hx-get", html) && error("poll transport survived")
+    occursin("hx-trigger", html) && error("poll ticker survived")
+end)
+
 println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
 exit(nfail == 0 ? 0 : 1)
