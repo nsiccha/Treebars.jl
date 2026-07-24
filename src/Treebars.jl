@@ -11,15 +11,13 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     is_pending, is_running, is_finished, is_failed, is_displayed, duration, short_duration,
     prepare_progress!, start_progress!,
     round2, short_string, Fraction,
-    render_text,
-    current_progress, with_current_progress, with_ambient_progress
+    render_text
 
 BACKEND = Ref{Any}(nothing)
 
 include("threadsafe.jl")
 include("interface.jl")
 include("implementation.jl")
-include("ambient.jl")
 function round2 end
 function short_string end
 include("formatting.jl")
