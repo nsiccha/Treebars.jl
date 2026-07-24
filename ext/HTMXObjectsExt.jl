@@ -82,6 +82,7 @@ htmx_treebar_styles() = h.style(Raw("""
    margin, NOT the inherited-custom-prop visibility scheme, so it does not
    interact with the nested-poller data-show-* logic below. */
 .treebar-poller { position: relative; }
+.treebar-terminal { position: static; }
 .treebar-pause {
     display: none;
     position: absolute; top: 0.25rem; right: 0.4rem; z-index: 2;
@@ -200,13 +201,25 @@ htmx_treebar_script() = h.script(Raw("""
         // integer minute/hour, so those ticks are mostly no-ops.
         if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
+    function terminalizePoller(evt){
+        var el = evt && evt.detail && evt.detail.elt;
+        if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return;
+        var p = el.parentElement;
+        if (!p || !p.classList.contains('treebar-poller')) return;
+        p.classList.replace('treebar-poller', 'treebar-terminal');
+        ['paused', 'showFinished', 'showPending', 'showFailed'].forEach(function(key){
+            delete p.dataset[key];
+        });
+        var pause = p.querySelector(':scope > .treebar-pause');
+        if (pause) pause.remove();
+    }
     function reanchorAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
     }
     function tickAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
     }
-    function reanchorAndTick(){ reanchorAll(); tickAll(); }
+    function reanchorAndTick(evt){ terminalizePoller(evt); reanchorAll(); tickAll(); }
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
     // Pause: cancel a poller's own `every Xs` poll request while its wrapper
@@ -430,10 +443,13 @@ Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
 element that carries the polling attributes (`hx-trigger="every Xs"
 hx-target="this" hx-swap="outerHTML"`). On each poll the inner self-swaps;
-once the task is done, the response replaces the inner with non-polling
-content (the rendered result), which naturally stops the loop. The wrapper
-itself is never touched by polling, so UX state on it (`data-show-finished`
-/ `-failed` / `-pending`, set by pill clicks) persists across polls.
+once the task is done, the response replaces the inner with
+`.treebar-terminal-content`, which naturally stops the loop. The client then
+renames the stable wrapper to `.treebar-terminal`, removes its polling UX
+state and Pause control, and leaves the rendered result (plus optional frozen
+progress record) as an unambiguous terminal fragment. While polling, the
+wrapper itself is untouched, so UX state on it (`data-show-finished` /
+`-failed` / `-pending`, set by pill clicks) persists across polls.
 
 Failure path (`keep_progress=true`, default): the compute error — re-thrown by
 `fetchindex` before this callback runs (compute-at-most-once) — is caught in
@@ -493,7 +509,8 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     catch err
         (keep_progress && !sync) || rethrow()
         _polling_wrap(_polling_inner_done(_caught_error_ex(err, error_obj, req),
-                                          _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true)))
+                                          _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true));
+                      terminal=true)
     end
 end
 
@@ -524,11 +541,11 @@ function _ip_ctx(ip, keys, kwargs)
     "$ipname($(join((repr(k) for k in keys), ", "))$kwstr)"
 end
 
-# Done — already-cached or just-completed. The wrapper here is vestigial on
-# first-call-done (no polling ever happened) but harmless; on running-then-done
-# the response replaces the polling inner so the wrapper persists with its UX
-# state intact. With keep_progress (default, but not on the sync loopback), the
-# frozen tree is appended below the result in a collapsed <details>.
+# Done — already-cached or just-completed. A first-call-done response is born
+# terminal. On running-then-done the response replaces the polling inner and
+# the client terminalizes the stable wrapper in place. With keep_progress
+# (default, but not on the sync loopback), the frozen tree is appended below
+# the result in a collapsed <details>.
 function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
     if _is_unresolved_handle(rv)
         return sync ?
@@ -537,8 +554,8 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
-        _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false))) :
-        _polling_wrap(_polling_inner_done(body))
+        _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false)); terminal=true) :
+        _polling_wrap(_polling_inner_done(body); terminal=true)
 end
 
 # Frozen progress tree kept in the final (non-polling) response so a finished or
@@ -595,17 +612,21 @@ end
 _pause_button() = h.button(class="treebar-pause", type="button",
     onclick="var p=this.closest('.treebar-poller'); if(!p) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; this.textContent=v==='1'?'Resume':'Pause';")("Pause")
 
-_polling_wrap(inner; pausable=false) = h.div(class="treebar-poller",
-        data_paused="0",
-        data_show_finished="0",
-        data_show_pending="1",
-        data_show_failed="1")(pausable ? _pause_button() : "", inner)
+_polling_wrap(inner; pausable=false, terminal=false) =
+    terminal ?
+        h.div(class="treebar-terminal")(inner) :
+        h.div(class="treebar-poller",
+            data_paused="0",
+            data_show_finished="0",
+            data_show_pending="1",
+            data_show_failed="1")(pausable ? _pause_button() : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server
-# always emits wrapper > inner — initial calls need the wrapper, polls don't —
-# and selecting just the inner keeps the live wrapper untouched, which is what
-# preserves `data-show-*` UX state across polls). The second branch matches
+# always emits wrapper > content — initial calls need the wrapper, polls don't —
+# and selecting just the running inner or terminal content keeps the live
+# wrapper untouched until the afterSwap finalizer changes its state). The last
+# branch matches
 # HTMXObjects' bare error article (`article[aria-invalid="true"]`) so a
 # `keep_progress=false` propagated failure — a 200 carrying just that article —
 # still lands in the wrapper, replaces this polling element (no `hx-trigger` →
@@ -621,9 +642,9 @@ _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-i
         hx_trigger="every $interval",
         hx_target="this",
         hx_swap="outerHTML",
-        hx_select=".treebar-poller-inner, article[aria-invalid='true']:not(.treebar-poller-inner article)")(body)
+        hx_select=".treebar-poller-inner, .treebar-terminal-content, article[aria-invalid='true']:not(.treebar-poller-inner article)")(body)
 
-_polling_inner_done(body...) = h.div(class="treebar-poller-inner")(body...)
+_polling_inner_done(body...) = h.div(class="treebar-terminal-content")(body...)
 
 # Convenience: when called with an IndexableProperty (no render_result), default to identity.
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =

@@ -33,7 +33,10 @@ it.
 
 Renders the running progress tree inside a `.treebar-poller` wrapper; each
 poll only swaps the inner fragment, so pill toggle state on the wrapper
-survives across polls. Three response shapes are handled automatically:
+survives while work is live. Completion terminalizes the stable wrapper as
+`.treebar-terminal`, removes poll transport and controls, and leaves the
+rendered result plus any frozen progress record. Three response shapes are
+handled automatically:
 
 - the IP's value is a `Pending` handle (compute still in flight) → renders the
   progress tree (and an optional Stop button if `cancel_url` is provided);

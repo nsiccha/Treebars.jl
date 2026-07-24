@@ -96,7 +96,8 @@ Three states are handled automatically:
   each poll only swaps the inner fragment.
 - **Failed** — renders the exception as an `<article>` with the error message;
   polling stops naturally because the error article has no `hx-trigger`.
-- **Completed** — calls the `render_result` callback.
+- **Completed** — calls the `render_result` callback and terminalizes the stable
+  wrapper as `.treebar-terminal`; no active poll transport or controls remain.
 
 ## HTTP / WebSocket (`ws_progress`)
 
