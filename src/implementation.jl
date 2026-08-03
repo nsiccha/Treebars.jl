@@ -170,9 +170,36 @@ function finalize_progress!(node::ProgressNode)
     finalize_progress!(node.impl)
     # collect() snapshot — a transient child detaches itself mid-walk
     for child in node.children
-        isrunning(child) && finalize_progress!(child)
+        if isrunning(child)
+            finalize_progress!(child)
+        elseif is_pending(child)
+            # This node is done, so a child still waiting to start never will.
+            # Terminating it as skipped is what stops a ✓ parent from hanging
+            # over `·` pending children on a request that completed minutes ago
+            # — the shape a bypassed phase left behind before `skip_progress!`
+            # existed. Covers every hand-rolled `prepare_progress!` caller, not
+            # just the two phase macros.
+            skip_progress!(child)
+        end
     end
     propagates_finalization(node) && !isnothing(node.parent) && isrunning(node.parent) && finalize_progress!(node.parent)
+    if istransient(node) && !isnothing(node.parent)
+        pop!(node.parent.children, node, nothing)
+    end
+end
+
+function skip_progress!(node::ProgressNode)
+    skip_progress!(node.impl)
+    # A pending node normally has no children (they are attached as it runs),
+    # but if it does they are pending too and equally never going to run.
+    for child in node.children
+        is_pending(child) && skip_progress!(child)
+    end
+    # Detach transients exactly as finalize_progress! does. The `fail_progress!`
+    # asymmetry (failed transients stay pinned so the "N failed" pill survives
+    # until the user retries) deliberately does NOT extend here: a skipped node
+    # carries no error to come back to, and pinning one would accumulate a fresh
+    # set under every iteration of a transient per-iteration wrapper.
     if istransient(node) && !isnothing(node.parent)
         pop!(node.parent.children, node, nothing)
     end
@@ -198,7 +225,8 @@ Lifecycle fields:
 - `failed` — `true` after [`fail_progress!`](@ref).
 
 Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
-[`is_finished`](@ref), [`is_failed`](@ref), [`duration`](@ref).
+[`is_finished`](@ref), [`is_failed`](@ref), [`is_skipped`](@ref),
+[`duration`](@ref). The five are mutually exclusive and exhaustive.
 """
 mutable struct StateProgress
     lock::ReentrantLock
@@ -209,7 +237,24 @@ mutable struct StateProgress
     labels::Dict{Symbol,Any}
     running::Bool
     failed::Bool
-    started_at::Union{DateTime,Nothing}  # nothing = pending (not yet started)
+    # The two timestamps encode all five lifecycle states; there is no separate
+    # state field, because every distinction is already a function of these
+    # three (`failed` exists only because "finished" vs "failed" is NOT derivable
+    # from timestamps — "skipped" is):
+    #
+    #   started_at   finalized_at   failed  →  state
+    #   ───────────  ─────────────  ──────     ───────
+    #   nothing      nothing        false      pending    (enumerated, not yet run)
+    #   set          nothing        false      running
+    #   set          set            false      finished   (ran, completed)
+    #   set          set            true       failed     (ran, threw)
+    #   nothing      set            false      SKIPPED    (never ran, never will)
+    #
+    # The skipped row is why `finalize_progress!`/`fail_progress!` backfill
+    # `started_at` and `skip_progress!` deliberately does NOT: "terminal but
+    # never started" is exactly the combination that says the phase was
+    # pre-enumerated and then bypassed.
+    started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
     finalized_at::Union{DateTime,Nothing}
     StateProgress(; description="Running...", N=nothing, pending=false) = new(
         ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(),
@@ -283,11 +328,14 @@ end
     is_pending(s)
 
 `true` when a progress node has been created (via [`prepare_progress!`](@ref))
-but not yet started. Defined on `StateProgress` and on
-`ProgressNode{<:StateProgress}`; `false` for backends without a pending concept
-and for `nothing`.
+but not yet started **and has not been terminated** — i.e. it is still expected
+to run. Defined on `StateProgress` and on `ProgressNode{<:StateProgress}`;
+`false` for backends without a pending concept and for `nothing`.
+
+A node that was pre-enumerated and then bypassed is [`is_skipped`](@ref), not
+pending — see the state table on `StateProgress`.
 """
-is_pending(s::StateProgress) = isnothing(s.started_at)
+is_pending(s::StateProgress) = isnothing(s.started_at) && isnothing(s.finalized_at)
 
 """
     is_running(s)
@@ -300,10 +348,12 @@ is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized
 """
     is_finished(s)
 
-`true` when a progress node has been finalized successfully (via
-[`finalize_progress!`](@ref)).
+`true` when a progress node **ran** and was finalized successfully (via
+[`finalize_progress!`](@ref)). A node that never started is
+[`is_skipped`](@ref), not finished.
 """
-is_finished(s::StateProgress) = !isnothing(s.finalized_at) && !s.failed
+is_finished(s::StateProgress) =
+    !isnothing(s.finalized_at) && !isnothing(s.started_at) && !s.failed
 
 """
     is_failed(s)
@@ -312,6 +362,22 @@ is_finished(s::StateProgress) = !isnothing(s.finalized_at) && !s.failed
 [`fail_progress!`](@ref)).
 """
 is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
+
+"""
+    is_skipped(s)
+
+`true` when a progress node was pre-enumerated but **never entered, and never
+will be** — control flow left the enclosing block (an early `return`/`break`, or
+an exception raised in an earlier phase) before reaching it. Set by
+[`skip_progress!`](@ref).
+
+Distinct from [`is_pending`](@ref) ("will run, hasn't yet") and from
+[`is_failed`](@ref) ("ran and threw"): a skipped node has no duration, no error
+and no started timestamp. `false` for backends without the concept and for
+`nothing`, so a `Term`/disabled backend is unaffected.
+"""
+is_skipped(s::StateProgress) =
+    isnothing(s.started_at) && !isnothing(s.finalized_at) && !s.failed
 
 """
     duration(s)
@@ -329,6 +395,7 @@ is_pending(node::ProgressNode{<:StateProgress}) = is_pending(node.impl)
 is_running(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
 is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
+is_skipped(node::ProgressNode{<:StateProgress}) = is_skipped(node.impl)
 duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
 
 # Defaults for non-StateProgress (no pending concept) and disabled backend.
@@ -339,6 +406,11 @@ is_pending(::Nothing) = false
 is_running(::Nothing) = false
 is_finished(::Nothing) = false
 is_failed(::Nothing) = false
+# Mirrors is_pending's defaults: a backend with no pending concept can have
+# nothing to skip, so every render/cleanup site sees `false` and behaves
+# exactly as it did before this state existed.
+is_skipped(::Any) = false
+is_skipped(::Nothing) = false
 
 isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true
@@ -409,6 +481,18 @@ function finalize_progress!(sp::StateProgress)
         sp.finalized_at = t
     end
 end
+# Terminate a pending node WITHOUT backfilling `started_at` — the one thing
+# that separates "never ran" from "ran instantaneously". Guarded on pending so
+# it is idempotent and can never downgrade a node that actually ran: a running
+# node finalizes or fails, a terminal node stays as it is.
+function skip_progress!(sp::StateProgress)
+    lock(sp.lock) do
+        if isnothing(sp.started_at) && isnothing(sp.finalized_at)
+            sp.running = false
+            sp.finalized_at = now()
+        end
+    end
+end
 
 # JSON-serializable snapshot (non-exported — prefer working with ProgressNode directly)
 function progress_state(sp::StateProgress)
@@ -420,7 +504,11 @@ function progress_state(sp::StateProgress)
             "message" => sp.message,
             "running" => sp.running,
             "failed" => sp.failed,
-            "started_at" => string(sp.started_at),
+            # A bypassed phase is terminal but never started, so neither
+            # `running` nor `failed` distinguishes it from a pending one —
+            # a JSON consumer needs this key to tell them apart.
+            "skipped" => is_skipped(sp),
+            "started_at" => isnothing(sp.started_at) ? nothing : string(sp.started_at),
             "finalized_at" => isnothing(sp.finalized_at) ? nothing : string(sp.finalized_at),
         )
     end

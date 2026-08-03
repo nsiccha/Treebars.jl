@@ -99,6 +99,21 @@ start_progress!(::Nothing) = nothing
 start_progress!(::Any) = nothing
 
 """
+    skip_progress!(node)
+
+Terminate a **pending** progress node as *skipped* — it was pre-enumerated but
+never entered, and never will be (control flow left the block first). Distinct
+from [`finalize_progress!`](@ref) (which means "ran and completed") and from
+[`fail_progress!`](@ref) (which means "ran and threw").
+
+Idempotent, and a no-op on a node that is not pending: a running node has
+started, so it is finalized or failed on its own terms, never skipped.
+No-op for backends without a pending concept.
+"""
+skip_progress!(::Nothing) = nothing
+skip_progress!(::Any) = nothing
+
+"""
     htmx_render(node; article=false, scoped=true, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
@@ -150,9 +165,10 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
     htmx_render_children(node; scoped=true)
 
 Render the children of a `ProgressNode` as an HTML fragment, classifying them
-into pending / running / finished / failed groups and emitting toggle pills
-(`"N pending"`, `"N finished"`, `"N failed"`) at the top. Implementation lives
-in the HTMXObjects package extension — loading `HTMXObjects` activates it.
+into pending / running / finished / skipped / failed groups and emitting toggle
+pills (`"N pending"`, `"N finished"`, `"N skipped"`, `"N failed"`) at the top.
+Implementation lives in the HTMXObjects package extension — loading
+`HTMXObjects` activates it.
 
 `scoped=true` (the default) emits `data-show-*` attributes on the wrapper so
 the pills toggle visibility scoped to this children container. Inside a
