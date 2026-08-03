@@ -653,6 +653,178 @@ end
     @test [c["description"] for c in wrap["children"]] == ["p = 3", "q = p + 4"]
 end
 
+@testset "skip_progress! — the never-ran terminal state" begin
+    # The lifecycle is encoded in two timestamps plus `failed`; `skipped` is the
+    # combination that was previously unreachable (finalized, never started).
+    # These assert it stays MUTUALLY EXCLUSIVE with the other four — the whole
+    # point of not backfilling `started_at`.
+    root = initialize_progress!(:state; description="Root")
+    p = prepare_progress!(root; description="never run")
+    @test is_pending(p)
+    skip_progress!(p)
+    @test is_skipped(p)
+    @test !is_pending(p) && !is_running(p) && !is_finished(p) && !is_failed(p)
+    @test p.impl.started_at === nothing        # the discriminator: never ran
+    @test p.impl.finalized_at !== nothing      # …but terminal, not dangling
+
+    # Idempotent, and it can never downgrade a node that actually ran.
+    was = p.impl.finalized_at
+    skip_progress!(p)
+    @test p.impl.finalized_at == was
+
+    ran = prepare_progress!(root; description="ran")
+    start_progress!(ran)
+    finalize_progress!(ran)
+    skip_progress!(ran)
+    @test is_finished(ran) && !is_skipped(ran)
+
+    running = prepare_progress!(root; description="running")
+    start_progress!(running)
+    skip_progress!(running)
+    @test is_running(running) && !is_skipped(running)
+
+    # No-ops on the disabled backend, like every other lifecycle function.
+    @test skip_progress!(nothing) === nothing
+    finalize_progress!(root)
+end
+
+@testset "finalize_progress! terminates pending children as skipped" begin
+    # Covers every hand-rolled prepare_progress! caller, not just the two phase
+    # macros: once the parent is done, a child still waiting to start never will,
+    # so it must not stay `·` pending under a ✓ parent.
+    root = initialize_progress!(:state; description="Root")
+    ran = prepare_progress!(root; description="ran")
+    start_progress!(ran)
+    finalize_progress!(ran)
+    left = prepare_progress!(root; description="left pending")
+    nested = prepare_progress!(left; description="nested")
+
+    finalize_progress!(root)
+    @test is_finished(ran)
+    @test is_skipped(left)
+    @test is_skipped(nested)                   # recurses
+    @test is_finished(root)
+end
+
+@testset "@progress block — an early return skips the phases it bypassed" begin
+    # The reported case: a `return` past later phase markers left them PENDING
+    # forever under a FINISHED parent. The macro's `finally` now terminates them.
+    root = initialize_progress!(:state; description="Root")
+    function _early(node, hit)
+        @progress node begin
+            @progress "resolve"
+            r = 1
+            @progress "read"
+            hit && return :cached
+            @progress "deserialize"
+            r += 1
+            @progress "postprocess"
+            r
+        end
+    end
+    @test _early(root, true) == :cached
+    snap = Treebars.progress_state(root)
+    finalize_progress!(root)
+
+    # Marker-first block ⇒ the phases attach directly under root, no wrapper.
+    phases = snap["children"]
+    @test [c["description"] for c in phases] == ["resolve", "read", "deserialize", "postprocess"]
+    # The two that ran carry a start; the two bypassed are terminal-but-unstarted.
+    @test [c["skipped"] for c in phases] == [false, false, true, true]
+    @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
+    @test [c["finalized_at"] !== nothing for c in phases] == [true, false, true, true]
+    @test all(c -> c["failed"] == false, phases)            # skipped ≠ failed
+
+    # Phase 2 — the one control was INSIDE when it returned — is still running,
+    # and that is unchanged, pre-existing behaviour, not an early-return artifact:
+    # `_emit_phases` emits no trailing finalize, so the LAST in-flight phase is
+    # terminated by the parent's `finalize_progress!` on the normal path too.
+    # Asserted so a future change to that contract shows up here deliberately.
+    @test phases[2]["running"] == true && phases[2]["skipped"] == false
+end
+
+@testset "@progress block — an exception fails only the RUNNING phase" begin
+    # The corollary, and the one behaviour-visible change: unvisited phases used
+    # to be marked FAILED with a backfilled started_at (✗, 0s, an error they
+    # never saw). Only the phase that actually threw is failed now.
+    root = initialize_progress!(:state; description="Root")
+    function _boom(node)
+        @progress node begin
+            @progress "validate"
+            v = 1
+            @progress "filter"
+            error("boom")
+            @progress "reindex"
+            v += 1
+            @progress "summarize"
+            v
+        end
+    end
+    @test_throws ErrorException _boom(root)
+    snap = Treebars.progress_state(root)
+    finalize_progress!(root)
+
+    phases = snap["children"]
+    @test [c["description"] for c in phases] == ["validate", "filter", "reindex", "summarize"]
+    @test [c["failed"] for c in phases] == [false, true, false, false]
+    @test [c["skipped"] for c in phases] == [false, false, true, true]
+    # The failed phase DID run, so it keeps a real start; the bypassed two do not.
+    @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
+end
+
+@testset "with_prepared_phases — same skip semantics as the macro" begin
+    # The HOF twin goes through _run_prepared_phases; it must not diverge from
+    # the macro form, which is emitted separately.
+    root = initialize_progress!(:state; description="Root")
+    got = with_prepared_phases(root, ("a", "b", "c")) do phases
+        start_progress!(phases[1]); finalize_progress!(phases[1])
+        return :early
+    end
+    @test got == :early
+    kids = collect(root.children)          # ThreadsafeSet — order-preserving, not indexable
+    @test is_finished(kids[1])
+    @test all(is_skipped, kids[2:3])
+
+    # …and on the throw path, only the running one fails.
+    root2 = initialize_progress!(:state; description="Root2")
+    @test_throws ErrorException with_prepared_phases(root2, (:x, :y, :z)) do phases
+        start_progress!(phases[1]); finalize_progress!(phases[1])
+        start_progress!(phases[2])
+        error("boom")
+    end
+    kids2 = collect(root2.children)
+    @test is_finished(kids2[1])
+    @test is_failed(kids2[2])
+    @test is_skipped(kids2[3])
+    finalize_progress!(root); finalize_progress!(root2)
+end
+
+@testset "render_text + htmx_render classify skipped distinctly" begin
+    root = initialize_progress!(:state; description="Root")
+    done = prepare_progress!(root; description="ranphase")
+    start_progress!(done); finalize_progress!(done)
+    gone = prepare_progress!(root; description="skippedphase")
+    skip_progress!(gone)
+
+    txt = render_text(root)
+    skipped_line = only(filter(l -> occursin("skippedphase", l), split(txt, "\n")))
+    @test occursin("⊘", skipped_line)
+    @test !occursin("✓", skipped_line) && !occursin("✗", skipped_line)
+    # No duration: the 0s is exactly what made a bypassed phase look instantaneous.
+    @test !occursin("[", skipped_line)
+    @test occursin("✓", only(filter(l -> occursin("ranphase", l), split(txt, "\n"))))
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(root)))
+    @test occursin("treebar-child-skipped", html)
+    @test occursin("1 skipped", html)                      # the toggle pill
+    @test occursin("data-treebar-status=\"skipped\"", html)  # what the ticker dispatches on
+    @test occursin("— skipped", html)                      # not a 0s duration
+    # The regression this guards: the per-child map's bare `else` meant FAILED,
+    # so a skipped child rendered in the failed group.
+    @test !occursin("treebar-child-failed", html)
+    finalize_progress!(root)
+end
+
 @testset "IterableProgress" begin
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")

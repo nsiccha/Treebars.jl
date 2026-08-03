@@ -26,6 +26,7 @@
 # glance in a terminal and stable under grep/assertion (`occursin("✗", …)`).
 _state_marker(node::ProgressNode) =
     is_failed(node)   ? "✗" :
+    is_skipped(node)  ? "⊘" :
     is_finished(node) ? "✓" :
     is_pending(node)  ? "·" :
                         "▶"
@@ -41,9 +42,13 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         isempty(sp.description) || push!(parts, sp.description)
         isnothing(sp.N)         || push!(parts, "($(sp.i)/$(sp.N))")
         isempty(sp.message)     || push!(parts, "— $(sp.message)")
-        # A pending node has no started_at, so `duration` would report a
-        # meaningless 0s — omit it rather than imply the phase has run.
-        is_pending(sp)          || push!(parts, "[$(short_duration(duration(sp)))]")
+        # Neither a pending nor a skipped node has a started_at, so `duration`
+        # would report a meaningless 0s — omit it rather than imply the phase
+        # has run. For a skipped node that 0s would be actively misleading:
+        # it is the one number that made a bypassed phase look like an
+        # instantaneous one.
+        (is_pending(sp) || is_skipped(sp)) ||
+            push!(parts, "[$(short_duration(duration(sp)))]")
         join(parts, " ")
     end
 end

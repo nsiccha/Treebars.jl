@@ -105,9 +105,12 @@ and clean up on exception.
   carry non-string metadata (symbols, specs, etc.) still produce sensible
   labels.
 
-If `f(phases)` throws, any phase still `is_pending` or `is_running` is failed
-via `fail_progress!(p, err)` before the exception rethrows, so user code never
-has to guard the prepare / consume gap manually.
+If `f(phases)` throws, the phase that was `is_running` is failed via
+`fail_progress!(p, err)` before the exception rethrows, so user code never has
+to guard the prepare / consume gap manually. Phases still `is_pending` at any
+exit — a throw *or* an early `return` out of `f` — were never entered, and are
+terminated as `is_skipped` rather than left dangling pending or blamed for an
+error they never saw.
 
 Extra `kwargs...` are forwarded to each [`prepare_progress!`](@ref) call
 (e.g. `transient=true`, `N=100`).
@@ -149,10 +152,22 @@ function _run_prepared_phases(f, phases)
     try
         return f(phases)
     catch e
+        # Only the phase that was actually RUNNING saw the exception. Phases
+        # still pending were never entered, so failing them would attach an
+        # error they never met (and a backfilled 0s duration); the `finally`
+        # below terminates those as skipped instead.
         for p in phases
-            (is_pending(p) || is_running(p)) && fail_progress!(p, e)
+            is_running(p) && fail_progress!(p, e)
         end
         rethrow()
+    finally
+        # Reached on EVERY exit — including a plain `return` out of `f` — so a
+        # phase the caller never got to ends terminal-and-skipped rather than
+        # dangling pending forever under a finished parent. Idempotent on the
+        # throw path: the catch above has already moved the running one.
+        for p in phases
+            is_pending(p) && skip_progress!(p)
+        end
     end
 end
 
@@ -856,10 +871,22 @@ function _emit_phases(phases, ctx)
         try
             $(phase_stmts...)
         catch _e
+            # Only the RUNNING phase saw the exception. Phases after it were
+            # never entered, so failing them would render a ✗ with a 0s
+            # duration and an error they never met; the `finally` skips them.
             for _p in $phases_tuple
-                ($is_pending(_p) || $is_running(_p)) && $fail_progress!(_p, _e)
+                $is_running(_p) && $fail_progress!(_p, _e)
             end
             rethrow()
+        finally
+            # The early-exit path this block exists for: a `return`/`break` out
+            # of the user's body runs no `catch`, so before this every phase
+            # below the exit point stayed pending forever — under a parent the
+            # enclosing `finally` had already marked ✓. Runs on the throw path
+            # too, after the catch has moved the running phase.
+            for _p in $phases_tuple
+                $is_pending(_p) && $skip_progress!(_p)
+            end
         end
     end
 end
