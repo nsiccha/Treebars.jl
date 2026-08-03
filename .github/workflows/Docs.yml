@@ -2,7 +2,7 @@ name: Docs
 on:
   workflow_dispatch:
   push:
-    branches: [main, dev]
+    branches: [main, perf/step5-typed-slots]
     tags: '*'
   pull_request:
 

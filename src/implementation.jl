@@ -383,8 +383,9 @@ is_skipped(s::StateProgress) =
     duration(s)
 
 Elapsed wall-clock time for a progress node as a `Dates.Period`. Returns
-`Millisecond(0)` for pending nodes; for running nodes counts up to `now()`;
-for finalized/failed nodes returns the frozen `finalized_at - started_at`.
+`Millisecond(0)` for pending or skipped nodes; for running nodes counts up to
+`now()`; for finished/failed nodes returns the frozen
+`finalized_at - started_at`.
 """
 function duration(s::StateProgress)
     isnothing(s.started_at) && return Millisecond(0)

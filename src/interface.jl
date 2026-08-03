@@ -130,7 +130,8 @@ Rendering rules (for `ProgressNode{<:StateProgress}`):
 
 Each node's header includes a `.treebar-duration` span; the
 [`htmx_treebar_script`](@ref) ticker advances running nodes locally between
-polls. `scoped` is forwarded to `htmx_render_children` (see there).
+polls. Skipped nodes show no duration. `scoped` is forwarded to
+`htmx_render_children` (see there).
 """
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
@@ -205,9 +206,9 @@ function htmx_treebar_styles end
 
 Return a `<script>` HTMX node with the client-side duration ticker. Running
 `.treebar-duration` spans advance their displayed elapsed time every 100ms
-locally instead of stuttering between server polls; finished/failed nodes
-keep the server-rendered text. Implementation lives in the HTMXObjects
-package extension.
+locally instead of stuttering between server polls; terminal nodes keep the
+server-rendered text and skipped nodes carry no duration. Implementation lives
+in the HTMXObjects package extension.
 
 Include it alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
 """

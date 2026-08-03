@@ -36,7 +36,7 @@ update_progress!(child, 50)
 
 Each node exposes lifecycle queries — see [`is_pending`](@ref),
 [`is_running`](@ref), [`is_finished`](@ref), [`is_failed`](@ref),
-[`duration`](@ref).
+[`is_skipped`](@ref), [`duration`](@ref).
 
 ## HTMXObjects.jl integration
 
@@ -54,8 +54,8 @@ html = htmx_render(root)   # HTMX Node tree
 ```
 
 The rendered HTML uses `<progress>` elements plus toggle pills (rendered by
-[`htmx_render_children`](@ref)) that hide finished / show failed children at
-each tree level.
+[`htmx_render_children`](@ref)) that group pending, finished, skipped, and
+failed children at each tree level.
 
 ### Assets
 
