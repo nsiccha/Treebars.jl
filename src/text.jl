@@ -100,8 +100,8 @@ println(render_text(tree))
 ```
 
 Each line is `<state> <description> [(i/N)] [— message] [duration]`, where
-state is `·` pending, `▶` running, `✓` finished, `✗` failed. A pending node
-shows no duration (it has not started).
+state is `·` pending, `▶` running, `✓` finished, `✗` failed, or `⊘` skipped.
+Pending and skipped nodes show no duration because they never started.
 
 Nodes are shown exactly as the HTML renderer would show them: bare wrappers
 (no description, message or counter) and `displayed=false` nodes inline,

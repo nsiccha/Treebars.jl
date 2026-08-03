@@ -77,8 +77,9 @@ node — useful for nesting substatus from called functions under the active
 phase (e.g. `fetchindex!(__progress__, ip; …)`).
 
 All phase bodies share one scope, so assignments flow across phase boundaries.
-On error, any phase still pending/running is `fail_progress!`-ed before the
-exception rethrows.
+On error, the phase that was running is failed before the exception rethrows.
+Phases that were never entered become skipped, so they are not blamed for an
+error they never saw and do not remain pending forever.
 
 ## `with_progress` — non-loop work
 
@@ -101,7 +102,7 @@ When the phase set is only known at runtime (so the static
 [`with_prepared_phases`](@ref) together with [`@with_progress`](@ref) or
 [`with_prepared_progress`](@ref). The pattern: bulk-prepare pending phase
 nodes up front so the whole pipeline appears immediately, then run each phase
-one by one as it transitions pending → running → done.
+one by one as it transitions pending → running → finished.
 
 ```julia
 # Keys carry structure; values carry specs / metadata.
@@ -112,7 +113,7 @@ vals = with_prepared_phases(progress, chain) do phases
     # All three are pending siblings of `progress` right now.
     map(chain, phases) do spec, phase
         with_prepared_progress(phase) do _
-            run(spec)                # phase transitions pending → running → done
+            run(spec)                # phase transitions pending → running → finished
         end
     end
 end
@@ -126,9 +127,10 @@ end
   per-phase description is taken from the NT value when it is an
   `AbstractString`, otherwise from `string(key)`.
 
-If anything throws inside the `f(phases)` body, any phase still
-`is_pending` or `is_running` is failed via `fail_progress!(p, err)` before
-the exception rethrows.
+If anything throws inside the `f(phases)` body, the phase that is
+`is_running` is failed via `fail_progress!(p, err)` before the exception
+rethrows. Any phase that is still `is_pending` is terminated as skipped. The
+same cleanup applies to an early return from the body.
 
 ## Labelled sub-progress via `update_progress!` kwargs
 
