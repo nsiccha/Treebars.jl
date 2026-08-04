@@ -553,9 +553,39 @@ end
 # type while this extension module is being defined: Treebars should still load
 # when HTMXObjects changes where (or whether) it exposes DynamicObjects' handle
 # type. `Task` is the previous fetch contract and needs its own readiness test.
+#
+# `_is_handle` is the readiness-AGNOSTIC companion: does `rv` present the handle
+# protocol AT ALL? A resolved VALUE presents neither `isready` nor `fetch`; a DO
+# `Pending` (and `Task`/`Future`/`Channel`) presents both. `_is_unresolved_handle`
+# is then just "a handle that is not yet ready". The done path (below) needs the
+# agnostic form: a handle reaching it is by definition READY (every not-ready one
+# took the poll/fetch branch), and `_is_unresolved_handle` cannot see it.
+_is_handle(rv::Task) = true
+_is_handle(rv) = applicable(Base.isready, rv) && applicable(Base.fetch, rv)
 _is_unresolved_handle(rv::Task) = !istaskdone(rv)
-_is_unresolved_handle(rv) =
-    applicable(Base.isready, rv) && applicable(Base.fetch, rv) && !Base.isready(rv)
+_is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
+
+# A READY handle reaching the done path must be RESOLVED, never rendered raw.
+# DynamicObjects hands a finished value back UNWRAPPED (`get!`'s fast path returns
+# the value, and only an in-flight compute yields a `Pending`), so a handle that
+# is ALREADY ready arrives here in exactly two situations, and both want the same
+# thing done: (a) a benign COMPLETION RACE — the in-flight compute landed in the
+# window between DO's `Pending` hand-back and this readiness check, so the value
+# is genuinely available now; (b) Treebars/DynamicObjects fetch-contract SKEW — a
+# stale live process running an extension image mismatched to the DynamicObjects
+# it loaded (`rv isa Task` before compute-at-most-once, `rv isa Pending` after).
+# In both the value IS ready, so we `fetch` it (instant on a ready handle) and let
+# the VALUE reach `render_result` — never the raw handle, whose serialization is
+# the bug this guards (a `Pending(…)` substituted for a figure; snags
+# `polling-fetchind-dd65fe41` and `sync-polling-cal-c9717522`). We `@warn` naming
+# the IP so a persistent skew stays diagnosable in the log; a one-off race just
+# renders cleanly. Failing loud instead would 500 the benign race — a value that
+# just finished computing should DISPLAY, not error.
+_leaked_handle_msg(rv, ip_ctx) =
+    "Treebars.polling_fetchindex: $(ip_ctx) handed back a ready `$(typeof(rv))` handle on the " *
+    "done path; resolved it before render_result. A finished value arrives UNWRAPPED, so this is " *
+    "a completion race (harmless) or Treebars/DynamicObjects fetch-contract skew — if it recurs, " *
+    "restart the app / align the pins."
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
 _polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
@@ -585,6 +615,14 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
         return sync ?
             _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
             _polling_running(status; label, poll_url, poll_interval, cancel_url)
+    end
+    # A READY handle must never reach render_result raw — resolve it here. This is
+    # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
+    # Pending-type dispatch for the not-ready duck-test above, which cannot see a
+    # ready handle). See `_leaked_handle_msg` for why we resolve rather than fail.
+    if _is_handle(rv)
+        @warn _leaked_handle_msg(rv, ip_ctx) maxlog=16
+        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx)
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
@@ -731,7 +769,16 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
             # compute makes `fetch` re-throw (caught here → no final frame sent).
             try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
-            try; send(ws, final_html(render_result(rv))); catch; end
+            # A resolved VALUE, or a READY handle from the completion race / skew
+            # described at `_leaked_handle_msg`. Resolve the handle BEFORE the
+            # swallow-catch so its serialization can never reach the client raw,
+            # and so the diagnostic `@warn` is not hidden by that catch.
+            val = rv
+            if _is_handle(rv)
+                @warn _leaked_handle_msg(rv, _ip_ctx(ip, keys, kwargs)) maxlog=16
+                val = fetch(rv)
+            end
+            try; send(ws, final_html(render_result(val))); catch; end
         end
     end
 end
