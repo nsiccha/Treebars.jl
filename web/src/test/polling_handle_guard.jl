@@ -58,7 +58,16 @@ check("unresolved Pending renders polling HTML without calling render_result", (
     occursin("hx-trigger", ext.node_to_html(node)) || error("polling response has no hx-trigger")
 end)
 
-# --- 2. A RESOLVED Pending is no longer classified as unresolved ---
+# --- 2. A RESOLVED Pending is RESOLVED before render_result, never rendered raw ---
+# This is the crux of snag sync-polling-cal-c9717522: `e6f140f` traded the
+# Pending-type dispatch for the not-ready duck-test and deleted the fail-loud
+# guard, so a Pending that is ALREADY ready at the done path (a benign completion
+# race, or a stale process skewed against DO's fetch contract) flowed to
+# `render_result(rv)` RAW and serialized as `Pending(ThreadsafeDict(...),...)` —
+# the handle substituted for the figure Bruno's FDA report exported. Asserting
+# `_is_unresolved_handle(ready) == false` and STOPPING (the old test) encoded the
+# bug as correct: it never checked what `_polling_resolve` DOES with a ready
+# handle. It must resolve it — render_result must see the VALUE `[1,2,3]`.
 c2 = ThreadsafeDict()
 k2 = (("done",), (;))
 c2.cache[k2] = [1, 2, 3]
@@ -67,6 +76,26 @@ check("resolved Pending is not classified as unresolved", () -> begin
     Base.isready(ready) || error("fixture not ready")
     ext._is_unresolved_handle(ready) && error("ready handle classified as unresolved")
 end)
+
+check("a ready Pending IS a handle (readiness-agnostic detector)", () -> begin
+    ext._is_handle(ready) || error("ready Pending not detected as a handle")
+end)
+
+# The done path must hand render_result the resolved VALUE, on BOTH the sync
+# loopback (Bruno's `sync=wants_markdown(__req__)` path) and the async path.
+for sync in (true, false)
+    check("ready Pending is resolved before render_result (sync=$sync)", () -> begin
+        got = Ref{Any}(:untouched)
+        node = ext._polling_resolve(ready, nothing;
+            sync, keep_progress=false, label="probe", poll_url="/poll",
+            poll_interval="200ms", cancel_url="", ip_ctx="ctx.warmup",
+            render_result = value -> (got[] = value; "rendered"))
+        got[] isa Pending && error("render_result received the RAW handle, not the value")
+        got[] == [1, 2, 3] || error("render_result got $(repr(got[])), expected [1,2,3]")
+        html = ext.node_to_html(node)
+        occursin("Pending", html) && error("serialized handle leaked into the body: $html")
+    end)
+end
 
 # --- 3. Ordinary values must not be classified as handles (no false positives) ---
 for v in Any[[1,2,3], (; results=[1,2]), "a string", 42, nothing, Dict(:a=>1)]
