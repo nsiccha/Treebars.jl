@@ -4,7 +4,7 @@ import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex,
-    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, short_duration, _first_seen!,
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
 import Dates
 using Dates: Millisecond
@@ -29,7 +29,10 @@ function _initial_duration_text(sp::StateProgress)
     is_skipped(sp) && return " — skipped"
     d = short_duration(duration(sp))
     if is_running(sp)
-        " — $(d) so far"
+        # A determinate running node (0 < i < N) also gets a live ETA beside the
+        # elapsed; the client ticker counts it down between polls (data-eta-ms).
+        e = eta(sp)
+        isnothing(e) ? " — $(d) so far" : " — $(d) so far · ETA ~$(short_duration(e))"
     elseif is_failed(sp)
         " — failed ($(d))"
     else
@@ -41,13 +44,24 @@ end
 # between server polls instead of waiting for the next render to advance them.
 function _duration_span(sp::StateProgress)
     status = _status_string(sp)
-    elapsed_ms = string(Dates.value(Millisecond(duration(sp))))
+    text = _initial_duration_text(sp)
     if status == "pending"
-        h.span(class="treebar-duration", data_treebar_status=status)(_initial_duration_text(sp))
+        return h.span(class="treebar-duration", data_treebar_status=status)(text)
+    end
+    elapsed_ms = string(Dates.value(Millisecond(duration(sp))))
+    # data-eta-ms is present only for a running determinate node; the client
+    # ticker anchors an absolute finish target from it and counts down. Absent
+    # → the span ticks up (elapsed) exactly as before.
+    e = eta(sp)
+    if isnothing(e)
+        h.span(class="treebar-duration",
+            data_treebar_status=status,
+            data_elapsed_ms=elapsed_ms)(text)
     else
         h.span(class="treebar-duration",
             data_treebar_status=status,
-            data_elapsed_ms=elapsed_ms)(_initial_duration_text(sp))
+            data_elapsed_ms=elapsed_ms,
+            data_eta_ms=string(Dates.value(Millisecond(e))))(text)
     end
 end
 
@@ -197,6 +211,11 @@ htmx_treebar_script() = h.script(Raw("""
         if (isNaN(ms)) ms = 0;
         el._tbAnchor = Date.now() - ms;
         el._tbLast = undefined;
+        // ETA (running determinate nodes only): anchor an ABSOLUTE finish target
+        // so the estimate counts down smoothly between polls; each server poll
+        // re-anchors with a fresh data-eta-ms as the position advances.
+        var eta = el.dataset.etaMs === undefined ? NaN : parseInt(el.dataset.etaMs, 10);
+        el._tbEtaTarget = isNaN(eta) ? undefined : Date.now() + eta;
     }
     function tick(el){
         if (el.dataset.treebarStatus !== 'running') return;
@@ -212,6 +231,11 @@ htmx_treebar_script() = h.script(Raw("""
         if (p && p.dataset.paused === '1') return;
         if (el._tbAnchor === undefined) anchor(el);
         var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
+        // A determinate node also counts its ETA down (fmt clamps negatives to
+        // 0; the next server poll re-anchors to the new estimate).
+        if (el._tbEtaTarget !== undefined){
+            s += ' · ETA ~' + fmt(el._tbEtaTarget - Date.now());
+        }
         // Only touch the DOM when the rendered string actually changes —
         // below 1min the value steps every 100ms (matching the tick cadence,
         // so each tick updates), while minute-and-up only change once per

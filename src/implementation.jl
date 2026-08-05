@@ -392,12 +392,34 @@ function duration(s::StateProgress)
     something(s.finalized_at, now()) - s.started_at
 end
 
+"""
+    eta(s)
+
+Estimated wall-clock time **remaining** for a *determinate, running* progress
+node, as a `Dates.Period`, or `nothing` when no estimate is meaningful.
+
+A node qualifies only while it is [`is_running`](@ref) with a known total (`N`)
+and at least one but not yet all steps done (`0 < i < N`); the estimate is the
+linear extrapolation `elapsed * (N - i) / i` (the same formula the `Term`
+backend uses for its `ETA:` column). Every other node — indeterminate
+(`N === nothing`), pending, skipped, finished/failed, or a node still at `i == 0`
+(no rate yet) — returns `nothing`, so a renderer shows an ETA only when one
+exists. Read under the node's lock like [`duration`](@ref) (both render paths
+already hold it).
+"""
+function eta(s::StateProgress)
+    (isnothing(s.N) || !is_running(s) || s.i <= 0 || s.i >= s.N) && return nothing
+    elapsed_ms = value(duration(s))
+    Millisecond(round(Int, elapsed_ms * (s.N - s.i) / s.i))
+end
+
 is_pending(node::ProgressNode{<:StateProgress}) = is_pending(node.impl)
 is_running(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
 is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
 is_skipped(node::ProgressNode{<:StateProgress}) = is_skipped(node.impl)
 duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
+eta(node::ProgressNode{<:StateProgress}) = eta(node.impl)
 
 # Defaults for non-StateProgress (no pending concept) and disabled backend.
 # A `nothing` phase is a no-op target, so it's neither pending nor running —
@@ -412,6 +434,9 @@ is_failed(::Nothing) = false
 # exactly as it did before this state existed.
 is_skipped(::Any) = false
 is_skipped(::Nothing) = false
+# No ETA concept for backends without a counter, or for a nil node.
+eta(::Any) = nothing
+eta(::Nothing) = nothing
 
 isrunning(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 isrunning(node::ProgressNode) = true
