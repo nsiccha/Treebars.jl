@@ -49,6 +49,11 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         # instantaneous one.
         (is_pending(sp) || is_skipped(sp)) ||
             push!(parts, "[$(short_duration(duration(sp)))]")
+        # ETA — non-nothing only for a running determinate node (0 < i < N),
+        # so it never appears on a pending/skipped/finished/indeterminate one.
+        let e = eta(sp)
+            isnothing(e) || push!(parts, "· ETA ~$(short_duration(e))")
+        end
         join(parts, " ")
     end
 end
