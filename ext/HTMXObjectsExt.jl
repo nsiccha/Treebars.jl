@@ -590,26 +590,12 @@ _is_unresolved_handle(rv::Task) = !istaskdone(rv)
 _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 
 # A READY handle reaching the done path must be RESOLVED, never rendered raw.
-# DynamicObjects hands a finished value back UNWRAPPED (`get!`'s fast path returns
-# the value, and only an in-flight compute yields a `Pending`), so a handle that
-# is ALREADY ready arrives here in exactly two situations, and both want the same
-# thing done: (a) a benign COMPLETION RACE — the in-flight compute landed in the
-# window between DO's `Pending` hand-back and this readiness check, so the value
-# is genuinely available now; (b) Treebars/DynamicObjects fetch-contract SKEW — a
-# stale live process running an extension image mismatched to the DynamicObjects
-# it loaded (`rv isa Task` before compute-at-most-once, `rv isa Pending` after).
-# In both the value IS ready, so we `fetch` it (instant on a ready handle) and let
-# the VALUE reach `render_result` — never the raw handle, whose serialization is
-# the bug this guards (a `Pending(…)` substituted for a figure; snags
-# `polling-fetchind-dd65fe41` and `sync-polling-cal-c9717522`). We `@warn` naming
-# the IP so a persistent skew stays diagnosable in the log; a one-off race just
-# renders cleanly. Failing loud instead would 500 the benign race — a value that
-# just finished computing should DISPLAY, not error.
-_leaked_handle_msg(rv, ip_ctx) =
-    "Treebars.polling_fetchindex: $(ip_ctx) handed back a ready `$(typeof(rv))` handle on the " *
-    "done path; resolved it before render_result. A finished value arrives UNWRAPPED, so this is " *
-    "a completion race (harmless) or Treebars/DynamicObjects fetch-contract skew — if it recurs, " *
-    "restart the app / align the pins."
+# DynamicObjects chooses `Pending` from a cache snapshot, then invokes the
+# fetchindex callback. The compute may legally finish between those two events,
+# so the callback can receive a handle whose value is already ready. `_is_handle`
+# proves that the object presents the complete `isready`/`fetch` protocol; fetch
+# it silently and let only the VALUE reach `render_result`. A partial or otherwise
+# incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
 _polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
@@ -643,9 +629,9 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     # A READY handle must never reach render_result raw — resolve it here. This is
     # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
     # Pending-type dispatch for the not-ready duck-test above, which cannot see a
-    # ready handle). See `_leaked_handle_msg` for why we resolve rather than fail.
+    # ready handle). A compatible ready handle is a legal completion race, so it
+    # is normalized silently rather than diagnosed as package skew.
     if _is_handle(rv)
-        @warn _leaked_handle_msg(rv, ip_ctx) maxlog=16
         return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx)
     end
     body = render_result(rv)
@@ -793,13 +779,11 @@ function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
             # compute makes `fetch` re-throw (caught here → no final frame sent).
             try; send(ws, final_html(render_result(fetch(rv)))); catch; end
         else
-            # A resolved VALUE, or a READY handle from the completion race / skew
-            # described at `_leaked_handle_msg`. Resolve the handle BEFORE the
-            # swallow-catch so its serialization can never reach the client raw,
-            # and so the diagnostic `@warn` is not hidden by that catch.
+            # A resolved VALUE, or a compatible READY handle from the legal
+            # completion race described above. Resolve the handle BEFORE the
+            # swallow-catch so its serialization can never reach the client raw.
             val = rv
             if _is_handle(rv)
-                @warn _leaked_handle_msg(rv, _ip_ctx(ip, keys, kwargs)) maxlog=16
                 val = fetch(rv)
             end
             try; send(ws, final_html(render_result(val))); catch; end
