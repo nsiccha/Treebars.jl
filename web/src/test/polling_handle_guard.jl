@@ -18,6 +18,7 @@
 
 using Treebars, HTMXObjects, HTTP
 using DynamicObjects: ThreadsafeDict, Pending
+using Logging, Test
 
 struct ProtocolPending end
 Base.isready(::ProtocolPending) = false
@@ -58,7 +59,7 @@ check("unresolved Pending renders polling HTML without calling render_result", (
     occursin("hx-trigger", ext.node_to_html(node)) || error("polling response has no hx-trigger")
 end)
 
-# --- 2. A RESOLVED Pending is RESOLVED before render_result, never rendered raw ---
+# --- 2. A Pending that completes at the callback boundary is silently resolved ---
 # This is the crux of snag sync-polling-cal-c9717522: `e6f140f` traded the
 # Pending-type dispatch for the not-ready duck-test and deleted the fail-loud
 # guard, so a Pending that is ALREADY ready at the done path (a benign completion
@@ -70,8 +71,11 @@ end)
 # handle. It must resolve it — render_result must see the VALUE `[1,2,3]`.
 c2 = ThreadsafeDict()
 k2 = (("done",), (;))
-c2.cache[k2] = [1, 2, 3]
 ready = Pending(c2, k2, nothing)
+Base.isready(ready) && error("race fixture was already ready at hand-back")
+# Deterministic completion seam: DynamicObjects has selected and handed back the
+# Pending, but the value lands before Treebars performs its readiness check.
+c2.cache[k2] = [1, 2, 3]
 check("resolved Pending is not classified as unresolved", () -> begin
     Base.isready(ready) || error("fixture not ready")
     ext._is_unresolved_handle(ready) && error("ready handle classified as unresolved")
@@ -84,12 +88,18 @@ end)
 # The done path must hand render_result the resolved VALUE, on BOTH the sync
 # loopback (Bruno's `sync=wants_markdown(__req__)` path) and the async path.
 for sync in (true, false)
-    check("ready Pending is resolved before render_result (sync=$sync)", () -> begin
+    check("completion-race Pending renders once without warning (sync=$sync)", () -> begin
         got = Ref{Any}(:untouched)
-        node = ext._polling_resolve(ready, nothing;
-            sync, keep_progress=false, label="probe", poll_url="/poll",
-            poll_interval="200ms", cancel_url="", ip_ctx="ctx.warmup",
-            render_result = value -> (got[] = value; "rendered"))
+        renders = Ref(0)
+        logger = Test.TestLogger(min_level=Logging.Warn)
+        node = Logging.with_logger(logger) do
+            ext._polling_resolve(ready, nothing;
+                sync, keep_progress=false, label="probe", poll_url="/poll",
+                poll_interval="200ms", cancel_url="", ip_ctx="ctx.warmup",
+                render_result = value -> (renders[] += 1; got[] = value; "rendered"))
+        end
+        isempty(logger.logs) || error("legal completion race emitted warning(s): $(logger.logs)")
+        renders[] == 1 || error("render_result called $(renders[]) times")
         got[] isa Pending && error("render_result received the RAW handle, not the value")
         got[] == [1, 2, 3] || error("render_result got $(repr(got[])), expected [1,2,3]")
         html = ext.node_to_html(node)
