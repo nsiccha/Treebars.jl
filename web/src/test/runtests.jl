@@ -139,6 +139,76 @@ end
     @test short_duration(Dates.Hour(1) + Dates.Minute(1)) == "1h 1m"
 end
 
+@testset "eta eligibility and formula" begin
+    # The parent has a determinate total, but i == 0 gives no rate yet.
+    parent = initialize_progress!(:state; description="parent", N=4)
+    @test eta(parent) === nothing
+
+    # Two seconds elapsed at 2/10 implies roughly eight seconds remaining:
+    # elapsed * (N - i) / i = elapsed * 4.
+    eligible = initialize_progress!(parent, 10; description="eligible")
+    eligible.impl.started_at = Dates.now() - Dates.Second(2)
+    update_progress!(eligible, 2)
+    remaining = eta(eligible)
+    @test remaining isa Dates.Millisecond
+    @test isapprox(
+        Dates.value(remaining),
+        4 * Dates.value(duration(eligible));
+        atol=50,
+    )
+
+    # Automatic ETA is omitted when there is no meaningful estimate.
+    indeterminate = initialize_progress!(parent; description="indeterminate")
+    @test eta(indeterminate) === nothing
+
+    pending = prepare_progress!(parent, 10; description="pending")
+    @test eta(pending) === nothing
+    skip_progress!(pending)
+    @test eta(pending) === nothing
+
+    one_item = initialize_progress!(parent, 1; description="one item")
+    @test eta(one_item) === nothing
+    update_progress!(one_item, 1)
+    @test eta(one_item) === nothing
+
+    terminal = initialize_progress!(parent, 10; description="terminal")
+    terminal.impl.started_at = Dates.now() - Dates.Second(2)
+    update_progress!(terminal, 2)
+    finalize_progress!(terminal)
+    @test eta(terminal) === nothing
+
+    text = render_text(parent)
+    @test count("eligible", text) == 1
+    @test count("ETA ~", text) == 1
+
+    finalize_progress!(parent)
+end
+
+@testset "htmx_render automatic ETA eligibility" begin
+    # Render the real extension over one eligible child plus the important
+    # omission cases. Exactly one node may carry ETA markup/text.
+    parent = initialize_progress!(:state; description="parent", N=4)
+
+    eligible = initialize_progress!(parent, 10; description="eligible")
+    eligible.impl.started_at = Dates.now() - Dates.Second(2)
+    update_progress!(eligible, 2)
+
+    one_item = initialize_progress!(parent, 1; description="one item")
+    update_progress!(one_item, 1)
+
+    terminal = initialize_progress!(parent, 10; description="terminal")
+    terminal.impl.started_at = Dates.now() - Dates.Second(2)
+    update_progress!(terminal, 2)
+    finalize_progress!(terminal)
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(parent)))
+    @test count("data-elapsed-ms", html) == 4  # control: all four nodes rendered
+    @test count("data-eta-ms", html) == 1
+    @test count("ETA ~", html) == 1
+
+    finalize_progress!(parent)
+end
+
 @testset "htmx_render duration suffix: work-leaf yes, annotation no" begin
     # A message-bearing work-leaf (disk-load style: message, no counter, not an
     # annotation) shows the duration suffix.
