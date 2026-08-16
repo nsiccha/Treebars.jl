@@ -509,6 +509,14 @@ progress record) as an unambiguous terminal fragment. While polling, the
 wrapper itself is untouched, so UX state on it (`data-show-finished` /
 `-failed` / `-pending`, set by pill clicks) persists across polls.
 
+The host page must include [`htmx_treebar_styles`](@ref) and
+[`htmx_treebar_script`](@ref) once, normally through `htmx(...;
+extra_head=(htmx_treebar_styles(), htmx_treebar_script()))`. The fragment can
+still poll without those page assets, but client-owned behavior is then absent:
+the duration ticker and Pause handler are not installed, and a completed inner
+swap leaves the persistent wrapper identified as `.treebar-poller` instead of
+terminalizing it in place.
+
 Failure path (`keep_progress=true`, default): the compute error — re-thrown by
 `fetchindex` before this callback runs (compute-at-most-once) — is caught in
 `polling_fetchindex`, recorded + rendered through HTMXObjects' `safely` (disk

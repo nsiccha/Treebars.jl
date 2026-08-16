@@ -200,17 +200,21 @@ duration ticker.
 """
 function htmx_treebar_styles end
 
-# htmx_treebar_script — returns a <script> Node with the client-side duration ticker
+# htmx_treebar_script — returns a <script> Node with Treebars' client behavior
 """
     htmx_treebar_script()
 
-Return a `<script>` HTMX node with the client-side duration ticker. Running
-`.treebar-duration` spans advance their displayed elapsed time every 100ms
-locally instead of stuttering between server polls; terminal nodes keep the
-server-rendered text and skipped nodes carry no duration. Implementation lives
-in the HTMXObjects package extension.
+Return a `<script>` HTMX node with Treebars' client-side polling behavior.
+Running `.treebar-duration` spans advance their displayed elapsed time every
+100ms locally instead of stuttering between server polls; the script also owns
+Pause handling and terminalizes a completed poller's persistent wrapper from
+`.treebar-poller` to `.treebar-terminal`. Terminal nodes keep the
+server-rendered duration text and skipped nodes carry no duration.
+Implementation lives in the HTMXObjects package extension.
 
-Include it alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
+Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
+Without it the HTMX fragment can still poll and receive terminal content, but
+the wrapper retains its live-poller identity and Pause control.
 """
 function htmx_treebar_script end
 
