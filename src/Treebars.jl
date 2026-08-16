@@ -5,6 +5,7 @@ using OrderedCollections: OrderedSet, OrderedDict
 
 export @progress, @phases, @with_progress, with_progress, with_prepared_progress, with_prepared_phases, progress_map,
     initialize_progress!, update_progress!, fail_progress!, finalize_progress!,
+    BusyRetryPolicy, ResourceBusy, ResourceAcquired, BusyRetryExhausted, with_busy_retry,
     add_child!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render,
     polling_fetchindex,
@@ -23,6 +24,7 @@ function short_string end
 include("formatting.jl")
 include("text.jl")
 include("convenience.jl")
+include("busy_retry.jl")
 
 """
     polling_fetchindex(render_result, ip, keys...; kwargs...)

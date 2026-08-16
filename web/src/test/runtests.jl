@@ -2,6 +2,8 @@ using TestModules
 using Treebars
 using Dates
 
+include("busy_retry.jl")
+
 # Defined at module scope (required for @dynamicstruct type definitions)
 @dynamicstruct struct _InlineSubTest
     __status__ = initialize_progress!(:state; description="InlineParent")
