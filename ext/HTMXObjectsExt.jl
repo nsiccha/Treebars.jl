@@ -99,31 +99,64 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
+.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 .treebar-node { margin-bottom: 0.25rem; }
 
-/* Pause/resume control. Sits top-right of the persistent .treebar-poller
-   wrapper. The margin-right above keeps the (float:right) Stop button clear
-   of this absolutely-positioned button when cancel_url is set — a constant
-   margin, NOT the inherited-custom-prop visibility scheme, so it does not
-   interact with the nested-poller data-show-* logic below. */
+/* Quiet-chrome polling badge. Each live `.treebar-poller` carries one
+   `.treebar-badge`: collapsed it is a 1-2px hairline edge strip marking the
+   polled region; hover/focus expands it to the pause/play control plus a
+   progress bar and status text, and reveals the live tree beneath it.
+   Visual constraints (binding): no gradient accents, no glowing shadows,
+   no emoji icons (the pause/play glyphs are text), no lift/scale hover
+   effects, and the polling pulse is gated on `prefers-reduced-motion`. */
 .treebar-poller { position: relative; }
 .treebar-terminal { position: static; }
-.treebar-pause {
-    display: none;
-    position: absolute; top: 0.25rem; right: 0.4rem; z-index: 2;
-    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
-    width: auto; cursor: pointer;
+.treebar-badge { display: block; padding: 0.3rem 0 0.15rem; }
+.treebar-badge-strip {
+    display: block; height: 2px; border-radius: 1px;
+    background: var(--pico-muted-color, #888);
+    opacity: 0.55;
 }
-/* Reveal the pause control ONLY while this poller is actively polling — i.e. its
-   DIRECT-CHILD inner still carries hx-trigger (running). The done inner and the
-   error article (article[aria-invalid]) drop hx-trigger, so :has() goes false and
-   the button auto-hides with zero server change. The `>` is load-bearing: without
-   it an outer (done) poller would match a NESTED still-running inner and keep its
-   own button visible (the same nested-poller trap the data-show-* scheme avoids,
-   see comment below). Pause cancels the request via JS but keeps the element (and
-   its hx-trigger), so a paused poller still matches → button stays → Resume works. */
-.treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
+/* The pulse says "polling" without moving anything: the strip never changes
+   size or position, and reduced-motion users get the static strip plus the
+   glyph and status text, which carry the same state. A paused poller holds
+   still at low opacity. */
+@media (prefers-reduced-motion: no-preference) {
+    .treebar-poller[data-paused="0"] .treebar-badge-strip {
+        animation: tb-badge-pulse 1.6s ease-in-out infinite;
+    }
+}
+@keyframes tb-badge-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+.treebar-poller[data-paused="1"] .treebar-badge-strip { opacity: 0.3; }
+/* The panel is CLIPPED when collapsed, never `display: none` — the pause
+   button stays keyboard-focusable, so tabbing to it matches `:focus-within`
+   and expands the badge in the same frame (no invisible-focus trap). The
+   live tree is `display: none` until then: it carries no focusable controls
+   of its own that must stay reachable (pills reappear with it), and a hidden
+   inner still polls and swaps — htmx never checks visibility. Both rules
+   use the DIRECT-CHILD `>` so expanding an outer poller never auto-expands
+   a nested one (the same nested-poller trap the data-show-* scheme avoids,
+   see comment below). */
+.treebar-badge-panel {
+    display: flex; gap: 0.5rem; align-items: center;
+    max-height: 0; overflow: hidden;
+}
+.treebar-poller:hover .treebar-badge-panel,
+.treebar-poller:focus-within .treebar-badge-panel { max-height: 2.5rem; }
+.treebar-poller > .treebar-poller-inner { display: none; }
+.treebar-poller:hover > .treebar-poller-inner,
+.treebar-poller:focus-within > .treebar-poller-inner { display: block; }
+.treebar-pause {
+    margin: 0; padding: 0.1rem 0.45rem; font-size: 0.75rem; line-height: 1.4;
+    width: auto; cursor: pointer; flex: none;
+}
+.treebar-badge-label {
+    font-size: 0.8rem; color: var(--pico-muted-color, #888);
+    max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.treebar-badge-status { font-size: 0.8rem; flex: none; }
+.treebar-badge-bar { width: 6rem; margin: 0; flex: none; }
+.treebar-badge-elapsed { font-size: 0.8rem; color: var(--pico-muted-color, #888); flex: none; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 /* Message-bearing nodes now use the same treebar-node + treebar-header structure
    as container nodes, so treebar-label/treebar-value/treebar-description classes
@@ -251,14 +284,61 @@ htmx_treebar_script() = h.script(Raw("""
         ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped'].forEach(function(key){
             delete p.dataset[key];
         });
-        var pause = p.querySelector(':scope > .treebar-pause');
-        if (pause) pause.remove();
+        var badge = p.querySelector(':scope > .treebar-badge');
+        if (badge) badge.remove();
     }
+    // Mirror the live inner into the wrapper's badge: the badge lives on the
+    // never-swapped wrapper (so the pause control keeps focus and state across
+    // polls), which means its status line would go stale without this. Reads
+    // the same nodes the tree renders — the first determinate bar, the first
+    // duration span — so the badge can never disagree with the tree it
+    // summarizes. Also re-derives the pause glyph from data-paused, so a
+    // hand-edited dataset (DevTools) shows the matching control, exactly as a
+    // click would. Exposed as window.__tbSyncBadge so the pause onclick can
+    // refresh the badge in the same frame as the toggle.
+    function syncBadge(p){
+        var badge = p.querySelector(':scope > .treebar-badge');
+        if (!badge) return;
+        var paused = p.dataset.paused === '1';
+        var btn = badge.querySelector('.treebar-pause');
+        if (btn){
+            btn.textContent = paused ? '▶' : '❚❚';
+            btn.setAttribute('aria-label', paused ? 'Resume live updates' : 'Pause live updates');
+        }
+        var st = badge.querySelector('.treebar-badge-status');
+        if (st){
+            var s = paused ? 'Paused' : 'Polling';
+            if (st._tbLast !== s){ st.textContent = s; st._tbLast = s; }
+        }
+        var inner = p.querySelector(':scope > .treebar-poller-inner');
+        var bar = badge.querySelector('.treebar-badge-bar');
+        if (bar){
+            var src = inner ? inner.querySelector('progress.treebar-progress') : null;
+            if (src && src.hasAttribute('value') && src.hasAttribute('max')){
+                bar.setAttribute('value', src.getAttribute('value'));
+                bar.setAttribute('max', src.getAttribute('max'));
+            } else {
+                bar.removeAttribute('value');
+                bar.removeAttribute('max');
+            }
+        }
+        var el = badge.querySelector('.treebar-badge-elapsed');
+        if (el){
+            var d = inner ? inner.querySelector('.treebar-duration') : null;
+            var t = d ? d.textContent : '';
+            if (el._tbLast !== t){ el.textContent = t; el._tbLast = t; }
+        }
+    }
+    function syncAllBadges(){
+        document.querySelectorAll('.treebar-poller').forEach(syncBadge);
+    }
+    window.__tbSyncBadge = syncBadge;
     function reanchorAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
     }
     function tickAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
+        syncAllBadges();
     }
     function reanchorAndTick(evt){ terminalizePoller(evt); reanchorAll(); tickAll(); }
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
@@ -500,22 +580,42 @@ htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_rend
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
 element that carries the polling attributes (`hx-trigger="every Xs"
-hx-target="this" hx-swap="outerHTML"`). On each poll the inner self-swaps;
-once the task is done, the response replaces the inner with
-`.treebar-terminal-content`, which naturally stops the loop. The client then
-renames the stable wrapper to `.treebar-terminal`, removes its polling UX
-state and Pause control, and leaves the rendered result (plus optional frozen
+hx-target="this" hx-swap="outerHTML"`). The wrapper also carries one
+`.treebar-badge`: a quiet-chrome status line that collapses to a 1-2px
+hairline strip and expands on hover/focus to a pause/play control, the poll
+label, a progress bar and the polling status, revealing the live tree beneath
+it. The full tree stays in the DOM while collapsed, so it remains inspectable
+without an extra request — and because the swapped region is hidden, polls
+update it with no visible replace, flash, or scroll disturbance. On each poll
+the inner self-swaps; once the task is done, the response replaces the inner
+with `.treebar-terminal-content`, which naturally stops the loop. The client
+then renames the stable wrapper to `.treebar-terminal`, removes its polling
+UX state and badge, and leaves the rendered result (plus optional frozen
 progress record) as an unambiguous terminal fragment. While polling, the
 wrapper itself is untouched, so UX state on it (`data-show-finished` /
 `-failed` / `-pending`, set by pill clicks) persists across polls.
+
+The inner's `hx-select` is top-level-only: each branch excludes matches
+nested inside another match, so a poll response containing a nested poller
+(an explicit `polling_fetchindex` under an `:auto` root, or a finished nested
+fragment inside a still-running outer poll) swaps exactly the outermost
+region instead of duplicating the nested one into a live sibling.
 
 The host page must include [`htmx_treebar_styles`](@ref) and
 [`htmx_treebar_script`](@ref) once, normally through `htmx(...;
 extra_head=(htmx_treebar_styles(), htmx_treebar_script()))`. The fragment can
 still poll without those page assets, but client-owned behavior is then absent:
-the duration ticker and Pause handler are not installed, and a completed inner
-swap leaves the persistent wrapper identified as `.treebar-poller` instead of
-terminalizing it in place.
+the badge renders statically above the fully visible tree (no collapse, no
+live status mirror), the duration ticker and pause handler are not installed,
+and a completed inner swap leaves the persistent wrapper identified as
+`.treebar-poller` instead of terminalizing it in place. The badge's pause
+control is inert once its poller stops polling, so even an un-terminalized
+badge cannot flip its glyph on a finished poller.
+
+Poll requests deliberately inherit ancestor `hx-vals`/form values (no
+`hx-params` isolation): HTMXObjects heals a drifted poll by re-executing with
+the poll request's current arguments, which requires those arguments to reach
+the server.
 
 Failure path (`keep_progress=true`, default): the compute error — re-thrown by
 `fetchindex` before this callback runs (compute-at-most-once) — is caught in
@@ -669,9 +769,9 @@ end
 # before our callback, so polling_fetchindex catches it and hands the exception
 # here; we re-raise inside safely to reuse its record+render. error_obj/req carry
 # route context (both may be nothing → default article, no hooks/req-meta). The
-# returned article is aria-invalid and sits INSIDE the poller inner — the
-# poller's hx-select excludes nested matches (see `_polling_inner_running`) so
-# htmx does not double-insert it.
+# returned article is aria-invalid and sits INSIDE the terminal content — the
+# poller's top-level-only hx-select excludes nested matches (see
+# `_polling_inner_running`) so htmx does not double-insert it.
 _caught_error_ex(err, error_obj, req) =
     HTMXObjects.safely(; obj=error_obj, req=req) do
         throw(err)
@@ -682,7 +782,8 @@ function _polling_running(status; label, poll_url, poll_interval, cancel_url)
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
     inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
-    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body); pausable=true)
+    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
+                  pausable=true, badge=_poll_badge(label, status))
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
@@ -691,18 +792,60 @@ end
 # this wrapper into the DOM — subsequent polls only swap the inner, leaving
 # the original wrapper element (and its possibly-toggled data-show-* attrs)
 # untouched.
-# A small, unobtrusive pause/resume control. onclick toggles `data-paused`
-# on the closest .treebar-poller — the persistent wrapper, so the paused
-# state survives polls exactly like the data-show-* pills. The
-# htmx:beforeRequest listener (htmx_treebar_script) reads that attr to cancel
-# this poller's poll requests, and the duration ticker freezes on it. Keyed
-# on closest('.treebar-poller') so nested pollers each pause independently.
-# The button persists across polls (it lives on the never-swapped wrapper),
-# so its JS-toggled label stays consistent.
+# Quiet-chrome polling badge, one per live `.treebar-poller` wrapper. Collapsed
+# (stylesheet) it is a 1-2px hairline strip; hover/focus expands the panel —
+# pause/play button, label, status word, determinate bar, elapsed — and reveals
+# the live tree beneath it. The badge lives on the never-swapped wrapper, so
+# the pause control keeps focus and state across polls; `syncBadge`
+# (htmx_treebar_script) mirrors the fresh inner into it after every swap and
+# tick. Without the page assets there is no collapse and no mirror: the badge
+# renders statically above the fully visible tree, and the pause button still
+# toggles `data-paused` (but nothing cancels the poll requests — the
+# documented asset-less degradation).
+#
+# The pause onclick toggles `data-paused` on the closest `.treebar-poller` —
+# the persistent wrapper, so the paused state survives polls exactly like the
+# data-show-* pills. The htmx:beforeRequest listener reads that attr to cancel
+# this poller's poll requests, and the duration ticker freezes on it. Keyed on
+# closest('.treebar-poller') so nested pollers each pause independently.
+# The onclick is INERT once its poller stops polling: it no-ops unless the
+# wrapper still holds a direct-child polling inner (`.treebar-poller-inner`
+# with `hx-trigger`). A terminal swap replaces that inner with
+# `.treebar-terminal-content` (or a bare error article), so a badge left in the
+# DOM — a page without `htmx_treebar_script` never runs the afterSwap
+# finalizer that removes it — stops responding instead of flipping its glyph
+# on a finished poller. A paused poller keeps its inner (and its `hx-trigger`),
+# so resume still passes the guard. (Same guard as sibling snag
+# treebars-pause-l-19b2227a: this badge subsumes that fix's onclick hunk.)
 _pause_button() = h.button(class="treebar-pause", type="button",
-    onclick="var p=this.closest('.treebar-poller'); if(!p) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; this.textContent=v==='1'?'Resume':'Pause';")("Pause")
+    aria_label="Pause live updates",
+    title="Pause live updates (the work keeps running in the background)",
+    onclick="var p=this.closest('.treebar-poller'); if(!p) return; if(!p.querySelector(':scope > .treebar-poller-inner[hx-trigger]')) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; var play=v==='1'; this.textContent=play?'▶':'❚❚'; this.setAttribute('aria-label',play?'Resume live updates':'Pause live updates'); if(window.__tbSyncBadge) window.__tbSyncBadge(p);")("❚❚")
 
-_polling_wrap(inner; pausable=false, terminal=false) =
+# First-paint badge content. The status word and elapsed are server-rendered
+# once; the client mirror owns them afterwards. The bar starts indeterminate
+# (no value/max) and the mirror sets the determinate fraction from the first
+# `.treebar-progress` in the inner — the bar's shape is a client derivation,
+# not a second server render rule. The label never changes across polls, so
+# the server owns it outright and the mirror never touches it.
+_badge_elapsed(::Nothing) = "Starting…"
+_badge_elapsed(node::ProgressNode) =
+    node.impl isa StateProgress ? _initial_duration_text(node.impl) : ""
+
+function _poll_badge(label, status)
+    h.span(class="treebar-badge")(
+        h.span(class="treebar-badge-strip", aria_hidden="true")(),
+        h.span(class="treebar-badge-panel")(
+            _pause_button(),
+            isnothing(label) ? "" : h.span(class="treebar-badge-label")(string(label)),
+            h.span(class="treebar-badge-status")("Polling"),
+            h.progress(class="treebar-badge-bar")(),
+            h.span(class="treebar-badge-elapsed")(_badge_elapsed(status)),
+        ),
+    )
+end
+
+_polling_wrap(inner; pausable=false, terminal=false, badge="") =
     terminal ?
         h.div(class="treebar-terminal")(inner) :
         h.div(class="treebar-poller",
@@ -710,7 +853,7 @@ _polling_wrap(inner; pausable=false, terminal=false) =
             data_show_finished="0",
             data_show_pending="1",
             data_show_failed="1",
-            data_show_skipped="0")(pausable ? _pause_button() : "", inner)
+            data_show_skipped="0")(pausable ? badge : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server
@@ -721,19 +864,32 @@ _polling_wrap(inner; pausable=false, terminal=false) =
 # HTMXObjects' bare error article (`article[aria-invalid="true"]`) so a
 # `keep_progress=false` propagated failure — a 200 carrying just that article —
 # still lands in the wrapper, replaces this polling element (no `hx-trigger` →
-# polling stops), and shows. The `:not(.treebar-poller-inner article)` is
-# load-bearing: with keep_progress the failure response IS a `.treebar-poller-inner`
-# that CONTAINS an aria-invalid article (the opaque one from `safely`, see
-# `_caught_error_ex`); without the exclusion, hx-select's querySelectorAll matches
-# BOTH the inner and that nested article and htmx inserts the article twice.
-# Excluding nested matches leaves only the inner selected. No request-sniffing,
-# no OOB, no JS state hacks needed.
+# polling stops), and shows.
+#
+# `hx-select` is TOP-LEVEL-ONLY: every branch excludes matches nested inside
+# another match. htmx inserts EVERY querySelectorAll match, so without the
+# exclusions a response whose selected region CONTAINS a nested poller (an
+# explicit `polling_fetchindex` under an `:auto` root, or a finished nested
+# poller's terminal fragment inside a still-running outer poll) matches twice
+# and the nested region is duplicated into a live sibling on every outer poll
+# — linear DOM growth, each duplicate polling. The six `:not()` clauses leave
+# exactly the outermost region selected; nested content rides along inside it.
+# (The article branch's second clause is sibling snag treebars-pause-l-19b2227a's
+# case — a keep_progress failure response whose terminal content contains the
+# opaque `safely` article — folded into the same rule; this selector subsumes
+# that fix's hx-select hunk.)
+#
+# Deliberately NO `hx-params` isolation here: poll requests inherit ancestor
+# `hx-vals`/form values, and that inheritance is load-bearing. HTMXObjects
+# heals a drifted/unknown-token poll by re-executing with the CURRENT request
+# args (current-args-wins), which only works because the current args reach
+# the server. Stripping them client-side would starve that heal path.
 _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
         hx_trigger="every $interval",
         hx_target="this",
         hx_swap="outerHTML",
-        hx_select=".treebar-poller-inner, .treebar-terminal-content, article[aria-invalid='true']:not(.treebar-poller-inner article)")(body)
+        hx_select=".treebar-poller-inner:not(.treebar-poller-inner .treebar-poller-inner):not(.treebar-terminal-content .treebar-poller-inner), .treebar-terminal-content:not(.treebar-poller-inner .treebar-terminal-content):not(.treebar-terminal-content .treebar-terminal-content), article[aria-invalid='true']:not(.treebar-poller-inner article):not(.treebar-terminal-content article)")(body)
 
 _polling_inner_done(body...) = h.div(class="treebar-terminal-content")(body...)
 

@@ -93,7 +93,10 @@ end
 Three states are handled automatically:
 
 - **Running** — renders the progress tree inside a `.treebar-poller` wrapper;
-  each poll only swaps the inner fragment.
+  each poll only swaps the inner fragment. The wrapper carries one
+  `.treebar-badge` — a hairline strip that expands on hover/focus to the
+  pause/play control, progress bar and status — while the tree stays collapsed
+  but inspectable beneath it, so polls update with no visible replace.
 - **Failed** — renders the exception as an `<article>` with the error message;
   polling stops naturally because the error article has no `hx-trigger`.
 - **Completed** — calls the `render_result` callback and terminalizes the stable
