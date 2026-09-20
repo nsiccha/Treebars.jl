@@ -159,7 +159,137 @@ check("terminal success is visibly complete with an optional frozen record", () 
     occursin("class=\"treebar-poller\"", html) && error("live poller wrapper survived")
     occursin("treebar-poller-inner", html) && error("live poller inner survived")
     occursin("treebar-pause", html) && error("Pause control survived")
+    occursin("treebar-badge", html) && error("badge chrome survived")
     occursin("hx-get", html) && error("poll transport survived")
+    occursin("hx-trigger", html) && error("poll ticker survived")
+end)
+
+# --- 8. Running face carries the quiet-chrome badge, not a Pause button ---
+# Snag poller-badge-qui-2203b4a1: one `.treebar-badge` per live poller —
+# hairline strip + pause/play glyph control + label + status + bar + elapsed —
+# with the full tree still in the DOM beneath it (inspectable on expand).
+function _badge_running_html()
+    status = Treebars.initialize_progress!(:state; description="probe")
+    run = Treebars.initialize_progress!(status, 4; description="load")
+    Treebars.update_progress!(run, 1)
+    node = ext._polling_running(status; label="slow",
+        poll_url="/slow", poll_interval="200ms", cancel_url="")
+    ext.node_to_html(node)
+end
+
+check("running face carries one badge with glyph control, label, status, bar, elapsed", () -> begin
+    html = _badge_running_html()
+    count("class=\"treebar-badge\"", html) == 1 || error("badge wrapper missing or duplicated")
+    for cls in ("treebar-badge-strip", "treebar-badge-panel", "treebar-badge-label",
+                "treebar-badge-status", "treebar-badge-bar", "treebar-badge-elapsed")
+        occursin("class=\"$cls\"", html) || error("$cls missing from badge")
+    end
+    occursin(">❚❚</button>", html) || error("pause glyph button missing")
+    occursin("aria-label=\"Pause live updates\"", html) || error("pause aria-label missing")
+    occursin("title=\"Pause live updates (the work keeps running in the background)\"",
+             html) || error("pause title missing")
+    occursin(">Polling</span>", html) || error("initial status word missing")
+    occursin(">slow</span>", html) || error("badge label missing")
+    # The pause control goes inert once its poller stops polling (same guard as
+    # sibling snag treebars-pause-l-19b2227a, subsumed by this badge).
+    occursin("treebar-poller-inner[hx-trigger]", html) || error("onclick inert-guard missing")
+    occursin("__tbSyncBadge", html) || error("onclick badge-sync call missing")
+    occursin(">Pause</button>", html) && error("old prominent Pause button survived")
+    # The tree itself is untouched beneath the badge: label header + bar source.
+    occursin("slow — running...", html) || error("running header missing from inner")
+    occursin("class=\"treebar-progress\"", html) || error("determinate bar source missing from inner")
+    first(findfirst("class=\"treebar-badge\"", html)) <
+        first(findfirst("class=\"treebar-poller-inner\"", html)) ||
+        error("badge must precede the inner in document order")
+end)
+
+# --- 9. hx-select is top-level-only across all three branches ---
+check("hx-select selects only top-level matches (six :not exclusions)", () -> begin
+    html = _badge_running_html()
+    m = match(r"hx-select=\"([^\"]*)\"", html)
+    m === nothing && error("hx-select missing from polling inner")
+    sel = m.captures[1]
+    expected = ".treebar-poller-inner" *
+        ":not(.treebar-poller-inner .treebar-poller-inner)" *
+        ":not(.treebar-terminal-content .treebar-poller-inner)" *
+        ", .treebar-terminal-content" *
+        ":not(.treebar-poller-inner .treebar-terminal-content)" *
+        ":not(.treebar-terminal-content .treebar-terminal-content)" *
+        ", article[aria-invalid=&#39;true&#39;]" *
+        ":not(.treebar-poller-inner article)" *
+        ":not(.treebar-terminal-content article)"
+    sel == expected || error("hx-select drifted:\n  got: $sel\n  want: $expected")
+end)
+
+check("nested pollers nest selected regions (the duplication precondition)", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    nested = ext._polling_running(status; label="inner",
+        poll_url="/inner", poll_interval="200ms", cancel_url="")
+    outer = ext._polling_wrap(
+        ext._polling_inner_running("/outer", "200ms", nested);
+        pausable=true, badge=ext._poll_badge("outer", status))
+    html = ext.node_to_html(outer)
+    # Outer inner CONTAINS a nested poller wrapper + inner: the shape whose
+    # double match the top-level-only selector rules out (browser-verified).
+    count("class=\"treebar-poller-inner\"", html) == 2 || error("expected outer + nested inner")
+    count("class=\"treebar-badge\"", html) == 2 || error("expected outer + nested badge")
+end)
+
+# --- 10. Stylesheet: collapsed chrome, hover/focus expansion, gated pulse ---
+check("badge stylesheet collapses, expands, and respects reduced motion", () -> begin
+    css = ext.node_to_html(Treebars.htmx_treebar_styles())
+    occursin(".treebar-poller > .treebar-poller-inner", css) ||
+        error("direct-child inner-collapse rule missing")
+    occursin(".treebar-poller:hover > .treebar-poller-inner", css) ||
+        error("hover expansion rule missing")
+    occursin(".treebar-poller:focus-within > .treebar-poller-inner", css) ||
+        error("focus expansion rule missing")
+    occursin(".treebar-badge-panel", css) || error("badge panel rule missing")
+    occursin("max-height: 0", css) || error("panel clip rule missing")
+    occursin("height: 2px", css) || error("hairline strip rule missing")
+    occursin("prefers-reduced-motion: no-preference", css) ||
+        error("reduced-motion gate missing")
+    occursin("tb-badge-pulse", css) || error("polling pulse keyframes missing")
+    occursin("linear-gradient", css) && error("gradient accent in badge stylesheet")
+    occursin("box-shadow", css) && error("glowing shadow in badge stylesheet")
+    occursin(":has(> .treebar-poller-inner[hx-trigger]) .treebar-pause", css) &&
+        error("old :has pause-reveal rule survived")
+end)
+
+# --- 11. Script: badge mirror, badge terminalization, pause transport intact ---
+check("badge script mirrors status and terminalizes the badge", () -> begin
+    js = ext.node_to_html(Treebars.htmx_treebar_script())
+    occursin("__tbSyncBadge", js) || error("badge mirror missing")
+    occursin(":scope > .treebar-badge", js) || error("terminalize-badge removal missing")
+    occursin(":scope > .treebar-pause", js) && error("old terminalize-pause removal survived")
+    occursin("htmx:beforeRequest", js) || error("pause request-cancel listener missing")
+    occursin("p.dataset.paused === '1'", js) || error("pause predicate missing")
+    occursin("▶", js) && occursin("❚❚", js) || error("pause/play glyphs missing from mirror")
+    occursin("'Paused'", js) && occursin("'Polling'", js) || error("status words missing from mirror")
+end)
+
+# --- 12. Failure response keeps the error article first inside terminal content ---
+# The keep_progress failure shape through `polling_fetchindex`'s catch pieces:
+# terminal wrapper > terminal content > (opaque `safely` article + open kept
+# tree). The top-level-only selector (§9) leaves exactly the terminal content
+# selected, so the article renders first, inside it. (Sibling snag
+# treebars-pause-l-19b2227a's hx-select case, subsumed here.)
+check("terminal failure keeps the recorded error first with no live chrome", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    Treebars.fail_progress!(status)
+    node = ext._polling_wrap(
+        ext._polling_inner_done(
+            ext._caught_error_ex(ErrorException("boom"), nothing, nothing),
+            ext._kept_progress(status; open=true));
+        terminal=true)
+    html = ext.node_to_html(node)
+    occursin("class=\"treebar-terminal\"", html) || error("terminal wrapper missing")
+    occursin("treebar-terminal-content", html) || error("terminal content marker missing")
+    occursin("aria-invalid", html) || error("recorded error article missing")
+    first(findfirst("aria-invalid", html)) < first(findfirst("treebar-frozen", html)) ||
+        error("error article is not first inside the terminal content")
+    occursin("class=\"treebar-poller\"", html) && error("live poller wrapper survived")
+    occursin("treebar-badge", html) && error("badge chrome survived on terminal failure")
     occursin("hx-trigger", html) && error("poll ticker survived")
 end)
 

@@ -207,14 +207,17 @@ function htmx_treebar_styles end
 Return a `<script>` HTMX node with Treebars' client-side polling behavior.
 Running `.treebar-duration` spans advance their displayed elapsed time every
 100ms locally instead of stuttering between server polls; the script also owns
-Pause handling and terminalizes a completed poller's persistent wrapper from
+the badge status mirror (pause glyph, polling/paused word, determinate bar,
+elapsed — refreshed from the live tree after every swap and tick), pause
+handling, and terminalization of a completed poller's persistent wrapper from
 `.treebar-poller` to `.treebar-terminal`. Terminal nodes keep the
 server-rendered duration text and skipped nodes carry no duration.
 Implementation lives in the HTMXObjects package extension.
 
 Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
 Without it the HTMX fragment can still poll and receive terminal content, but
-the wrapper retains its live-poller identity and Pause control.
+the badge never collapses or updates and the wrapper retains its live-poller
+identity and badge control.
 """
 function htmx_treebar_script end
 
