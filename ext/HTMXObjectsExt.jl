@@ -486,6 +486,13 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
     # render via the caller (`htmx_render`) — only this children section is
     # suppressed.
     isempty(children) && !isempty(raw) && return ""
+    # A terminal node cannot still be starting or busy. This is reachable when
+    # raw children exist but every one flattens away (for example, hidden leaf
+    # nodes); the caller sees a non-empty `node.children` and therefore asks us
+    # to render a children section even though there is nothing visible in it.
+    if isempty(children) && (is_finished(sp) || is_failed(sp) || is_skipped(sp))
+        return ""
+    end
     if isempty(children) && !isempty(sp.message)
         return h.div(
             h.span(sp.message; class="u-text-muted"),

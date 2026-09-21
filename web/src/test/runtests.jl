@@ -332,6 +332,31 @@ end
     finalize_progress!(root)
 end
 
+@testset "htmx_render: terminal nodes with only hidden children are not busy" begin
+    root = initialize_progress!(:state; description="Root")
+
+    finished = initialize_progress!(root; description="FinishedParent")
+    initialize_progress!(finished; description="HiddenFinished", displayed=false)
+    finalize_progress!(finished)
+
+    failed = initialize_progress!(root; description="FailedParent")
+    initialize_progress!(failed; description="HiddenFailed", displayed=false)
+    fail_progress!(failed)
+
+    skipped = prepare_progress!(root; description="SkippedParent")
+    prepare_progress!(skipped; description="HiddenSkipped", displayed=false)
+    skip_progress!(skipped)
+
+    for node in (finished, failed, skipped)
+        html = sprint(io -> show(io, MIME"text/html"(), htmx_render(node)))
+        @test isempty(Treebars._flatten_displayed_children(node))
+        @test !occursin("Starting...", html)
+        @test !occursin("aria-busy=\"true\"", html)
+    end
+
+    finalize_progress!(root)
+end
+
 @testset "labels create sub-nodes" begin
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")
