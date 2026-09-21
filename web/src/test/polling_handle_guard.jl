@@ -306,21 +306,20 @@ check("terminal failure keeps the recorded error first with no live chrome", () 
     occursin("hx-trigger", html) && error("poll ticker survived")
 end)
 
-println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
-exit(nfail == 0 ? 0 : 1)
-
 # --- 13. `parent=` passthrough on polling_fetchindex (snag hang-pdf-embed-c-d79aad34) ---
 # The IP's compute substatus must hang under the caller's node while running.
-const _PollIP = let
-    @dynamicstruct struct _PollSlowIP
-        __status__ = Treebars.initialize_progress!(:state; description="ip")
-        index(key::String) = begin
-            sleep(0.5)
-            "computed:$key"
-        end
+# NOTE (snag make-htmxobjects-7960c091): this section used to sit AFTER the
+# file's `exit()`, so it never ran — which hid a second defect, the struct
+# defined inside a `let` block (`@dynamicstruct` requires module scope).
+# Both fixed here: the struct is top-level and the exit moved to the end.
+@dynamicstruct struct _PollSlowIP
+    __status__ = Treebars.initialize_progress!(:state; description="ip")
+    index(key::String) = begin
+        sleep(0.5)
+        "computed:$key"
     end
-    getproperty(_PollSlowIP(), :index)
 end
+const _PollIP = getproperty(_PollSlowIP(), :index)
 check("polling_fetchindex parent= hangs the live IP compute under the caller node", () -> begin
     caller = Treebars.initialize_progress!(:state; description="caller")
     t = @async Treebars.polling_fetchindex(_PollIP, "hello"; sync=true, parent=caller) do v
@@ -332,3 +331,83 @@ check("polling_fetchindex parent= hangs the live IP compute under the caller nod
     child isa Treebars.ProgressNode || error("caller child is not a ProgressNode")
     wait(t)
 end)
+
+# --- 14. `parent=:auto` default follows the dispatch caller (snag make-htmxobjects-7960c091) ---
+# Resolution order: explicit `parent=` wins; else the request's dispatch node
+# (read through the PUBLIC `HTMXObjects.dispatch_parent` accessor); else the
+# ambient node `dispatch` bound; else detached. Each leg resolves to the SAME
+# node object the explicit path would attach (`===`), so the default changes
+# which call sites attach — never the attached tree's shape.
+check("default-parent resolution: detached outside dispatch, ambient inside", () -> begin
+    caller = Treebars.initialize_progress!(:state; description="auto-caller")
+    ext._polling_default_parent(nothing) === nothing ||
+        error("resolved a parent with no request and no ambient bind")
+    Treebars.with_dispatch_parent(caller) do
+        ext._polling_default_parent(nothing) === caller ||
+            error("ambient bind did not resolve to the bound node")
+    end
+    ext._polling_default_parent(nothing) === nothing ||
+        error("ambient bind leaked past its extent")
+end)
+check("default-parent resolution: request leg wins, then ambient", () -> begin
+    req_node = Treebars.initialize_progress!(:state; description="req-node")
+    ambient_node = Treebars.initialize_progress!(:state; description="ambient-node")
+    # Fixture only: arrange the request state `dispatch(parent=...)` stashes.
+    # The READ under test goes through the public `dispatch_parent` accessor.
+    req = HTTP.Request("GET", "/probe")
+    req.context[:htmxo_parent_progress] = req_node
+    Treebars.with_dispatch_parent(ambient_node) do
+        ext._polling_default_parent(req) === req_node ||
+            error("request leg did not win over ambient")
+    end
+    # A request WITHOUT the key (plain loopback) falls through to ambient.
+    plain = HTTP.Request("GET", "/plain")
+    Treebars.with_dispatch_parent(ambient_node) do
+        ext._polling_default_parent(plain) === ambient_node ||
+            error("keyless request did not fall through to ambient")
+    end
+    ext._polling_default_parent(plain) === nothing ||
+        error("keyless request resolved with no ambient bind")
+end)
+check("polling_fetchindex without parent= hangs compute under the ambient caller", () -> begin
+    caller = Treebars.initialize_progress!(:state; description="auto-live")
+    # The bind wraps the call on the SAME task, exactly as `dispatch` will:
+    # no reliance on task-local-storage inheritance across `@async`.
+    t = @async Treebars.with_dispatch_parent(caller) do
+        Treebars.polling_fetchindex(_PollIP, "ambient-hello"; sync=true) do v
+            h.span()("got")
+        end
+    end
+    sleep(0.2)   # inside the 0.5s compute
+    length(caller.children) == 1 || error("caller has no live substatus child mid-flight")
+    child = first(caller.children)
+    child isa Treebars.ProgressNode || error("caller child is not a ProgressNode")
+    wait(t)
+end)
+check("explicit parent=nothing stays detached under an ambient bind (opt-out)", () -> begin
+    caller = Treebars.initialize_progress!(:state; description="optout-live")
+    t = @async Treebars.with_dispatch_parent(caller) do
+        Treebars.polling_fetchindex(_PollIP, "optout-hello"; sync=true, parent=nothing) do v
+            h.span()("got")
+        end
+    end
+    sleep(0.2)   # inside the 0.5s compute
+    isempty(caller.children) || error("explicit nothing attached under ambient")
+    wait(t)
+end)
+check("explicit parent=node wins over ambient", () -> begin
+    ambient_node = Treebars.initialize_progress!(:state; description="ambient-other")
+    explicit_node = Treebars.initialize_progress!(:state; description="explicit-live")
+    t = @async Treebars.with_dispatch_parent(ambient_node) do
+        Treebars.polling_fetchindex(_PollIP, "explicit-hello"; sync=true, parent=explicit_node) do v
+            h.span()("got")
+        end
+    end
+    sleep(0.2)   # inside the 0.5s compute
+    length(explicit_node.children) == 1 || error("explicit node has no live substatus child mid-flight")
+    isempty(ambient_node.children) || error("ambient node stole the explicitly-parented compute")
+    wait(t)
+end)
+
+println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
+exit(nfail == 0 ? 0 : 1)
