@@ -1463,3 +1463,46 @@ end
     # One line only: the root. The label-less wrap contributed no row.
     @test length(split(strip(txt2), '\n')) == 1
 end
+
+@testset "dispatch-parent ambient (the dispatch default protocol)" begin
+    # Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
+    # default for `polling_fetchindex`'s `parent` kwarg, bound by
+    # HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
+    # core (task-local storage / ScopedValues): no extension needed.
+    @test Treebars.current_dispatch_parent() === nothing
+
+    outer = initialize_progress!(:state; description="Outer")
+    inner = initialize_progress!(:state; description="Inner")
+
+    # The bind is visible for the dynamic extent and returns f()'s value.
+    seen = Treebars.with_dispatch_parent(outer) do
+        @test Treebars.current_dispatch_parent() === outer
+        :value
+    end
+    @test seen == :value
+    @test Treebars.current_dispatch_parent() === nothing
+
+    # Nesting shadows and restores — including a `nothing` bind, which is how
+    # a nested `dispatch` without `parent` detaches its extent from an outer
+    # dispatch's node.
+    Treebars.with_dispatch_parent(outer) do
+        Treebars.with_dispatch_parent(inner) do
+            @test Treebars.current_dispatch_parent() === inner
+        end
+        @test Treebars.current_dispatch_parent() === outer
+        Treebars.with_dispatch_parent(nothing) do
+            @test Treebars.current_dispatch_parent() === nothing
+        end
+        @test Treebars.current_dispatch_parent() === outer
+    end
+    @test Treebars.current_dispatch_parent() === nothing
+
+    # An exception unwinding through the bind still restores.
+    @test_throws ErrorException Treebars.with_dispatch_parent(outer) do
+        error("boom")
+    end
+    @test Treebars.current_dispatch_parent() === nothing
+
+    finalize_progress!(outer)
+    finalize_progress!(inner)
+end

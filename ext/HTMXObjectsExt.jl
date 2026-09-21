@@ -7,6 +7,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
 import Treebars: add_child!
+import Treebars: current_dispatch_parent
 import Dates
 using Dates: Millisecond
 
@@ -583,7 +584,7 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -658,18 +659,39 @@ naturally — no custom OOB / HX-Retarget gymnastics.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
   (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
   Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
-- `parent`: optional `Treebars.ProgressNode`. When supplied, the IP compute's
-  live substatus tree hangs under this caller-owned node (mirroring DO's
-  `fetchindex!(parent, ip, …)` attachment), so an outer `dispatch` or
-  `@progress` job tree shows the embed's real compute as children instead of
-  the poller running detached on the IP's own `__status__` root. Default
-  `nothing` (the historical behavior — the tree stays unparented to the
-  caller). Ignored when the compute was already cached (no live substatus to
-  attach); the subtree still detaches from the caller on transient finalize,
-  exactly as DO's own `fetchindex!` attachment does.
+- `parent`: `Treebars.ProgressNode`, `nothing`, or `:auto` (default). When
+  a node, the IP compute's live substatus tree hangs under this caller-owned
+  node (mirroring DO's `fetchindex!(parent, ip, …)` attachment), so an outer
+  `dispatch` or `@progress` job tree shows the embed's real compute as
+  children instead of the poller running detached on the IP's own
+  `__status__` root. `:auto` resolves the dispatch caller automatically —
+  the request's dispatch node first (`HTMXObjects.dispatch_parent(req)`,
+  when `req` is passed or derived from `poll_context`), else the ambient
+  node `dispatch` bound (`Treebars.current_dispatch_parent`), else detached.
+  An explicit `parent=` always wins; pass `nothing` to force detached (the
+  historical default behavior). Ignored when the compute was already cached
+  (no live substatus to attach); the subtree still detaches from the caller
+  on transient finalize, exactly as DO's own `fetchindex!` attachment does.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=nothing, kwargs...)
+# Resolve the `parent=:auto` default: the request's dispatch node first (the
+# explicitly-passed `req` is the most local statement of dispatch context,
+# and it survives the spawned-task boundary that task-local storage does not
+# cross on Julia 1.10), else the ambient node `dispatch` bound, else
+# detached. The `applicable` guard keeps this inert on HTMXObjects
+# generations predating the public `dispatch_parent` accessor (and on
+# non-request `req` values): no resolve, no throw — the poller just stays
+# detached, exactly as before. The `parent isa ProgressNode` filter at the
+# attach site stays the single type gate for whatever this returns.
+function _polling_default_parent(req)
+    if req !== nothing && isdefined(HTMXObjects, :dispatch_parent) &&
+            applicable(HTMXObjects.dispatch_parent, req)
+        node = HTMXObjects.dispatch_parent(req)
+        node !== nothing && return node
+    end
+    current_dispatch_parent()
+end
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -679,6 +701,11 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
         isnothing(error_obj) && (error_obj = poll_context)
         isnothing(req) && hasproperty(poll_context, :__req__) && (req = poll_context.__req__)
     end
+    # Default-parent resolution (snag make-htmxobjects-7960c091): an absent
+    # `parent` follows the dispatch caller; an explicit node — or an explicit
+    # `nothing` to force detached — always wins. Resolved here, after the
+    # poll_context block, so a derived `req` feeds the request leg.
+    parent === :auto && (parent = _polling_default_parent(req))
     # keep_progress: a failed compute is re-thrown by fetchindex BEFORE the
     # callback runs (compute-at-most-once), so wrap the call to catch it, pull
     # the (failed) tree via getstatus, and render the recorded error + tree
