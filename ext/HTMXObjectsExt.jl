@@ -6,6 +6,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     ws_progress, polling_fetchindex,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
+import Treebars: add_child!
 import Dates
 using Dates: Millisecond
 
@@ -650,9 +651,18 @@ naturally — no custom OOB / HX-Retarget gymnastics.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
   (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
   Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
+- `parent`: optional `Treebars.ProgressNode`. When supplied, the IP compute's
+  live substatus tree hangs under this caller-owned node (mirroring DO's
+  `fetchindex!(parent, ip, …)` attachment), so an outer `dispatch` or
+  `@progress` job tree shows the embed's real compute as children instead of
+  the poller running detached on the IP's own `__status__` root. Default
+  `nothing` (the historical behavior — the tree stays unparented to the
+  caller). Ignored when the compute was already cached (no live substatus to
+  attach); the subtree still detaches from the caller on transient finalize,
+  exactly as DO's own `fetchindex!` attachment does.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=nothing, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -669,6 +679,13 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     # would discard the tree). keep_progress=false (or sync) re-throws as before.
     try
         fetchindex(ip, keys...; force, kwargs...) do rv, status
+            # Parent passthrough (snag hang-pdf-embed-c-d79aad34): hang the
+            # live substatus under the caller's node so the embed's compute
+            # tree renders in the caller's tree. `add_child!` is idempotent on
+            # the ThreadsafeSet; `nothing` status = cached/no-live-substatus
+            # (a no-op). The subtree still detaches on transient finalize, so
+            # this gives the caller the LIVE view, not a post-hoc history.
+            (parent isa ProgressNode && !isnothing(status)) && add_child!(parent, status)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
                              ip_ctx=_ip_ctx(ip, keys, kwargs))
         end
