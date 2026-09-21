@@ -25,6 +25,7 @@ include("formatting.jl")
 include("text.jl")
 include("convenience.jl")
 include("busy_retry.jl")
+include("dispatch_parent.jl")
 
 """
     polling_fetchindex(render_result, ip, keys...; kwargs...)
