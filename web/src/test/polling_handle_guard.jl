@@ -177,10 +177,11 @@ check("terminal success is visibly complete with an optional frozen record", () 
     occursin("hx-trigger", html) && error("poll ticker survived")
 end)
 
-# --- 8. Running face carries the quiet-chrome badge, not a Pause button ---
+# --- 8. Running face carries the badge, not a Pause button ---
 # Snag poller-badge-qui-2203b4a1: one `.treebar-badge` per live poller —
 # hairline strip + pause/play glyph control + label + status + bar + elapsed —
-# with the full tree still in the DOM beneath it (inspectable on expand).
+# with the full tree still in the DOM beneath it. Expanded by default since
+# snag first-load-polle-9728d9da (§10/§15); `chrome=:quiet` collapses it.
 function _badge_running_html()
     status = Treebars.initialize_progress!(:state; description="probe")
     run = Treebars.initialize_progress!(status, 4; description="load")
@@ -248,17 +249,41 @@ check("nested pollers nest selected regions (the duplication precondition)", () 
     count("class=\"treebar-badge\"", html) == 2 || error("expected outer + nested badge")
 end)
 
-# --- 10. Stylesheet: collapsed chrome, hover/focus expansion, gated pulse ---
-check("badge stylesheet collapses, expands, and respects reduced motion", () -> begin
+# --- 10. Stylesheet: expanded default, quiet opt-in, gated pulse ---
+# Snag first-load-polle-9728d9da: the panel and tree render expanded unless
+# the poller opts into quiet chrome (`data-chrome="quiet"`) or is diverted
+# into HTMXObjects' live-refresh reporter — those two contexts keep the
+# collapse + hover/focus expansion, with the inner rules still direct-child
+# so an expanded outer poller never auto-expands a nested one.
+check("badge stylesheet expands by default, quiets on attr or reporter", () -> begin
     css = ext.node_to_html(Treebars.htmx_treebar_styles())
-    occursin(".treebar-poller > .treebar-poller-inner", css) ||
-        error("direct-child inner-collapse rule missing")
-    occursin(".treebar-poller:hover > .treebar-poller-inner", css) ||
-        error("hover expansion rule missing")
-    occursin(".treebar-poller:focus-within > .treebar-poller-inner", css) ||
-        error("focus expansion rule missing")
-    occursin(".treebar-badge-panel", css) || error("badge panel rule missing")
+    occursin(".treebar-poller > .treebar-poller-inner { display: block; }", css) ||
+        error("expanded-default inner rule missing")
+    # Line-anchored: the reporter-quiet rule legitimately ENDS with the same
+    # selector text, so only a line-START match is the old blanket collapse.
+    occursin(r"(?m)^\.treebar-poller > \.treebar-poller-inner \{ display: none; \}", css) &&
+        error("unconditional inner-collapse rule survived")
+    for sel in (".treebar-poller[data-chrome=\"quiet\"] .treebar-badge-panel",
+                ".htmxo-live-reporter .treebar-poller .treebar-badge-panel")
+        occursin(sel, css) || error("quiet panel-clip selector missing: $sel")
+    end
     occursin("max-height: 0", css) || error("panel clip rule missing")
+    for sel in (".treebar-poller[data-chrome=\"quiet\"]:hover .treebar-badge-panel",
+                ".treebar-poller[data-chrome=\"quiet\"]:focus-within .treebar-badge-panel",
+                ".htmxo-live-reporter .treebar-poller:hover .treebar-badge-panel",
+                ".htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel")
+        occursin(sel, css) || error("quiet panel-expansion selector missing: $sel")
+    end
+    for sel in (".treebar-poller[data-chrome=\"quiet\"] > .treebar-poller-inner",
+                ".htmxo-live-reporter .treebar-poller > .treebar-poller-inner")
+        occursin(sel, css) || error("quiet inner-collapse selector missing: $sel")
+    end
+    for sel in (".treebar-poller[data-chrome=\"quiet\"]:hover > .treebar-poller-inner",
+                ".treebar-poller[data-chrome=\"quiet\"]:focus-within > .treebar-poller-inner",
+                ".htmxo-live-reporter .treebar-poller:hover > .treebar-poller-inner",
+                ".htmxo-live-reporter .treebar-poller:focus-within > .treebar-poller-inner")
+        occursin(sel, css) || error("quiet inner-reveal selector missing: $sel")
+    end
     occursin("height: 2px", css) || error("hairline strip rule missing")
     occursin("prefers-reduced-motion: no-preference", css) ||
         error("reduced-motion gate missing")
@@ -407,6 +432,62 @@ check("explicit parent=node wins over ambient", () -> begin
     length(explicit_node.children) == 1 || error("explicit node has no live substatus child mid-flight")
     isempty(ambient_node.children) || error("ambient node stole the explicitly-parented compute")
     wait(t)
+end)
+
+# --- 15. `chrome` kwarg: expanded default, quiet opt-in (snag first-load-polle-9728d9da) ---
+# `:auto` (default) emits no `data-chrome` attr — the stylesheet expands the
+# panel + tree, so a first-load region shows progress immediately. `:quiet`
+# emits `data-chrome="quiet"` on the live wrapper, collapsing to the hairline
+# (hover/focus re-expands). Anything else throws `ArgumentError` at the public
+# boundary, before any compute runs. Terminal wrappers carry no badge and no attr.
+check("default chrome emits no data-chrome attr", () -> begin
+    html = _badge_running_html()
+    occursin("data-chrome", html) && error("default poller carries a data-chrome attr")
+end)
+check("chrome=:quiet emits data-chrome=quiet on the live wrapper", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    node = ext._polling_running(status; label="slow",
+        poll_url="/slow", poll_interval="200ms", cancel_url="", chrome=:quiet)
+    html = ext.node_to_html(node)
+    occursin("data-chrome=\"quiet\"", html) || error("quiet attr missing")
+    first(findfirst("data-chrome", html)) <
+        first(findfirst("class=\"treebar-badge\"", html)) ||
+        error("quiet attr is not on the wrapper (must precede the badge)")
+end)
+check("chrome threads through polling_fetchindex to the running face", () -> begin
+    for (chrome, want) in ((:auto, false), (:quiet, true))
+        node = Treebars.polling_fetchindex(_PollIP, "chrome-$chrome";
+                                           poll_url="/chrome", chrome=chrome) do v
+            ext.h.p("done")
+        end
+        html = ext.node_to_html(node)
+        occursin("hx-trigger", html) || error("expected the running face for chrome=$chrome")
+        occursin("data-chrome=\"quiet\"", html) == want ||
+            error("chrome=$chrome quiet-attr presence is $(!want), want $want")
+    end
+end)
+check("invalid chrome throws ArgumentError before compute", () -> begin
+    try
+        Treebars.polling_fetchindex(_PollIP, "chrome-bogus";
+                                   poll_url="/chrome", chrome=:bogus) do v
+            ext.h.p("done")
+        end
+        error("no throw for chrome=:bogus")
+    catch e
+        e isa ArgumentError || rethrow()
+        occursin("chrome", sprint(showerror, e)) || error("ArgumentError names nothing about chrome")
+    end
+end)
+check("terminal wrappers carry no chrome attr", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    Treebars.finalize_progress!(status)
+    node = ext._polling_resolve(:done, status;
+        sync=false, keep_progress=true, label="probe", poll_url="/poll",
+        poll_interval="200ms", cancel_url="", ip_ctx="ctx", chrome=:quiet,
+        render_result = _ -> ext.h.p("done"))
+    html = ext.node_to_html(node)
+    occursin("class=\"treebar-terminal\"", html) || error("terminal wrapper missing")
+    occursin("data-chrome", html) && error("terminal wrapper carries a chrome attr")
 end)
 
 println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")

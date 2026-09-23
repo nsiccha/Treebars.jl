@@ -94,9 +94,12 @@ Three states are handled automatically:
 
 - **Running** — renders the progress tree inside a `.treebar-poller` wrapper;
   each poll only swaps the inner fragment. The wrapper carries one
-  `.treebar-badge` — a hairline strip that expands on hover/focus to the
-  pause/play control, progress bar and status — while the tree stays collapsed
-  but inspectable beneath it, so polls update with no visible replace.
+  `.treebar-badge` — a hairline strip plus a panel (pause/play control,
+  progress bar and status) above the live tree, expanded by default so a
+  first-load region shows progress immediately. Pass `chrome=:quiet` to
+  collapse a poller beside already-visible content to the strip (hover/focus
+  re-expands it); a poller diverted into HTMXObjects' live-refresh reporter
+  is quiet automatically.
 - **Failed** — renders the exception as an `<article>` with the error message;
   polling stops naturally because the error article has no `hx-trigger`.
 - **Completed** — calls the `render_result` callback and terminalizes the stable

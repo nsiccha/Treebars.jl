@@ -216,8 +216,10 @@ Implementation lives in the HTMXObjects package extension.
 
 Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
 Without it the HTMX fragment can still poll and receive terminal content, but
-the badge never collapses or updates and the wrapper retains its live-poller
-identity and badge control.
+the badge status mirror never updates and the wrapper retains its live-poller
+identity and badge control. (Collapse is stylesheet-driven, so a
+`chrome=:quiet` poller still collapses without the script — it just never
+refreshes its mirrored status.)
 """
 function htmx_treebar_script end
 
