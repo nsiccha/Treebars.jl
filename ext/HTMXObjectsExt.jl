@@ -666,7 +666,10 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   via `query_url(poll_context; force=false)` and `force` from `poll_context.force`.
   Overrides explicit `poll_url` and `force` kwargs.
 - `poll_url`: URL to poll while running (use `query_url`). Ignored when `poll_context` is set.
-- `label`: display label (e.g. "Pathfinder (my-model)")
+- `label`: display label (e.g. "Pathfinder (my-model)"). When it equals the
+  status root's description, the badge-label and interim-header copies are
+  omitted — the root header already carries the string — and the badge
+  elapsed is omitted whenever the root row renders its own duration span.
 - `force`: force re-computation (default `false`). Ignored when `poll_context` is set.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
@@ -859,11 +862,64 @@ _caught_error_ex(err, error_obj, req) =
         throw(err)
     end
 
+# Poller running-face dedup (snag expanded-first-l-360630fb). The badge and
+# the tree are co-visible in the expanded default chrome, so a string the
+# tree already renders must not be restated above it: when the poller `label`
+# equals the status root's description, the badge label, the interim
+# "<label> — running..." header, and the root header render one string three
+# times — and the badge elapsed always restates the root's duration span.
+# The running face omits the redundant copies server-side, so the dedup
+# holds with or without the page assets; the tree keeps the single
+# surviving copy of each.
+
+# The description the poller tree renders for its own root, or `nothing`
+# when the root renders no description row (a status that is nothing,
+# non-state, or undisplayed, or a root with an empty description). Mirrors
+# `htmx_render`'s header rules — keep in lockstep.
+function _status_root_description(status)
+    status isa ProgressNode || return nothing
+    is_displayed(status) || return nothing
+    sp = status.impl
+    sp isa StateProgress || return nothing
+    return lock(sp.lock) do
+        isempty(sp.description) ? nothing : sp.description
+    end
+end
+
+# True when `htmx_render(status)` emits a `.treebar-duration` span for the
+# root itself: a counter, a non-annotation message node, or a described
+# container. Mirrors `htmx_render`'s header rules above — keep in lockstep.
+function _root_renders_duration(status)
+    status isa ProgressNode || return false
+    is_displayed(status) || return false
+    sp = status.impl
+    sp isa StateProgress || return false
+    return lock(sp.lock) do
+        !isnothing(sp.N) && return true
+        !isempty(sp.message) && return !get(status.meta, :annotation, false)
+        !isempty(sp.description)
+    end
+end
+
+# True when the poller `label` restates the status root's description: the
+# badge-label and interim-header copies are redundant with the root header.
+_label_restates_root(label, status) =
+    !isnothing(label) && _status_root_description(status) == string(label)
+
 function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-    inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
+    inner_body = if isnothing(label)
+        htmx_render(status; article=true, scoped=false)
+    elseif _label_restates_root(label, status)
+        # The badge and the root header already carry this string — an
+        # interim "<label> — running..." header would restate it a third
+        # time. Only the redundant header line goes: the article wrapper
+        # stays, and a configured Stop control stays inside it.
+        h.article(stop_btn, htmx_render(status; scoped=false))
+    else
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
+    end
     _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
                   pausable=true, badge=_poll_badge(label, status), chrome=chrome)
 end
@@ -919,10 +975,17 @@ function _poll_badge(label, status)
         h.span(class="treebar-badge-strip", aria_hidden="true")(),
         h.span(class="treebar-badge-panel")(
             _pause_button(),
-            isnothing(label) ? "" : h.span(class="treebar-badge-label")(string(label)),
+            # No badge label when there is none to show, or when it would
+            # restate the root header one line below (dedup, see above).
+            (isnothing(label) || _label_restates_root(label, status)) ? "" :
+                h.span(class="treebar-badge-label")(string(label)),
             h.span(class="treebar-badge-status")("Polling"),
             h.progress(class="treebar-badge-bar")(),
-            h.span(class="treebar-badge-elapsed")(_badge_elapsed(status)),
+            # No badge elapsed when the root row renders its own duration
+            # span (dedup, see above). The client mirror tolerates the
+            # absent span — it re-checks `querySelector` every tick.
+            _root_renders_duration(status) ? "" :
+                h.span(class="treebar-badge-elapsed")(_badge_elapsed(status)),
         ),
     )
 end
