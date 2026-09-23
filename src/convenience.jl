@@ -351,15 +351,31 @@ _phases_user_args(x) = x.args[3:end]
 # the source level.
 _is_string_literal(x) = x isa AbstractString || Meta.isexpr(x, :string)
 
+# Index of a block's TAIL statement (last non-LineNumberNode arg), if any. A
+# bare string literal there is the block's VALUE, not a phase marker: the
+# parser folds a mid-block `"s"; stmt` into `Core.@doc` (so a user-written
+# bare marker never reaches the walker there), but the trailing string has no
+# following statement and arrives intact — where the bare-string arm below
+# used to consume it, opening an empty phase and returning its node instead
+# of the string (snag `trailing-string-f02f8729`). The `@progress "label"`
+# macro form keeps its marker meaning in tail position (as a statement it has
+# no other reading), and `@phases`-injected markers are unaffected (each is
+# immediately followed by its statement, so none is ever the tail).
+_tail_index(block::Expr) = findlast(a -> !(a isa LineNumberNode), block.args)
+
 # Phase-marker recognition. The structural shape is a `:macrocall` to
 # `@progress` with exactly one user argument; the *kind* of that argument
 # (string literal — plain or interpolated — vs anything else) determines
-# whether it acts as a marker. Returns either `nothing` or the raw label
-# expression (which downstream code splices into `description=$label`).
-function _phase_marker_label(x)
-    _is_string_literal(x) && return x
+# whether it acts as a marker. A bare string literal ALSO acts as a marker
+# (the `@phases` injection path, plus for-bodies, where the parser leaves
+# bare strings intact) — EXCEPT in tail position (`is_tail`, from
+# `_tail_index`), where it is the block's value. Returns either `nothing` or
+# the raw label expression (which downstream code splices into
+# `description=$label`).
+function _phase_marker_label(x, is_tail::Bool=false)
+    _is_string_literal(x) && return is_tail ? nothing : x
     if x isa Expr && _is_progress_macrocall(x) && length(x.args) == 3
-        return _phase_marker_label(x.args[3])
+        return _phase_marker_label(x.args[3], false)
     end
     return nothing
 end
@@ -572,9 +588,16 @@ end
 
 # True iff the block has any bare `@progress "label"` phase markers as direct
 # statements (plain or interpolated string literals — `_phase_marker_label`
-# recognises both).
-_has_phase_marker(block::Expr) =
-    block.head === :block && any(a -> _phase_marker_label(a) !== nothing, block.args)
+# recognises both). A bare string in TAIL position is the block's value, not
+# a marker (`_tail_index`), so a body carrying only that stays a bare body
+# with no per-iteration wrapper.
+function _has_phase_marker(block::Expr)
+    block.head === :block || return false
+    tail = _tail_index(block)
+    any(enumerate(block.args)) do (i, a)
+        _phase_marker_label(a, i == tail) !== nothing
+    end
+end
 
 # Route a for-loop body. A block carrying bare phase markers gets a per-iteration,
 # transient, LABEL-LESS wrapper node running the existing `_emit_phases` phase
@@ -757,8 +780,9 @@ function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
     phases = Vector{Tuple{Any,Vector{Any}}}()
     cur_label = nothing
     cur_stmts = Any[]
-    for a in block.args
-        cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a))
+    tail = _tail_index(block)
+    for (i, a) in enumerate(block.args)
+        cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a, i == tail))
     end
     push!(phases, (cur_label, cur_stmts))
 
