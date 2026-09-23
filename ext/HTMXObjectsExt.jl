@@ -610,8 +610,9 @@ htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_rend
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
-element that carries the polling attributes (`hx-trigger="every Xs"
-hx-target="this" hx-swap="outerHTML"`). The wrapper also carries one
+element that carries the polling attributes (`hx-trigger="every Xs [!document.hidden]"
+hx-target="this" hx-swap="outerHTML"` — the filter stops a hidden document
+from polling for nobody; a returning tab is at most one interval stale). The wrapper also carries one
 `.treebar-badge`: a hairline strip plus a panel (pause/play control, poll
 label, status word, progress bar, elapsed) above the live tree. The panel
 and tree render expanded by default, so a first-load region shows progress
@@ -1039,9 +1040,17 @@ _polling_wrap(inner; pausable=false, terminal=false, badge="", chrome=:auto) =
 # heals a drifted/unknown-token poll by re-executing with the CURRENT request
 # args (current-args-wins), which only works because the current args reach
 # the server. Stripping them client-side would starve that heal path.
+# The trigger filter `[!document.hidden]` stops a backgrounded document (a
+# hidden tab or minimized window) from issuing poll requests for nobody and
+# resumes on visibility — a returning tab is at most one interval stale. The
+# `every` timer keeps rescheduling while filtered, so resume needs no
+# re-arming (same shape as the KB's own production poll guard). It lives on
+# the trigger (not in the beforeRequest pause hook) so it also covers host
+# pages that omit `htmx_treebar_script`, and the value still starts with
+# `every` (consumers key running-poller detection on that prefix).
 _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
-        hx_trigger="every $interval",
+        hx_trigger="every $interval [!document.hidden]",
         hx_target="this",
         hx_swap="outerHTML",
         hx_select=".treebar-poller-inner:not(.treebar-poller-inner .treebar-poller-inner):not(.treebar-terminal-content .treebar-poller-inner), .treebar-terminal-content:not(.treebar-poller-inner .treebar-terminal-content):not(.treebar-terminal-content .treebar-terminal-content), article[aria-invalid='true']:not(.treebar-poller-inner article):not(.treebar-terminal-content article)")(body)
