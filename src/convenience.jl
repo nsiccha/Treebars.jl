@@ -399,6 +399,25 @@ function _is_threads_for(x)
     is_threads && Meta.isexpr(x.args[end], :for)
 end
 
+# Single-line source text of an AST fragment: line numbers stripped, all
+# whitespace/newlines collapsed. Shared by `_short_label` (@phases phase
+# labels) and `_auto_for_label` (bare-for counter labels).
+function _flat_source(x)
+    clean = x isa Expr ? Base.remove_linenums!(deepcopy(x)) : x
+    strip(replace(string(clean), r"\s+" => " "))
+end
+
+# Default label for an auto-instrumented bare `for` / `Threads.@threads for`:
+# the iteration variables plus the collection source IN FULL when it fits in
+# `_PHASE_LABEL_MAXLEN`, else just the variables — the collection is omitted
+# WHOLE, never clipped (snag `phase-block-auto-211abcde`: the old hardcoded
+# `for $lhs in ...` ellipsised even a 4-letter collection).
+function _auto_for_label(lhs, rhs)
+    vars = _flat_source(lhs)
+    full = "for $vars in $(_flat_source(rhs))"
+    length(full) <= _PHASE_LABEL_MAXLEN ? full : "for $vars"
+end
+
 # Threads.@threads for — determinate counter with a thread-safe per-iteration
 # increment injected into the loop body (the StateProgress lock makes concurrent
 # increments safe). The original macrocall is preserved (schedule arg and all);
@@ -430,7 +449,7 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
     itr = gensym(:itr)
     child_ctx = (progress=sub, transient=true)
     wrapped_body = _wrap_for_body(body, child_ctx)
-    desc = description === nothing ? "for $lhs in ..." : description
+    desc = description === nothing ? _auto_for_label(lhs, rhs) : description
     newfor = Expr(:for, Expr(:(=), lhs, itr),
         quote
             try
@@ -633,7 +652,7 @@ function _for_progress_expr(x::Expr, ctx; description)
         return _for_progress_expr(_nest_multifor(head, body), ctx; description)
     @assert Meta.isexpr(head, :(=))
     lhs, rhs = head.args
-    desc = description === nothing ? "for $lhs in ..." : description
+    desc = description === nothing ? _auto_for_label(lhs, rhs) : description
     subprogress = gensym(:iterprogress)
     child_ctx = (progress=:($subprogress.progress), transient=true)
     wrapped_body = _wrap_for_body(body, child_ctx)
@@ -942,6 +961,15 @@ Wrap `body` with automatic progress tracking. Supports:
   end
   ```
 
+  Plain `for` / `Threads.@threads for` loops *inside* the block — at any depth,
+  including nested in `if` / `while` / another `for` — automatically become
+  determinate counter children of their enclosing node (a counter nested in a
+  loop body is transient: visible while running, detached when finished). Name
+  one with `@progress "label" for`, leave one plain with `@progress nothing
+  for`. Comprehensions, `map`, and `while` loops stay plain unless wrapped
+  explicitly. The default counter label is `for <vars> in <collection>` in full
+  (or `for <vars>` when that exceeds 60 characters) — never clipped.
+
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 
 The `backend` argument is only accepted at the outermost call (defaults to
@@ -990,8 +1018,7 @@ end
 # stripped), collapse all whitespace/newlines to single spaces, truncate.
 const _PHASE_LABEL_MAXLEN = 60
 function _short_label(stmt)
-    clean = stmt isa Expr ? Base.remove_linenums!(deepcopy(stmt)) : stmt
-    s = strip(replace(string(clean), r"\s+" => " "))
+    s = _flat_source(stmt)
     length(s) > _PHASE_LABEL_MAXLEN ? first(s, _PHASE_LABEL_MAXLEN - 1) * "…" : String(s)
 end
 
