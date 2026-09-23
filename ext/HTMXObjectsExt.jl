@@ -104,13 +104,20 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 .treebar-node { margin-bottom: 0.25rem; }
 
-/* Quiet-chrome polling badge. Each live `.treebar-poller` carries one
-   `.treebar-badge`: collapsed it is a 1-2px hairline edge strip marking the
-   polled region; hover/focus expands it to the pause/play control plus a
-   progress bar and status text, and reveals the live tree beneath it.
-   Visual constraints (binding): no gradient accents, no glowing shadows,
-   no emoji icons (the pause/play glyphs are text), no lift/scale hover
-   effects, and the polling pulse is gated on `prefers-reduced-motion`. */
+/* Polling badge chrome. Each live `.treebar-poller` carries one
+   `.treebar-badge`: a hairline strip plus a panel (pause/play control,
+   poll label, status word, progress bar, elapsed) above the live tree.
+   The panel and tree render EXPANDED by default, so a first-load region —
+   nothing on screen yet — shows progress immediately instead of a bare
+   hairline (snag first-load-polle-9728d9da). Quiet chrome (hairline that
+   expands on hover/focus) is opt-in per poller via `data-chrome="quiet"`
+   (the `chrome=:quiet` kwarg), or automatic for a poller diverted into
+   HTMXObjects' live-refresh reporter (`.htmxo-live-reporter`), where
+   settled content is already on screen and the poller is background
+   progress. Visual constraints (binding): no gradient accents, no glowing
+   shadows, no emoji icons (the pause/play glyphs are text), no lift/scale
+   hover effects, and the polling pulse is gated on
+   `prefers-reduced-motion`. */
 .treebar-poller { position: relative; }
 .treebar-terminal { position: static; }
 .treebar-badge { display: block; padding: 0.3rem 0 0.15rem; }
@@ -130,24 +137,34 @@ htmx_treebar_styles() = h.style(Raw("""
 }
 @keyframes tb-badge-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
 .treebar-poller[data-paused="1"] .treebar-badge-strip { opacity: 0.3; }
-/* The panel is CLIPPED when collapsed, never `display: none` — the pause
-   button stays keyboard-focusable, so tabbing to it matches `:focus-within`
-   and expands the badge in the same frame (no invisible-focus trap). The
-   live tree is `display: none` until then: it carries no focusable controls
-   of its own that must stay reachable (pills reappear with it), and a hidden
-   inner still polls and swaps — htmx never checks visibility. Both rules
-   use the DIRECT-CHILD `>` so expanding an outer poller never auto-expands
-   a nested one (the same nested-poller trap the data-show-* scheme avoids,
+/* The quiet panel is CLIPPED when collapsed, never `display: none` — the
+   pause button stays keyboard-focusable, so tabbing to it matches
+   `:focus-within` and expands the badge in the same frame (no
+   invisible-focus trap). The quiet live tree is `display: none` until
+   then: it carries no focusable controls of its own that must stay
+   reachable (pills reappear with it), and a hidden inner still polls and
+   swaps — htmx never checks visibility. The inner rules use the
+   DIRECT-CHILD `>` so expanding an outer poller never auto-expands a
+   nested one (the same nested-poller trap the data-show-* scheme avoids,
    see comment below). */
 .treebar-badge-panel {
     display: flex; gap: 0.5rem; align-items: center;
+}
+.treebar-poller > .treebar-poller-inner { display: block; }
+.treebar-poller[data-chrome="quiet"] .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller .treebar-badge-panel {
     max-height: 0; overflow: hidden;
 }
-.treebar-poller:hover .treebar-badge-panel,
-.treebar-poller:focus-within .treebar-badge-panel { max-height: 2.5rem; }
-.treebar-poller > .treebar-poller-inner { display: none; }
-.treebar-poller:hover > .treebar-poller-inner,
-.treebar-poller:focus-within > .treebar-poller-inner { display: block; }
+.treebar-poller[data-chrome="quiet"]:hover .treebar-badge-panel,
+.treebar-poller[data-chrome="quiet"]:focus-within .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller:hover .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel { max-height: 2.5rem; }
+.treebar-poller[data-chrome="quiet"] > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller > .treebar-poller-inner { display: none; }
+.treebar-poller[data-chrome="quiet"]:hover > .treebar-poller-inner,
+.treebar-poller[data-chrome="quiet"]:focus-within > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller:hover > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller:focus-within > .treebar-poller-inner { display: block; }
 .treebar-pause {
     margin: 0; padding: 0.1rem 0.45rem; font-size: 0.75rem; line-height: 1.4;
     width: auto; cursor: pointer; flex: none;
@@ -584,25 +601,26 @@ Client-side:
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
 element that carries the polling attributes (`hx-trigger="every Xs"
 hx-target="this" hx-swap="outerHTML"`). The wrapper also carries one
-`.treebar-badge`: a quiet-chrome status line that collapses to a 1-2px
-hairline strip and expands on hover/focus to a pause/play control, the poll
-label, a progress bar and the polling status, revealing the live tree beneath
-it. The full tree stays in the DOM while collapsed, so it remains inspectable
-without an extra request — and because the swapped region is hidden, polls
-update it with no visible replace, flash, or scroll disturbance. On each poll
-the inner self-swaps; once the task is done, the response replaces the inner
-with `.treebar-terminal-content`, which naturally stops the loop. The client
-then renames the stable wrapper to `.treebar-terminal`, removes its polling
-UX state and badge, and leaves the rendered result (plus optional frozen
-progress record) as an unambiguous terminal fragment. While polling, the
-wrapper itself is untouched, so UX state on it (`data-show-finished` /
-`-failed` / `-pending`, set by pill clicks) persists across polls.
+`.treebar-badge`: a hairline strip plus a panel (pause/play control, poll
+label, status word, progress bar, elapsed) above the live tree. The panel
+and tree render expanded by default, so a first-load region shows progress
+immediately; pass `chrome=:quiet` to collapse a poller to the hairline
+strip that expands on hover/focus (emitted as `data-chrome="quiet"`),
+and a poller diverted into HTMXObjects' live-refresh reporter is quiet
+automatically. On each poll the inner self-swaps; once the task is done,
+the response replaces the inner with `.treebar-terminal-content`, which
+naturally stops the loop. The client then renames the stable wrapper to
+`.treebar-terminal`, removes its polling UX state and badge, and leaves
+the rendered result (plus optional frozen progress record) as an
+unambiguous terminal fragment. While polling, the wrapper itself is
+untouched, so UX state on it (`data-show-finished` / `-failed` /
+`-pending`, set by pill clicks, and `data-chrome`) persists across polls.
 
 The inner's `hx-select` is top-level-only: each branch excludes matches
 nested inside another match, so a poll response containing a nested poller
@@ -672,6 +690,13 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   historical default behavior). Ignored when the compute was already cached
   (no live substatus to attach); the subtree still detaches from the caller
   on transient finalize, exactly as DO's own `fetchindex!` attachment does.
+- `chrome`: `:auto` (default) or `:quiet`. `:auto` renders the badge panel
+  and live tree expanded — a first-load region shows progress immediately.
+  `:quiet` emits `data-chrome="quiet"` on the wrapper, collapsing the
+  poller to the hairline strip (hover/focus expands it); use it for a
+  poller beside already-visible content. A poller diverted into
+  HTMXObjects' live-refresh reporter is quiet by stylesheet rule either
+  way. Anything else throws `ArgumentError`.
 - `kwargs...`: passed through to `fetchindex`
 """
 # Resolve the `parent=:auto` default: the request's dispatch node first (the
@@ -691,7 +716,8 @@ function _polling_default_parent(req)
     end
     current_dispatch_parent()
 end
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, kwargs...)
+    chrome in (:auto, :quiet) || throw(ArgumentError("polling_fetchindex: chrome must be :auto or :quiet, got $(repr(chrome))"))
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -721,7 +747,7 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
             # this gives the caller the LIVE view, not a post-hoc history.
             (parent isa ProgressNode && !isnothing(status)) && add_child!(parent, status)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
-                             ip_ctx=_ip_ctx(ip, keys, kwargs))
+                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome)
         end
     catch err
         (keep_progress && !sync) || rethrow()
@@ -757,10 +783,10 @@ _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 # incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto) =
     istaskfailed(rv) ? throw(rv.result) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
-        _polling_running(status; label, poll_url, poll_interval, cancel_url)
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
+        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
 
 # Human-readable "which IP, which key" for the unresolved-handle error below.
 # Best-effort: an IP that does not expose `name`/`o` still yields a usable string.
@@ -779,11 +805,11 @@ end
 # the client terminalizes the stable wrapper in place. With keep_progress
 # (default, but not on the sync loopback), the frozen tree is appended below
 # the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto)
     if _is_unresolved_handle(rv)
         return sync ?
-            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
-            _polling_running(status; label, poll_url, poll_interval, cancel_url)
+            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
+            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
     end
     # A READY handle must never reach render_result raw — resolve it here. This is
     # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
@@ -791,7 +817,7 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     # ready handle). A compatible ready handle is a legal completion race, so it
     # is normalized silently rather than diagnosed as package skew.
     if _is_handle(rv)
-        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx)
+        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome)
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
@@ -828,13 +854,13 @@ _caught_error_ex(err, error_obj, req) =
         throw(err)
     end
 
-function _polling_running(status; label, poll_url, poll_interval, cancel_url)
+function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
     inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
     _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
-                  pausable=true, badge=_poll_badge(label, status))
+                  pausable=true, badge=_poll_badge(label, status), chrome=chrome)
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
@@ -843,16 +869,16 @@ end
 # this wrapper into the DOM — subsequent polls only swap the inner, leaving
 # the original wrapper element (and its possibly-toggled data-show-* attrs)
 # untouched.
-# Quiet-chrome polling badge, one per live `.treebar-poller` wrapper. Collapsed
-# (stylesheet) it is a 1-2px hairline strip; hover/focus expands the panel —
-# pause/play button, label, status word, determinate bar, elapsed — and reveals
-# the live tree beneath it. The badge lives on the never-swapped wrapper, so
-# the pause control keeps focus and state across polls; `syncBadge`
-# (htmx_treebar_script) mirrors the fresh inner into it after every swap and
-# tick. Without the page assets there is no collapse and no mirror: the badge
-# renders statically above the fully visible tree, and the pause button still
-# toggles `data-paused` (but nothing cancels the poll requests — the
-# documented asset-less degradation).
+# Polling badge, one per live `.treebar-poller` wrapper: hairline strip plus
+# panel (pause/play button, label, status word, determinate bar, elapsed)
+# above the live tree. Expanded by default; `chrome=:quiet` collapses it to
+# the strip (hover/focus re-expands). The badge lives on the never-swapped
+# wrapper, so the pause control keeps focus and state across polls;
+# `syncBadge` (htmx_treebar_script) mirrors the fresh inner into it after
+# every swap and tick. Without the page assets there is no collapse and no
+# mirror: the badge renders statically above the fully visible tree, and the
+# pause button still toggles `data-paused` (but nothing cancels the poll
+# requests — the documented asset-less degradation).
 #
 # The pause onclick toggles `data-paused` on the closest `.treebar-poller` —
 # the persistent wrapper, so the paused state survives polls exactly like the
@@ -896,10 +922,20 @@ function _poll_badge(label, status)
     )
 end
 
-_polling_wrap(inner; pausable=false, terminal=false, badge="") =
+# `chrome` selects the live wrapper's badge presentation: `:auto` (default)
+# emits no `data-chrome` attr, so the stylesheet's expanded default applies
+# (panel + tree visible — a first-load region shows progress immediately);
+# `:quiet` emits `data-chrome="quiet"`, collapsing to the hairline strip
+# that expands on hover/focus. A poller diverted into HTMXObjects'
+# live-refresh reporter (`.htmxo-live-reporter`) is quiet by stylesheet
+# rule regardless of the attr — settled content is already on screen, so
+# the poller is background progress. Terminal wrappers carry no badge and
+# take no attr. Validated at the public `polling_fetchindex` boundary.
+_polling_wrap(inner; pausable=false, terminal=false, badge="", chrome=:auto) =
     terminal ?
         h.div(class="treebar-terminal")(inner) :
         h.div(class="treebar-poller",
+            data_chrome=(chrome === :quiet ? "quiet" : nothing),
             data_paused="0",
             data_show_finished="0",
             data_show_pending="1",
