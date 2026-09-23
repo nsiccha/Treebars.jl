@@ -490,5 +490,26 @@ check("terminal wrappers carry no chrome attr", () -> begin
     occursin("data-chrome", html) && error("terminal wrapper carries a chrome attr")
 end)
 
+# --- 16. Badge label wraps, never clips (snag poller-badge-lab-78301564) ---
+# The label rule carried max-width/overflow/ellipsis/nowrap, so a long poller
+# label rendered as "For-You master/detail rollup (waiting r…" (scrollWidth
+# 496px in a 224px box). Labels are read content: the rule must wrap, the
+# panel must flex-wrap so the status siblings drop below on narrow widths,
+# and the quiet hover/focus expansion must not cap the panel height.
+check("badge label rule wraps instead of clipping", () -> begin
+    css = ext.node_to_html(Treebars.htmx_treebar_styles())
+    m = match(r"\.treebar-badge-label \{([^}]*)\}", css)
+    m === nothing && error("badge label rule missing from stylesheet")
+    for banned in ("nowrap", "ellipsis", "overflow", "max-width",
+                   "white-space", "text-overflow")
+        occursin(banned, m.captures[1]) && error("label rule still clips: $banned")
+    end
+    m = match(r"\.treebar-badge-panel \{([^}]*)\}", css)
+    m === nothing && error("badge panel rule missing from stylesheet")
+    occursin("flex-wrap", m.captures[1]) || error("badge panel does not flex-wrap")
+    occursin("max-height: 2.5rem", css) &&
+        error("quiet panel expansion still caps height at 2.5rem")
+end)
+
 println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
 exit(nfail == 0 ? 0 : 1)
