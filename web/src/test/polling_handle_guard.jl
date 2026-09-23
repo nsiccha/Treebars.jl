@@ -191,13 +191,18 @@ function _badge_running_html()
     ext.node_to_html(node)
 end
 
-check("running face carries one badge with glyph control, label, status, bar, elapsed", () -> begin
+check("running face carries one badge with glyph control, label, status, bar (elapsed lives on the root row)", () -> begin
     html = _badge_running_html()
     count("class=\"treebar-badge\"", html) == 1 || error("badge wrapper missing or duplicated")
     for cls in ("treebar-badge-strip", "treebar-badge-panel", "treebar-badge-label",
-                "treebar-badge-status", "treebar-badge-bar", "treebar-badge-elapsed")
+                "treebar-badge-status", "treebar-badge-bar")
         occursin("class=\"$cls\"", html) || error("$cls missing from badge")
     end
+    # Dedup (snag expanded-first-l-360630fb): the fixture root ("probe") is
+    # described, so it renders its own duration span and the badge omits its
+    # restating elapsed copy — the tree keeps the single surviving readout.
+    occursin("class=\"treebar-badge-elapsed\"", html) && error("badge elapsed restates the root duration")
+    occursin("class=\"treebar-duration\"", html) || error("root duration missing from tree")
     occursin(">❚❚</button>", html) || error("pause glyph button missing")
     occursin("aria-label=\"Pause live updates\"", html) || error("pause aria-label missing")
     occursin("title=\"Pause live updates (the work keeps running in the background)\"",
@@ -509,6 +514,103 @@ check("badge label rule wraps instead of clipping", () -> begin
     occursin("flex-wrap", m.captures[1]) || error("badge panel does not flex-wrap")
     occursin("max-height: 2.5rem", css) &&
         error("quiet panel expansion still caps height at 2.5rem")
+end)
+
+# --- 17. Running-face dedup: one label, one elapsed (snag expanded-first-l-360630fb) ---
+# Badge and tree are co-visible in the expanded default chrome. When the
+# poller label equals the status root's description, the badge label, the
+# interim "<label> — running..." header, and the root header rendered one
+# string three times — and the badge elapsed always restated the root's
+# duration span (2x in BOTH the label and label=nothing paths). The running
+# face now omits the redundant copies server-side; the tree keeps the single
+# surviving copy of each. Nothing is dropped: every omitted copy renders
+# identically one line below.
+function _dedup_running_html(label, status; cancel_url="")
+    node = ext._polling_running(status; label=label, poll_url="/poll",
+        poll_interval="200ms", cancel_url=cancel_url)
+    ext.node_to_html(node)
+end
+
+check("equal label renders once: no badge label, no interim header, root keeps it", () -> begin
+    label = "rollup-dedup-probe"
+    status = Treebars.initialize_progress!(:state; description=label)
+    Treebars.initialize_progress!(status; description="phase-one")
+    html = _dedup_running_html(label, status)
+    count(label, html) == 1 || error("label renders $(count(label, html))x, want 1x")
+    occursin("class=\"treebar-badge-label\"", html) && error("badge label restates the root header")
+    occursin("running...", html) && error("interim running header restates the root header")
+    occursin("<header", html) && error("a header element survived the dedup")
+    occursin("phase-one", html) || error("phase tree lost under the dedup")
+    occursin("<article", html) || error("article wrapper lost under the dedup")
+end)
+
+check("equal label with cancel_url keeps the Stop control", () -> begin
+    label = "rollup-dedup-probe"
+    status = Treebars.initialize_progress!(:state; description=label)
+    html = _dedup_running_html(label, status; cancel_url="/stop")
+    occursin(">Stop</a>", html) || error("Stop control lost under the dedup")
+    occursin("/stop", html) || error("Stop href lost under the dedup")
+    occursin("running...", html) && error("interim header restates the label")
+    count(label, html) == 1 || error("label renders $(count(label, html))x, want 1x")
+end)
+
+check("unequal label keeps badge label and interim header (2x, pinned)", () -> begin
+    html = _badge_running_html()  # label "slow", root "probe"
+    # ">slow" pins the two rendered copies (badge span + interim header);
+    # the "/slow" poll URL must not count.
+    count(">slow", html) == 2 || error("label renders $(count(">slow", html))x, want 2x")
+    occursin("slow — running...", html) || error("interim header missing for a distinct label")
+end)
+
+check("elapsed dedup follows the root shape: omitted iff the root renders its own duration", () -> begin
+    # described container / counter / message roots render a duration span —
+    # the badge copy goes, the tree copy stays.
+    described = Treebars.initialize_progress!(:state; description="op-label")
+    counter = Treebars.initialize_progress!(:state; N=4, description="count-root")
+    messaged = Treebars.initialize_progress!(:state; description="msg-root")
+    Treebars.update_progress!(messaged, "working")
+    for (name, st) in (("described", described), ("counter", counter),
+                       ("message", messaged))
+        html = _dedup_running_html("other-label", st)
+        occursin("class=\"treebar-badge-elapsed\"", html) &&
+            error("$name root: badge elapsed restates the root duration")
+        occursin("class=\"treebar-duration\"", html) ||
+            error("$name root: root duration missing from tree")
+    end
+    # An undescribed container root renders no header of its own — the badge
+    # elapsed is the only readout and must stay.
+    bare = Treebars.initialize_progress!(:state; description="")
+    html = _dedup_running_html("other-label", bare)
+    occursin("class=\"treebar-badge-elapsed\"", html) ||
+        error("undescribed root: badge elapsed wrongly omitted")
+    occursin("class=\"treebar-duration\"", html) &&
+        error("undescribed root: unexpected root duration")
+end)
+
+check("label=nothing keeps one label and one elapsed on a described root", () -> begin
+    status = Treebars.initialize_progress!(:state; description="single-line-op")
+    html = _dedup_running_html(nothing, status)
+    count("single-line-op", html) == 1 || error("label renders $(count("single-line-op", html))x, want 1x")
+    occursin("class=\"treebar-badge-label\"", html) && error("badge label without a label")
+    occursin("class=\"treebar-badge-elapsed\"", html) && error("badge elapsed restates the root duration")
+    occursin("class=\"treebar-duration\"", html) || error("root duration missing from tree")
+end)
+
+check("dedup helpers stay quiet on exotic statuses (nothing kept, never dropped)", () -> begin
+    ext._status_root_description(nothing) === nothing || error("nothing has a description")
+    ext._root_renders_duration(nothing) && error("nothing renders a duration")
+    ext._label_restates_root("x", nothing) && error("nothing restates a label")
+    ext._label_restates_root(nothing, nothing) && error("nothing label restates")
+    hidden = Treebars.ProgressNode(Treebars.StateProgress(; description="hid"),
+        (; propagates=false, displayed=false))
+    ext._status_root_description(hidden) === nothing || error("undisplayed root has a description")
+    ext._root_renders_duration(hidden) && error("undisplayed root renders a duration")
+    annotated = Treebars.ProgressNode(Treebars.StateProgress(; description="k"),
+        (; propagates=false, annotation=true))
+    Treebars.update_progress!(annotated, "v")
+    ext._root_renders_duration(annotated) && error("annotation root renders a duration")
+    ext._status_root_description(annotated) == "k" || error("annotation root lost its description")
+    ext._label_restates_root("k", annotated) || error("annotation root match missed")
 end)
 
 println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
