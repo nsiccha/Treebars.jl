@@ -613,5 +613,38 @@ check("dedup helpers stay quiet on exotic statuses (nothing kept, never dropped)
     ext._label_restates_root("k", annotated) || error("annotation root match missed")
 end)
 
+# --- 18. Hidden-document poll guard (snag treebars-pollers-076014bd) ---
+# A poller in a hidden document (background tab, minimized window) must not
+# keep issuing `every` requests for nobody. The running face carries the
+# trigger filter `[!document.hidden]` — the same shape as the KB's own
+# production poll guard — so htmx skips the request while hidden and resumes
+# on visibility (the `every` timer keeps rescheduling, so resume needs no
+# re-arming). The value still starts with `every`: consumers detect a running
+# poller with `occursin("hx-trigger=\"every", body)`.
+check("running face filters its every trigger on document.hidden", () -> begin
+    html = _badge_running_html()  # poll_interval="200ms"
+    occursin("hx-trigger=\"every 200ms [!document.hidden]\"", html) ||
+        error("hidden-tab filter missing from the running trigger")
+end)
+check("running trigger still starts with every (consumer running-poller probe)", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    node = ext._polling_running(status; label="slow",
+        poll_url="/slow", poll_interval="2s", cancel_url="")
+    html = ext.node_to_html(node)
+    occursin("hx-trigger=\"every", html) || error("trigger lost its every prefix")
+    occursin("hx-trigger=\"every 2s [!document.hidden]\"", html) ||
+        error("custom poll_interval did not thread into the filtered trigger")
+end)
+check("terminal faces carry no trigger to filter", () -> begin
+    status = Treebars.initialize_progress!(:state; description="probe")
+    Treebars.finalize_progress!(status)
+    node = ext._polling_resolve(:done, status;
+        sync=false, keep_progress=true, label="probe", poll_url="/poll",
+        poll_interval="200ms", cancel_url="", ip_ctx="ctx",
+        render_result = _ -> ext.h.p("done"))
+    html = ext.node_to_html(node)
+    occursin("document.hidden", html) && error("hidden filter leaked into terminal markup")
+end)
+
 println(nfail == 0 ? "\nALL GUARD TESTS PASSED" : "\n$nfail TEST(S) FAILED")
 exit(nfail == 0 ? 0 : 1)
