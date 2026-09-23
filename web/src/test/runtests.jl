@@ -673,6 +673,67 @@ end
     @test [c["description"] for c in snap3["children"]] == ["First", "Second"]
 end
 
+@testset "@progress block — a trailing bare string is the VALUE, not a marker" begin
+    # Regression guard for snag `trailing-string-f02f8729`: the parser folds a
+    # mid-block `"s"; stmt` into `Core.@doc`, but the TAIL string has no
+    # following statement and reaches the walker intact — where it used to be
+    # consumed as a phase marker (spurious phase + the block returned its node
+    # instead of the string, violating the §1 value-preserving contract).
+    root = initialize_progress!(:state; description="Root")
+    ret = @progress root begin
+        @progress "phase a"
+        1 + 1
+        @progress "phase b"
+        "tail value"
+    end
+    @test ret === "tail value"
+    # Exactly the two declared phases — no third "tail value" phase.
+    @test sort!([c.impl.description for c in root.children]) == ["phase a", "phase b"]
+    finalize_progress!(root)
+
+    # An interpolated tail string is a value too.
+    root2 = initialize_progress!(:state; description="Root2")
+    tag = "v2"
+    ret2 = @progress root2 begin
+        @progress "phase a"
+        "done $tag"
+    end
+    @test ret2 === "done v2"
+    @test [c.impl.description for c in root2.children] == ["phase a"]
+    finalize_progress!(root2)
+
+    # The `@progress "label"` macro form KEEPS its marker meaning in tail
+    # position — as a statement it has no other reading.
+    root3 = initialize_progress!(:state; description="Root3")
+    @progress root3 begin
+        @progress "phase a"
+        @progress "tail marker"
+    end
+    @test sort!([c.impl.description for c in root3.children]) == ["phase a", "tail marker"]
+    finalize_progress!(root3)
+
+    # A for-body whose only marker is a tail string stays a bare body: no
+    # per-iteration wrapper, no phase.
+    root4 = initialize_progress!(:state; description="Root4")
+    n = 0
+    @progress root4 for i in 1:3
+        n += 1
+        "v"
+    end
+    finalize_progress!(root4)
+    @test n == 3
+    @test length(only(root4.children).children) == 0
+
+    # `@phases` inherits the fix: a trailing string stays the block's value.
+    root5 = initialize_progress!(:state; description="Root5")
+    ret5 = @phases root5 begin
+        x = 1 + 1
+        "phased $x"
+    end
+    @test ret5 === "phased 2"
+    finalize_progress!(root5)
+end
+
 @testset "@phases explicit node — block" begin
     # Each top-level statement of the block becomes its own pre-enumerated,
     # timed phase (label = shortened source). All statements share one try-scope
