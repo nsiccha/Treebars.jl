@@ -148,7 +148,7 @@ htmx_treebar_styles() = h.style(Raw("""
    nested one (the same nested-poller trap the data-show-* scheme avoids,
    see comment below). */
 .treebar-badge-panel {
-    display: flex; gap: 0.5rem; align-items: center;
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
 }
 .treebar-poller > .treebar-poller-inner { display: block; }
 .treebar-poller[data-chrome="quiet"] .treebar-badge-panel,
@@ -158,7 +158,7 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-poller[data-chrome="quiet"]:hover .treebar-badge-panel,
 .treebar-poller[data-chrome="quiet"]:focus-within .treebar-badge-panel,
 .htmxo-live-reporter .treebar-poller:hover .treebar-badge-panel,
-.htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel { max-height: 2.5rem; }
+.htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel { max-height: none; }
 .treebar-poller[data-chrome="quiet"] > .treebar-poller-inner,
 .htmxo-live-reporter .treebar-poller > .treebar-poller-inner { display: none; }
 .treebar-poller[data-chrome="quiet"]:hover > .treebar-poller-inner,
@@ -169,9 +169,14 @@ htmx_treebar_styles() = h.style(Raw("""
     margin: 0; padding: 0.1rem 0.45rem; font-size: 0.75rem; line-height: 1.4;
     width: auto; cursor: pointer; flex: none;
 }
+/* The badge label WRAPS, never clips: a poller label is read content, so no
+   max-width / overflow / ellipsis / nowrap here (snag
+   poller-badge-lab-78301564). The panel flex-wraps so the status siblings
+   drop below the label on narrow widths instead of crushing it, and the
+   quiet hover/focus expansion above caps nothing (max-height: none) so a
+   wrapped multi-line label is never cut there either. */
 .treebar-badge-label {
     font-size: 0.8rem; color: var(--pico-muted-color, #888);
-    max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .treebar-badge-status { font-size: 0.8rem; flex: none; }
 .treebar-badge-bar { width: 6rem; margin: 0; flex: none; }
