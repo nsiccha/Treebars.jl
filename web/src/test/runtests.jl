@@ -1567,3 +1567,109 @@ end
     finalize_progress!(outer)
     finalize_progress!(inner)
 end
+
+@testset "@progress block — plain loops auto-instrument with readable labels" begin
+    # Regression guard for snag `phase-block-auto-211abcde`: every bare `for` /
+    # `Threads.@threads for` at any depth under `@progress` becomes a determinate
+    # counter child of its enclosing node, with a default label showing the
+    # collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
+    root = initialize_progress!(:state; description="Root")
+    acc = @progress root begin
+        @progress "Phase A"
+        s = 0
+        for (i, x) in enumerate([10, 20, 30])
+            s += x
+        end
+        @progress "Phase B"
+        s
+    end
+    @test acc == 60
+    @test [c.impl.description for c in root.children] == ["Phase A", "Phase B"]
+    phasea = only(c for c in root.children if c.impl.description == "Phase A")
+    loop = only(phasea.children)
+    @test loop.impl.description == "for (i, x) in enumerate([10, 20, 30])"
+    @test !occursin("...", loop.impl.description)
+    @test loop.impl.i == 3 && loop.impl.N == 3
+    finalize_progress!(root)
+
+    # Loops nested in `if` / `while` / another `for` instrument too. A counter
+    # nested in a loop body is transient: visible in-flight, detached when done.
+    root2 = initialize_progress!(:state; description="Root2")
+    live = Ref("")
+    @progress root2 begin
+        @progress "Phase"
+        if true
+            for j in 1:2
+                j
+            end
+        end
+        k = 0
+        while k < 1
+            k += 1
+            for w in 1:2
+                w
+            end
+        end
+        for a in 1:2
+            for b in 1:3
+                live[] = render_text(root2)
+                a + b
+            end
+        end
+    end
+    descs2 = sort!([c.impl.description for c in only(root2.children).children])
+    @test descs2 == ["for a in 1:2", "for j in 1:2", "for w in 1:2"]
+    @test occursin("for b in 1:3", live[])  # the transient inner bar, mid-run
+    finalize_progress!(root2)
+
+    # Comprehensions, `map`, and `while` stay plain (no counter of their own).
+    root3 = initialize_progress!(:state; description="Root3")
+    @progress root3 begin
+        @progress "Phase"
+        [x * 2 for x in 1:3]
+        map(1:3) do x
+            x + 1
+        end
+        n = 0
+        while n < 2
+            n += 1
+        end
+    end
+    @test isempty(only(root3.children).children)
+    finalize_progress!(root3)
+
+    # `@progress nothing for` runs the loop with no node at all.
+    root4 = initialize_progress!(:state; description="Root4")
+    total = Ref(0)
+    @progress root4 begin
+        @progress "Phase"
+        @progress nothing for z in 1:4
+            total[] += z
+        end
+    end
+    @test total[] == 10
+    @test isempty(only(root4.children).children)
+    finalize_progress!(root4)
+
+    # A collection whose full label would exceed 60 chars is omitted WHOLE
+    # (`for x`) — never clipped with `...`. An explicit label still wins, and
+    # plain `Threads.@threads for` gets the same full-label rule.
+    root5 = initialize_progress!(:state; description="Root5")
+    longitr = [i for i in 1:5]
+    @progress root5 begin
+        @progress "Phase"
+        for x in [longitr, longitr, longitr, longitr, longitr, longitr, longitr, longitr]
+            x
+        end
+        @progress "rows" for (i, y) in enumerate([1, 2, 3])
+            y
+        end
+        Threads.@threads for t in 1:3
+            t
+        end
+    end
+    descs5 = sort!([c.impl.description for c in only(root5.children).children])
+    @test descs5 == ["for t in 1:3", "for x", "rows"]
+    @test all(!occursin("...", d) for d in descs5)
+    finalize_progress!(root5)
+end
