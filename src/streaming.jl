@@ -1,7 +1,7 @@
-# Push-transport plumbing shared by `ws_progress` (HTTP extension) and the
-# HTMXObjects extension's WebSocket `polling_fetchindex`. Transport-free: a
-# stream is an `emit(frame)::Bool` callback that returns `false` once the
-# client has gone.
+# Push-transport plumbing shared by `ws_progress` (HTTP extension),
+# `sse_progress` (below) and the HTMXObjects extension's WebSocket
+# `polling_fetchindex` and `sse_fetchindex`. Transport-free: a stream is an
+# `emit(frame)::Bool` callback that returns `false` once the client has gone.
 
 # Terminal = finished, failed or skipped — exactly the states with
 # `finalized_at` set. A pending node is not terminal: it has yet to run, so a
@@ -85,3 +85,83 @@ _pace(done, interval, pollint) = timedwait(() -> _is_settled(done), interval; po
 # `emit` for a WebSocket (defined in the HTTP extension): send one frame,
 # returning `false` instead of throwing once the client has gone.
 function _ws_emit end
+
+# --- Server-sent events ------------------------------------------------------
+#
+# The SSE transport targets a plain `IO` whose response headers the caller has
+# already written. Treebars never writes headers, never closes the `io` and
+# never sends keep-alive comments. Each frame goes out as ONE `write` of one
+# `String`, so a caller that serialises writes (e.g. against its own
+# heartbeat) can never see a frame split.
+
+function _check_sse_event(event::AbstractString)
+    (occursin('\n', event) || occursin('\r', event)) &&
+        throw(ArgumentError("SSE event name must not contain a line break: $(repr(event))"))
+    event
+end
+
+# One complete `text/event-stream` frame: `event: <name>`, one `data:` line per
+# line of `data`, then the blank line that ends the event. Every line break is
+# a data-line boundary — `\r\n` and a lone `\r` included, as the SSE parser
+# treats them — so the browser rejoins the lines with `\n` and gets the payload
+# back intact.
+function _sse_frame(event::AbstractString, data::AbstractString)
+    io = IOBuffer()
+    print(io, "event: ", _check_sse_event(event), '\n')
+    for line in split(data, r"\r\n|\r|\n")
+        print(io, "data: ", line, '\n')
+    end
+    print(io, '\n')
+    String(take!(io))
+end
+
+# `emit` for an SSE stream. A write that throws means the client went away:
+# report it, never the compute's business.
+function _sse_emit(io::IO, event::AbstractString, data::AbstractString)
+    frame = _sse_frame(event, data)
+    try
+        write(io, frame)
+        true
+    catch err
+        @debug "Treebars: SSE write failed; client disconnected" exception=(err, catch_backtrace())
+        false
+    end
+end
+
+"""
+    sse_progress(io, node; interval=0.1, render=repr, event="progress", done=nothing)
+
+Stream live progress as server-sent events on `io` until `node` is terminal
+(finished, failed or skipped) or the optional `done` handle settles; a pending
+node keeps the stream going. Needs no package extension.
+
+`io` is the open event-stream response: its headers must already be written.
+`sse_progress` never writes headers, never closes `io` and sends no keep-alive
+comments. Each frame is written with a single `write(io, frame::String)`:
+
+    event: <event>
+    data: <first line of render(node)>
+    data: <second line …>
+    <blank line>
+
+`render(node)` returns the `String` payload; it may span lines. Like
+[`ws_progress`](@ref), the tree is re-rendered only when it changed, a frame is
+sent only when it differs from the last one (a running node's elapsed time and
+ETA do not count), and the terminal state is sent last, as one more `event`
+frame.
+
+A write that throws means the client disconnected: the stream stops quietly
+(logged at `@debug`) and never touches the compute. Returns `nothing` either
+way, so it is safe as the last expression of a route body whose return value
+would be sent to the client.
+
+With `HTMXObjects` loaded, [`sse_fetchindex`](@ref) with
+[`htmx_sse_container`](@ref) renders the frames, the result and failures for
+you.
+"""
+function sse_progress(io::IO, node::ProgressNode{<:StateProgress};
+        interval=0.1, render=repr, event::AbstractString="progress", done=nothing)
+    _check_sse_event(event)
+    _stream_frames(frame -> _sse_emit(io, event, frame), node; interval, render, done, final=true)
+    nothing
+end

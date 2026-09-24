@@ -33,6 +33,10 @@ parent–child relationships for hierarchical progress tracking.
   pushes the same fragments over a socket whenever the tree changes. The
   lower-level [`ws_progress`](@ref) (loaded with `HTTP`) streams any rendering
   of a node until it is finished, failed or skipped.
+- **Server-sent events** — [`sse_fetchindex`](@ref) with
+  [`htmx_sse_container`](@ref) streams the same fragments as `progress` /
+  `done` events on any event-stream `IO`; [`sse_progress`](@ref) is the
+  dependency-free loop underneath.
 - **Thread-safe** — children and labels are guarded by `ReentrantLock`-backed
   wrappers (`ThreadsafeSet` / `ThreadsafeDict`) so concurrent multi-thread
   progress reporting + polling is safe.

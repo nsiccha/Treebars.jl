@@ -145,6 +145,52 @@ The frames follow the polling design:
 - Pause holds back running frames on the client (the newest one is applied on
   Resume); the terminal frame is never held back.
 
+### Server-sent events — `sse_fetchindex`
+
+[`sse_fetchindex`](@ref) streams the same fragments as a `text/event-stream`
+on any `IO`, and [`htmx_sse_container`](@ref) renders the client side. The
+page needs htmx's sse extension (`htmx-ext-sse`).
+
+```julia
+@htmx struct Routes
+    @get start(; key) = htmx_sse_container(query_url(__self__ / "run"; key))
+
+    # `__sse__` is the open event stream: headers already written.
+    @sse run(; key) = sse_fetchindex(__sse__, app.results, key;
+                                     label="Computing '$key'") do rv
+        render_result(rv)
+    end
+end
+```
+
+The contract with the caller, who owns the response:
+
+- `io` is an open event stream whose headers the caller has already written.
+  Treebars never writes headers, never closes or `closewrite`s `io`, and never
+  sends keep-alive comments.
+- Each frame is exactly one `write(io, frame::String)`: `event: <name>`, one
+  `data:` line per line of HTML, then a blank line. A caller that serialises
+  writes (e.g. against its own heartbeat) therefore never sees a frame split.
+- Running frames are `event: progress`; the single terminal frame, success or
+  failure, is `event: done`. Nothing is written after it.
+- A write that throws means the client disconnected: the stream stops quietly
+  and the compute runs on. `sse_fetchindex` returns `nothing` either way.
+
+The markup is the WebSocket markup without swap-by-id. The wrapper carries
+`hx-ext="sse" sse-connect=URL sse-close="done"`; every running inner carries
+`sse-swap="progress,done" hx-swap="outerHTML" hx-target="this"` (the explicit
+target keeps an `hx-target` inherited from further up the page from
+redirecting the swap); the terminal `.treebar-terminal-content` carries none of
+them, so it stops listening, and `sse-close="done"` closes the EventSource so
+the browser does not reconnect and run the stream again. htmx's sse extension
+closes the EventSource when its `sse-connect` element leaves the DOM, so frames
+never replace the wrapper. Pause holds back `progress` frames, never `done`.
+
+For a progress node you manage yourself, [`sse_progress`](@ref)`(io, node;
+render, event="progress")` is the loop underneath: it needs no extension at
+all, streams `render(node)` (which may span lines) until the node is terminal
+or the optional `done` handle settles, and sends the terminal state last.
+
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides

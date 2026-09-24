@@ -227,6 +227,9 @@ tree) as `.treebar-terminal-content`.
   (`polling_fetchindex(__ws__, ip, keys...) do rv … end`) with
   [`htmx_ws_container`](@ref) on the page: the server pushes a frame whenever
   the tree changes and the result as soon as the compute finishes.
+- **Server-sent events** — [`sse_fetchindex`](@ref)`(__sse__, ip, keys...) do
+  rv … end` with [`htmx_sse_container`](@ref) on the page: the same frames as
+  `event: progress`, then one `event: done`, on any open event-stream `IO`.
 
 Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) once
 per page. See [Backends](backends.md) for the details of each transport.

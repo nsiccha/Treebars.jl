@@ -300,3 +300,62 @@ collide. Needs htmx's ws extension, plus [`htmx_treebar_styles`](@ref) and
 [`htmx_treebar_script`](@ref) on the page.
 """
 function htmx_ws_container end
+
+"""
+    sse_fetchindex(io, render_result, ip, keys...; interval=0.1, force=false, label=nothing, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    sse_fetchindex(io, ip, keys...; kwargs...) do rv … end
+
+Server-sent-event sibling of [`polling_fetchindex`](@ref): the same
+`fetchindex(ip, keys...) do rv, status` dispatch and the same fragments as the
+WebSocket method, streamed on `io` as `text/event-stream` frames. Pair it with
+[`htmx_sse_container`](@ref). Implementation lives in the HTMXObjects package
+extension.
+
+`io` is the open event-stream response, headers already written by the
+caller. Treebars never writes headers, never closes or `closewrite`s `io`, and
+sends no keep-alive comments; each frame is exactly one
+`write(io, frame::String)`, so a caller that serialises its writes never sees
+a frame split.
+
+- While the compute runs, each changed state of the tree is sent as
+  `event: progress` with a running inner (rendered `scoped=false`) that carries
+  `sse-swap="progress,done" hx-swap="outerHTML" hx-target="this"`, so htmx's
+  sse extension swaps it in place of the current inner.
+- Exactly one `event: done` frame ends the stream, success or failure, as soon
+  as the compute finishes. It carries `.treebar-terminal-content` (no
+  `sse-swap`): the rendered result plus, with `keep_progress=true`, the frozen
+  tree; or the failure recorded through HTMXObjects' `safely` (`error_obj` /
+  `req`) beside the tree. Nothing is written after it, and the container's
+  `sse-close="done"` closes the browser's EventSource.
+- If a write throws, the client has gone: the stream stops quietly (logged at
+  `@debug`) and the compute runs on; its value lands in the cache.
+
+Returns `nothing`, so it can be the last expression of a route body whose
+return value would otherwise be sent to the client.
+"""
+function sse_fetchindex end
+
+"""
+    htmx_sse_container(url; placeholder=…)
+
+Client-side markup for a server-sent-event progress stream served by
+[`sse_fetchindex`](@ref). Implementation lives in the HTMXObjects package
+extension.
+
+Renders the persistent `.treebar-poller` wrapper, which also opens the stream,
+and an initial running inner:
+
+```html
+<div class="treebar-poller" hx-ext="sse" sse-connect="URL" sse-close="done" data-paused="0" data-show-…>
+  <button class="treebar-pause" …>Pause</button>
+  <div class="treebar-poller-inner" sse-swap="progress,done" hx-swap="outerHTML" hx-target="this">…placeholder…</div>
+</div>
+```
+
+htmx's sse extension closes the EventSource when its `sse-connect` element
+leaves the DOM, so frames only ever replace the inner. `sse-close="done"`
+closes it after the terminal frame, so the browser does not reconnect and run
+the stream again. Needs htmx's sse extension, plus
+[`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the page.
+"""
+function htmx_sse_container end

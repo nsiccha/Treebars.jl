@@ -1767,3 +1767,170 @@ end
     _release!(key, 3)                   # the compute is still in flight: let it finish
     @test fetchindex((rv, _) -> fetch(rv), app.results, key) == "value-$key"
 end
+
+# ── Push transports: server-sent events ─────────────────────────────────────
+# SSE targets a plain IO. `_RecordingIO` records every `write` call as its own
+# entry — so "one write per frame" is checked directly — and can fail from the
+# `fail_from`-th write on, like a response whose client has gone.
+
+mutable struct _RecordingIO <: IO
+    writes::Vector{String}
+    attempts::Int
+    fail_from::Int
+    on_write::Any          # called with each recorded write
+    lock::ReentrantLock
+end
+_RecordingIO(; fail_from=typemax(Int), on_write=_ -> nothing) =
+    _RecordingIO(String[], 0, fail_from, on_write, ReentrantLock())
+function _record!(io::_RecordingIO, s::String)
+    lock(io.lock) do
+        io.attempts += 1
+        io.attempts >= io.fail_from && throw(Base.IOError("client disconnected", 0))
+        push!(io.writes, s)
+    end
+    io.on_write(s)
+end
+Base.unsafe_write(io::_RecordingIO, p::Ptr{UInt8}, n::UInt) = (_record!(io, unsafe_string(p, n)); Int(n))
+Base.write(io::_RecordingIO, b::UInt8) = (_record!(io, String([b])); 1)
+Base.isopen(::_RecordingIO) = true
+
+# One write → (event, data), checking it is exactly one complete frame.
+function _parse_sse(w::AbstractString)
+    @assert endswith(w, "\n\n") && !occursin("\n\n", w[1:end-2]) "not exactly one frame: $(repr(w))"
+    lines = split(w[1:end-2], '\n')
+    @assert startswith(lines[1], "event: ") && all(startswith("data: "), lines[2:end])
+    (event = lines[1][8:end], data = join((l[7:end] for l in lines[2:end]), '\n'), nlines = length(lines) - 1)
+end
+
+@testset "SSE framing: data lines, event validation" begin
+    @test Treebars._sse_frame("progress", "<p>one</p>") == "event: progress\ndata: <p>one</p>\n\n"
+    # Every line of the payload is its own data line; \r\n and a lone \r are
+    # line breaks too (the SSE parser treats them so).
+    @test Treebars._sse_frame("done", "a\nb\r\nc\rd") == "event: done\ndata: a\ndata: b\ndata: c\ndata: d\n\n"
+    @test Treebars._sse_frame("progress", "") == "event: progress\ndata: \n\n"
+    @test _parse_sse(Treebars._sse_frame("done", "<pre>x\ny</pre>")) == (event="done", data="<pre>x\ny</pre>", nlines=2)
+    @test_throws ArgumentError Treebars._sse_frame("bad\nname", "x")
+    @test_throws ArgumentError Treebars._sse_frame("bad\rname", "x")
+    root = initialize_progress!(:state; description="root")
+    @test_throws ArgumentError sse_progress(_RecordingIO(), root; event="two\nlines")
+    finalize_progress!(root)
+end
+
+@testset "sse_progress: a pending node streams multi-line frames, one write each" begin
+    root = initialize_progress!(:state; description="root")
+    phase = prepare_progress!(root; description="phase")
+    # Multi-line (and \r\n) payloads: each frame must still be ONE write.
+    label(n) = is_pending(n) ? "state: pending\r\nwaiting" :
+               is_running(n) ? "state: running\nmessage: $(n.impl.message)" : "state: terminal\ndone"
+    worker = Threads.@spawn begin
+        sleep(0.15)
+        start_progress!(phase)
+        for i in 1:2
+            update_progress!(phase, "step $i"); sleep(0.06)
+        end
+        finalize_progress!(phase)
+    end
+    io = _RecordingIO()
+    @test sse_progress(io, phase; interval=0.01, render=label) === nothing
+    wait(worker)
+    frames = _parse_sse.(io.writes)          # asserts one complete frame per write
+    @test length(frames) == length(io.writes) == io.attempts
+    @test all(f -> f.event == "progress", frames)
+    @test all(f -> f.nlines == 2, frames)     # two data lines per frame
+    @test first(frames).data == "state: pending\nwaiting"
+    @test any(f -> f.data == "state: running\nmessage: step 2", frames)
+    @test last(frames).data == "state: terminal\ndone"
+    @test count(f -> occursin("pending", f.data), frames) == 1   # not re-sent
+    finalize_progress!(root)
+end
+
+@testset "htmx_sse_container: wrapper opens and closes the stream, inner swaps" begin
+    ext = _tb_ext()
+    html = ext.node_to_html(htmx_sse_container("/sse/run?key=a"))
+    @test startswith(html, "<div class=\"treebar-poller\" hx-ext=\"sse\" sse-connect=\"/sse/run?key=a\" sse-close=\"done\"")
+    for attr in ("data-paused=\"0\"", "data-show-finished=\"0\"", "data-show-pending=\"1\"",
+                 "data-show-failed=\"1\"", "data-show-skipped=\"0\"")
+        @test occursin(attr, html)
+    end
+    @test occursin(r"<div class=\"treebar-poller\"[^>]*><button class=\"treebar-pause\"[^>]*>Pause</button><div class=\"treebar-poller-inner\" sse-swap=\"progress,done\" hx-swap=\"outerHTML\" hx-target=\"this\">", html)
+    css = ext.node_to_html(htmx_treebar_styles())
+    @test occursin(".treebar-poller[sse-connect]:has(> .treebar-poller-inner) > .treebar-pause", css)
+end
+
+@testset "sse_fetchindex: progress frames, then exactly one done, last" begin
+    app = _StreamFixture()
+    key = "sse-ok-$(rand(UInt32))"
+    # Release one compute step per progress frame written.
+    io = _RecordingIO(on_write = w -> startswith(w, "event: progress") && _release!(key))
+    @test sse_fetchindex(io, app.results, key; interval=0.01) do rv
+        h.pre("result: $rv\nsecond line")
+    end === nothing
+    frames = _parse_sse.(io.writes)
+    @test length(frames) == length(io.writes)       # one write per frame
+    events = [f.event for f in frames]
+    @test count(==("done"), events) == 1 && last(events) == "done"
+    @test all(==("progress"), events[1:end-1]) && length(events) >= 2
+    for f in frames[1:end-1]
+        @test startswith(f.data, "<div class=\"treebar-poller-inner\" sse-swap=\"progress,done\" hx-swap=\"outerHTML\" hx-target=\"this\">")
+        @test !occursin("data-show-", f.data)                # scoped=false
+        @test !occursin("class=\"treebar-poller\"", f.data)  # never the wrapper
+    end
+    @test any(f -> occursin("Streaming $key", f.data), frames[1:end-1])
+    done = last(frames).data
+    top = match(r"^<[^>]*>", done).match
+    @test top == "<div class=\"treebar-terminal-content\">"   # neither sse-swap nor hx-swap
+    @test occursin("result: value-$key\nsecond line", done)   # a multi-line payload survives
+    @test last(frames).nlines >= 2
+    @test occursin("<details class=\"treebar-frozen\"><summary>Progress</summary>", done)
+
+    # Already computed: the one and only frame is `done`.
+    io2 = _RecordingIO()
+    sse_fetchindex(rv -> h.p("again: $rv"), io2, app.results, key)
+    @test [f.event for f in _parse_sse.(io2.writes)] == ["done"]
+    @test occursin("again: value-$key", only(io2.writes))
+end
+
+@testset "sse_fetchindex: failure frame and keep_progress=false" begin
+    app = _StreamFixture()
+    key = "sse-boom-$(rand(UInt32))"
+    io = _RecordingIO(on_write = w -> startswith(w, "event: progress") && _release!(key))
+    _quietly() do
+        sse_fetchindex(rv -> h.p("result: $rv"), io, app.results, key; interval=0.01)
+    end
+    frames = _parse_sse.(io.writes)
+    @test count(f -> f.event == "done", frames) == 1 && last(frames).event == "done"
+    done = last(frames).data
+    @test startswith(done, "<div class=\"treebar-terminal-content\">")
+    @test occursin("aria-invalid", done)
+    @test occursin("<details class=\"treebar-frozen\" open", done)
+
+    # Already failed: fetchindex rethrows before the callback; one done frame.
+    io2 = _RecordingIO()
+    _quietly(() -> sse_fetchindex(rv -> h.p("result: $rv"), io2, app.results, key))
+    @test [f.event for f in _parse_sse.(io2.writes)] == ["done"]
+    @test occursin("aria-invalid", only(io2.writes)) && occursin("treebar-frozen", only(io2.writes))
+
+    io3 = _RecordingIO()
+    _quietly(() -> sse_fetchindex(rv -> h.p("result: $rv"), io3, app.results, key; keep_progress=false))
+    @test occursin("aria-invalid", only(io3.writes)) && !occursin("treebar-frozen", only(io3.writes))
+end
+
+@testset "sse_fetchindex: a throwing write ends the stream quietly, compute runs on" begin
+    app = _StreamFixture()
+    key = "sse-gone-$(rand(UInt32))"
+    # The first frame gets through (and lets the compute take a step, so there
+    # is a change to send); the second write throws: the client has gone.
+    io = _RecordingIO(fail_from = 2, on_write = _ -> _release!(key))
+    returned = try
+        sse_fetchindex(rv -> h.p("result: $rv"), io, app.results, key; interval=0.01)
+        :returned
+    catch err
+        err
+    end
+    @test returned === :returned
+    @test io.attempts == 2 && length(io.writes) == 1
+    @test _parse_sse(only(io.writes)).event == "progress"
+    _release!(key, 2)                   # the compute is still in flight: let it finish
+    @test fetchindex((rv, _) -> fetch(rv), app.results, key) == "value-$key"
+    @test io.attempts == 2              # nothing was written after the failed write
+end

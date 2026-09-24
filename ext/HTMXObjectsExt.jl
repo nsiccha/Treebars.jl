@@ -4,6 +4,7 @@ import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, polling_fetchindex, htmx_ws_container, _stream_frames, _ws_emit,
+    sse_fetchindex, htmx_sse_container, _sse_emit,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
 import Dates
@@ -811,7 +812,7 @@ polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kw
 
 # --- Push transports ---------------------------------------------------------
 #
-# WebSocket (and, below, SSE) streams reuse the polling design: a persistent
+# WebSocket and SSE streams reuse the polling design: a persistent
 # `.treebar-poller` wrapper that frames never replace (so its pill toggles,
 # Pause state and the connection it carries survive), holding one
 # `.treebar-poller-inner` child that each running frame replaces, until the
@@ -986,5 +987,40 @@ polling_fetchindex(::WebSocket, ::WebSocket, ip, keys...; kwargs...) = _misorder
 polling_fetchindex(::HTMXObjects.DynamicObjects.IndexableProperty, ::WebSocket, ip, keys...; kwargs...) = _misordered_ws()
 _misordered_ws() = throw(ArgumentError(
     "polling_fetchindex: pass the WebSocket, then render_result (or use `do` syntax), the IndexableProperty and its keys"))
+
+# --- Server-sent events ------------------------------------------------------
+#
+# The same frames as the WebSocket transport, without swap-by-id: htmx's sse
+# extension swaps an element on the events named in its `sse-swap`, so every
+# running inner carries that (and its own target, so an inherited `hx-target`
+# further up the page cannot redirect the swap), while the terminal content
+# carries none and so stops listening — as the polling terminal content drops
+# `hx-trigger`.
+struct _SSEFrames
+    io::IO
+end
+_sse_inner(content...) = h.div(class="treebar-poller-inner",
+    sse_swap="progress,done", hx_swap="outerHTML", hx_target="this")(content...)
+_running_frame(::_SSEFrames, body) = node_to_html(_sse_inner(body))
+_terminal_frame(::_SSEFrames, body...) = node_to_html(_polling_inner_done(body...))
+_send_progress(t::_SSEFrames, frame) = _sse_emit(t.io, "progress", frame)
+_send_done(t::_SSEFrames, frame) = _sse_emit(t.io, "done", frame)
+
+htmx_sse_container(url; placeholder=_connecting()) =
+    _live_wrap(_sse_inner(placeholder); hx_ext="sse", sse_connect=string(url), sse_close="done")
+
+function sse_fetchindex(io::IO, render_result, ip, keys...; interval=0.1, force=false, label=nothing,
+        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    _stream_fetchindex(_SSEFrames(io), render_result, ip, keys...;
+        interval, force, label, keep_progress, error_obj, req, kwargs...)
+end
+sse_fetchindex(io::IO, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
+    sse_fetchindex(io, identity, ip, keys...; kwargs...)
+# `do` syntax passes the block first.
+sse_fetchindex(render_result, io::IO, ip, keys...; kwargs...) =
+    sse_fetchindex(io, render_result, ip, keys...; kwargs...)
+# Tie-breaker for the overlap of the two methods above.
+sse_fetchindex(::IO, ::IO, ip, keys...; kwargs...) = throw(ArgumentError(
+    "sse_fetchindex: pass the stream, then render_result (or use `do` syntax), the IndexableProperty and its keys"))
 
 end

@@ -92,6 +92,7 @@ include("docstring.jl")
 include("autocleanup.jl")
 include("pills.jl")
 include("websockets.jl")
+include("sse.jl")
 
 @dynamicstruct struct AppData
     async       = AsyncComputationsData()
@@ -101,6 +102,7 @@ include("websockets.jl")
     autocleanup = AutocleanupData()
     pills       = PillDemosData()
     websockets  = WebSocketsData()
+    sse         = SSEData()
 end
 
 const APPDATA = AppData()
@@ -128,13 +130,14 @@ const APPDATA = AppData()
     @include autocleanup = AutocleanupRoutes()
     @include pills       = PillDemosRoutes()
     @include websockets  = WebSocketsRoutes()
+    @include sse         = SSERoutes()
 
     @get index() = h.div(
         h.h1("Treebars Web Demo"),
         h.p(h.a(href="/tests")("Tests"), " | ",
             h.a(href="/pills")("Pill demos"), " | ",
             h.a(href="/autocleanup")("Auto-cleanup demo"),
-            " | HTTP polling, WebSockets, inline child substatus, phase markers."),
+            " | HTTP polling, WebSockets, server-sent events, inline child substatus, phase markers."),
 
         h.hr(),
         h.h3("0. @progress phase markers + pending state"),
@@ -238,6 +241,25 @@ const APPDATA = AppData()
                 h.div(; id="doc-param-right"),
             ),
         ),
+
+        h.hr(),
+        h.h3("5. Server-sent events"),
+        h.p("The same frames as the WebSocket demo over an event stream: ", h.code("htmx_sse_container"),
+            " opens it, ", h.code("sse_fetchindex"), " sends ", h.code("progress"),
+            " events while computing and one ", h.code("done"), " event at the end, which also closes it.";
+            class="u-text-sm u-text-muted"),
+        h.form(; hx_get = __self__ / "sse/start",
+                 hx_target = "#sse-runs", hx_swap = "afterbegin")(
+            h.fieldset(; role="group")(
+                h.input(; type="text", name="key", value="sse-demo", placeholder="Key"),
+                h.input(; type="number", name="n_steps", value="200", placeholder="Steps", class="tb-input-narrow"),
+                h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
+                h.button("Run (SSE)"; type="submit"),
+            ),
+            h.label(h.input(; type="checkbox", name="fail", value="true"), " fail midway"),
+            h.label(h.input(; type="checkbox", name="force", value="true"), " force recompute"),
+        ),
+        h.div(; id="sse-runs"),
     )
 end
 
