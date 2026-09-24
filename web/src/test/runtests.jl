@@ -6,6 +6,7 @@ using Treebars
 using Dates
 
 include("busy_retry.jl")
+include("board.jl")
 
 # Defined at module scope (required for @dynamicstruct type definitions)
 @dynamicstruct struct _InlineSubTest
@@ -1047,14 +1048,14 @@ end
     # Treebars.fail_progress! (which does NOT detach transient nodes) so the
     # failed substatus stays pinned to the tree for inspection until the user
     # retries the key (which triggers DO's retry_failed cleanup).
-    app = _FailedSubstatusTest(; cache_type=:parallel)
-    t = Threads.@spawn app.results[:boom]
+    app = _FailedSubstatusTest()
+    t = Threads.@spawn app.results(:boom)
     try; wait(t); catch; end
     @test istaskdone(t) && istaskfailed(t)
 
     children = app.__status__.children
     @test length(children) == 1
-    @test is_failed(children[1])
+    @test is_failed(first(children))
 
     finalize_progress!(app.__status__)
 end
@@ -1065,31 +1066,33 @@ end
     # `_default_substatus` now passes transient=true, so finalize_progress!
     # (called by the auto-generated @progress wrapper around the property body)
     # detaches each substatus from the root tree on success.
-    app = _AutoCleanupTest(; cache_type=:parallel)
+    app = _AutoCleanupTest()
     @test length(app.__status__.children) == 0
 
     n_keys = 8
-    tasks = [Threads.@spawn(app.results[k]) for k in 1:n_keys]
+    tasks = [Threads.@spawn(app.results(k)) for k in 1:n_keys]
     for t in tasks; wait(t); end
 
     # All tasks finished → all substatus nodes should be detached
     @test length(app.__status__.children) == 0
     # And the actual cached results are still there
-    @test all(app.results[k] == 2k for k in 1:n_keys)
+    @test all(app.results(k) == 2k for k in 1:n_keys)
 
     finalize_progress!(app.__status__)
 end
 
 @testset "@dynamicstruct inline child substatus" begin
-    p = _InlineSubTest(; cache_type=:parallel)
+    # DynamicObjects dropped `cache_type` (its cache is always threadsafe), so
+    # there is no cache flavour left for the child to inherit.
+    p = _InlineSubTest()
     # Accessing p.InlineSub triggers construction with __status__ = substatus scoped to :InlineSub
     child_status = p.InlineSub.__status__
     @test child_status isa Treebars.ProgressNode
     # Child's status is a child of the parent's root status
     @test child_status.parent === p.__status__
-    @test child_status.impl.description == "InlineSub[]"
-    # Inline child inherits cache_type from parent
-    @test p.InlineSub.__cache_type__ == p.__cache_type__
+    # DynamicObjects labels only documented properties; an undocumented inline
+    # child's substatus is a bare wrapper (empty description) the renderer inlines.
+    @test child_status.impl.description == ""
     finalize_progress!(p.__status__)
 end
 
@@ -1115,14 +1118,17 @@ end
 
     # Concurrent poller that reads the tree while it's being mutated
     poll_count = Threads.Atomic{Int}(0)
+    # Reads at least once: on a fast machine every worker can finish before
+    # the poller is first scheduled, which made `poll_count > 0` flaky.
     poller = Threads.@spawn begin
-        while any(!istaskdone, workers)
+        while true
             try
                 Treebars.progress_state(root)
                 Threads.atomic_add!(poll_count, 1)
             catch e
                 Threads.atomic_add!(errors, 1)
             end
+            any(!istaskdone, workers) || break
             yield()
         end
     end

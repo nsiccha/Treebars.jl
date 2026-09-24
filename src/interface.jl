@@ -210,6 +210,9 @@ Running `.treebar-duration` spans advance their displayed elapsed time every
 Pause handling and terminalizes a completed poller's persistent wrapper from
 `.treebar-poller` to `.treebar-terminal`. Terminal nodes keep the
 server-rendered duration text and skipped nodes carry no duration.
+It is also the keyed reconciler behind [`htmx_render_board`](@ref): board
+polls, WebSocket frames and `window.treebarUpdateBoard(html)` update items in
+place by key instead of replacing the board.
 Implementation lives in the HTMXObjects package extension.
 
 Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
@@ -359,3 +362,91 @@ the stream again. Needs htmx's sse extension, plus
 [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the page.
 """
 function htmx_sse_container end
+
+"""
+    htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
+                      empty="No running jobs.", id="treebar-board",
+                      linger_ms=3000, expanded=false, live=poll_url !== nothing)
+
+Render a keyed, changing collection of progress trees — a live "running jobs"
+board — as an HTMX `Node`. Implementation lives in the HTMXObjects package
+extension. The board is generic: it knows nothing about where its entries come
+from.
+
+`entries` is a vector of NamedTuples (any object with these properties works):
+
+```julia
+(; key, label, state, elapsed_ms, node=nothing, meta=(), href=nothing)
+```
+
+- `key` — stable identity; the client matches items across updates by it.
+  The first entry with a given key wins.
+- `label` — the item's heading.
+- `state` — `:queued`, `:running`, `:done` or `:failed`. A queued item renders
+  dim like a pending node, reading "queued · #3" when `meta` carries a
+  `position`.
+- `elapsed_ms` — time so far (running) or total (done/failed); a running item's
+  header ticks locally between updates.
+- `node` — optional [`ProgressNode`](@ref), rendered with [`htmx_render`](@ref)
+  in a collapsible `<details>` under the header (open when `expanded`).
+- `meta` — small label/value pairs (a NamedTuple, `Dict` or vector of Pairs)
+  shown under the header: route, polls, "unwatched" => "12s", …
+- `href` — optional link for the label (the job's own poller or result).
+
+Each entry becomes a `.treebar-board-item[data-treebar-key]` wrapper that holds
+its UI state — tree expansion (`data-open`) and pill toggles (`data-show-*`) —
+exactly as `.treebar-poller` does, around a `.treebar-board-item-content` the
+client replaces on every update.
+
+Every update carries the full current list. With `poll_url`, a
+`.treebar-board-poll` element fetches it every `poll_interval`, and
+[`htmx_treebar_script`](@ref) reconciles the response by key instead of letting
+htmx replace the board: existing items update in place (wrappers untouched), new
+items are inserted in server order, and items that leave the list show their
+final state for `linger_ms` (overridable per item with `data-treebar-linger-ms`)
+and are then removed; an item that leaves while still queued or running reads
+"ended". A `:done`/`:failed` entry stays as long as the server lists it, so list
+finished entries for a moment to show their outcome — or keep listing them for
+a history board. Without the script, the poll falls back to replacing the whole
+board. Full snapshots are idempotent, survive dropped polls and need no
+per-client state on the server.
+
+The header shows the running/queued counts and, when `live`, a Pause button
+(same mechanism as the poller's): a paused board issues no polls, drops pushed
+frames, freezes its clocks and keeps lingering items. `empty` is shown while the
+list is empty. `id` must be a valid CSS id; the reconciler matches updates to
+the live board by it. For WebSocket push see [`ws_board`](@ref).
+
+Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
+page.
+"""
+function htmx_render_board end
+
+"""
+    htmx_ws_render_board(entries; id="treebar-board", kwargs...)
+
+[`htmx_render_board`](@ref) as an HTML string for a WebSocket frame: no poll
+element, Pause shown. The client script reconciles each frame into the live
+board with the same `id` (the htmx `ws` extension's `htmx:wsBeforeMessage`),
+exactly as it does poll responses. For other transports (SSE, a hand-written
+socket) call `window.treebarUpdateBoard(html)` with the frame.
+"""
+function htmx_ws_render_board end
+
+"""
+    ws_board(ws, entries; interval=1.0, until=() -> false, kwargs...)
+
+WebSocket variant of a polled [`htmx_render_board`](@ref), mirroring
+[`ws_progress`](@ref): every `interval` seconds, call the zero-argument
+function `entries()` and push the full board snapshot
+([`htmx_ws_render_board`](@ref), `kwargs...` forwarded) until the client goes
+away or `until()` returns `true` (one final frame is sent then). The page renders
+the initial board with the same `id` inside the `ws-connect` element:
+
+```julia
+h.div(hx_ext="ws", ws_connect="/ws/jobs")(htmx_render_board(entries(); live=true))
+```
+
+Implementation lives in the HTMXObjects package extension (with HTTP).
+"""
+ws_board(ws, entries; kwargs...) = error("No implementation loaded for ws_board. Load HTMXObjects and HTTP to enable WebSocket boards.")

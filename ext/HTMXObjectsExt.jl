@@ -3,7 +3,7 @@ import HTMXObjects
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
-    ws_progress, polling_fetchindex, htmx_ws_container, _stream_frames, _ws_emit,
+    ws_progress, polling_fetchindex, htmx_render_board, htmx_ws_render_board, ws_board, htmx_ws_container, _stream_frames, _ws_emit,
     sse_fetchindex, htmx_sse_container, _sse_emit,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
@@ -152,14 +152,14 @@ htmx_treebar_styles() = h.style(Raw("""
    construction. Only scopes that actually carry the data-show-* attribute set
    the var, so a scopeless inner .treebar-children (scoped=false inside a
    poller) is transparent to inheritance: the poller's value passes through. */
-.treebar-poller[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
-.treebar-poller[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
-.treebar-poller[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
-.treebar-poller[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
-.treebar-poller[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
-.treebar-poller[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
-.treebar-poller[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
-.treebar-poller[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
+.treebar-poller[data-show-finished="0"], .treebar-board-item[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
+.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
+.treebar-poller[data-show-failed="0"], .treebar-board-item[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
+.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
+.treebar-poller[data-show-pending="0"], .treebar-board-item[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
+.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
+.treebar-poller[data-show-skipped="0"], .treebar-board-item[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
+.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
 .treebar-child-finished { display: var(--tb-finished-display, block); }
 .treebar-child-failed { display: var(--tb-failed-display, block); }
 .treebar-child-pending { display: var(--tb-pending-display, block); }
@@ -167,14 +167,52 @@ htmx_treebar_styles() = h.style(Raw("""
 
 /* Active-pill highlight, same nearest-scope-wins inheritance so a nested
    poller's pills reflect that poller's own toggle, not an ancestor's. */
-.treebar-poller[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
-.treebar-poller[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
-.treebar-poller[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
-.treebar-poller[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
+.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
+.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
+.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
+.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
 .treebar-pill-finished { border-color: var(--tb-finished-pill-border, transparent); }
 .treebar-pill-failed { border-color: var(--tb-failed-pill-border, transparent); }
 .treebar-pill-pending { border-color: var(--tb-pending-pill-border, transparent); }
 .treebar-pill-skipped { border-color: var(--tb-skipped-pill-border, transparent); }
+
+/* Keyed board (htmx_render_board). The .treebar-board-item wrapper is never
+   replaced by the client reconciler — only its .treebar-board-item-content —
+   so UI state on it (data-show-* pill toggles above, data-open for the tree)
+   survives updates exactly like the .treebar-poller wrapper does. */
+.treebar-board-header { display: flex; gap: 0.5rem; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.treebar-board-count { font-size: 0.85em; color: var(--pico-muted-color, #888); }
+.treebar-board-pause {
+    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
+    width: auto; cursor: pointer;
+}
+.treebar-board-list { display: flex; flex-direction: column; gap: 0.4rem; }
+.treebar-board-item {
+    min-width: 0;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid color-mix(in srgb, var(--pico-muted-color, #888) 45%, transparent);
+    border-radius: 0.25rem;
+    background: color-mix(in srgb, var(--pico-muted-color, #888) 7%, transparent);
+    transition: opacity 0.3s;
+}
+.treebar-board-item[data-treebar-state="running"] { border-left-color: var(--pico-primary, #1095c1); }
+.treebar-board-item[data-treebar-state="done"] { border-left-color: var(--pico-ins-color, #2e7d32); }
+.treebar-board-item[data-treebar-state="failed"] { border-left-color: var(--pico-del-color, #c62828); }
+/* Queued renders like a pending node: dim, not yet started. */
+.treebar-board-item[data-treebar-state="queued"] { opacity: 0.55; }
+.treebar-board-item.treebar-board-leaving { opacity: 0.45; }
+.treebar-board-item-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; overflow-wrap: anywhere; }
+.treebar-board-label { font-weight: 600; }
+.treebar-board-meta {
+    display: flex; flex-wrap: wrap; gap: 0 0.9rem; width: 100%;
+    font-size: 0.8em; color: var(--pico-muted-color, #888);
+}
+.treebar-board-meta-key { opacity: 0.75; }
+.treebar-board-tree { margin: 0.25rem 0 0; }
+.treebar-board-tree > summary { cursor: pointer; font-size: 0.8em; color: var(--pico-muted-color, #888); }
+.treebar-board-tree > .treebar-node { margin-top: 0.25rem; }
+.treebar-board-empty { margin: 0; color: var(--pico-muted-color, #888); }
+.treebar-board-empty[hidden] { display: none; }
 
 /* Demo helpers */
 .tb-input-narrow { max-width: 6rem; }
@@ -182,9 +220,11 @@ htmx_treebar_styles() = h.style(Raw("""
 """))
 
 # Client-side duration ticker. Anchors each running .treebar-duration on first
-# sight (and re-anchors after every htmx swap, since data-elapsed-ms comes back
-# fresh from the server) then ticks textContent every 250ms locally — so the
-# counter advances smoothly between server polls instead of stuttering.
+# sight (and re-anchors the spans a swap delivers, since their data-elapsed-ms
+# comes back fresh from the server) then ticks textContent every 100ms locally —
+# so the counter advances smoothly between server polls instead of stuttering.
+# The same script owns poller Pause/terminalization and the keyed board
+# reconciler (`htmx_render_board`).
 htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
@@ -217,6 +257,7 @@ htmx_treebar_script() = h.script(Raw("""
         var ms = parseInt(el.dataset.elapsedMs, 10);
         if (isNaN(ms)) ms = 0;
         el._tbAnchor = Date.now() - ms;
+        el._tbAnchoredFrom = el.dataset.elapsedMs;
         el._tbLast = undefined;
         // ETA (running determinate nodes only): anchor an ABSOLUTE finish target
         // so the estimate counts down smoothly between polls; each server poll
@@ -236,6 +277,9 @@ htmx_treebar_script() = h.script(Raw("""
         // cancel) and the next server poll re-anchors.
         var p = el.closest('.treebar-poller');
         if (p && p.dataset.paused === '1') return;
+        // Same for a paused board (htmx_render_board): pause freezes it whole.
+        var b = el.closest('.treebar-board');
+        if (b && b.dataset.paused === '1') return;
         if (el._tbAnchor === undefined) anchor(el);
         var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
         // A determinate node also counts its ETA down (fmt clamps negatives to
@@ -262,8 +306,16 @@ htmx_treebar_script() = h.script(Raw("""
         if (pause) pause.remove();
         p._tbHeld = undefined;
     }
+    // Re-anchor only spans whose server value changed (or that are new). A swap
+    // replaces the spans it delivers, so fresh ones anchor from their own
+    // data-elapsed-ms; a span the swap did NOT touch keeps its anchor. Blindly
+    // re-reading every span on every swap would reset an untouched span (a
+    // board item between its 1s polls, a sibling poller) back to the
+    // server value it was rendered with, so it would jump backwards.
     function reanchorAll(){
-        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
+        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(function(el){
+            if (el._tbAnchor === undefined || el._tbAnchoredFrom !== el.dataset.elapsedMs) anchor(el);
+        });
     }
     function tickAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
@@ -280,6 +332,155 @@ htmx_treebar_script() = h.script(Raw("""
         var id = frameId(evt.detail && evt.detail.message);
         if (id) terminalize(document.getElementById(id));
     });
+
+    // --- Keyed board (htmx_render_board) -----------------------------------
+    // Every update — a poll response, a WebSocket frame, treebarUpdateBoard —
+    // carries the FULL current list, so reconciling is idempotent and a dropped
+    // update costs nothing. Items are matched by data-treebar-key: an existing
+    // item keeps its wrapper (and the UI state on it) and swaps only its
+    // .treebar-board-item-content; a new item is inserted in server order; an
+    // item that left the list shows its final state for the board's linger
+    // time and is then removed. The server decides how long a done/failed item
+    // stays listed, so a board can also hold recent history.
+    function isTerminalState(s){ return s === 'done' || s === 'failed' || s === 'ended'; }
+    function boardList(board){ return board.querySelector(':scope > .treebar-board-list'); }
+    function boardItems(list){
+        return Array.prototype.filter.call(list.children, function(c){
+            return c.classList.contains('treebar-board-item');
+        });
+    }
+    function boardEmpty(board){
+        var list = boardList(board), empty = board.querySelector(':scope > .treebar-board-empty');
+        if (list && empty) empty.hidden = boardItems(list).length > 0;
+    }
+    function boardLinger(board, item){
+        var ms = parseInt(item.dataset.treebarLingerMs || board.dataset.treebarLingerMs, 10);
+        return isNaN(ms) ? 3000 : Math.max(0, ms);
+    }
+    function scheduleLeave(board, item){
+        if (item._tbLeave) return;
+        var leave = function(){
+            // A paused board is frozen: lingering items wait for Resume.
+            if (board.dataset.paused === '1'){ item._tbLeave = setTimeout(leave, 250); return; }
+            item.remove();
+            boardEmpty(board);
+        };
+        item._tbLeave = setTimeout(leave, boardLinger(board, item));
+    }
+    function cancelLeave(item){
+        if (!item._tbLeave) return;
+        clearTimeout(item._tbLeave);
+        item._tbLeave = null;
+        item.classList.remove('treebar-board-leaving');
+    }
+    // An item that left the list lingers, then leaves. If the server never
+    // showed it terminal it ends where it stands: clocks freeze, it reads
+    // "ended".
+    function endItem(board, item){
+        if (!isTerminalState(item.dataset.treebarState)){
+            item.dataset.treebarState = 'ended';
+            var hd = item.querySelector('.treebar-board-duration');
+            if (hd){
+                var ms = hd._tbAnchor !== undefined ? Date.now() - hd._tbAnchor : parseInt(hd.dataset.elapsedMs, 10) || 0;
+                hd.dataset.treebarStatus = 'ended';
+                hd.textContent = ' — ended (' + fmt(ms) + ')';
+            }
+            var tree = item.querySelector('.treebar-board-tree');
+            if (tree) tree.classList.add('treebar-frozen');
+        }
+        item.classList.add('treebar-board-leaving');
+        scheduleLeave(board, item);
+    }
+    function updateItem(item, next){
+        var content = next.querySelector(':scope > .treebar-board-item-content');
+        if (!content) return;
+        content = document.importNode(content, true);
+        // The tree's expanded state belongs to the wrapper, not the response.
+        var tree = content.querySelector(':scope > .treebar-board-tree');
+        if (tree) tree.open = item.dataset.open === '1';
+        var old = item.querySelector(':scope > .treebar-board-item-content');
+        old ? item.replaceChild(content, old) : item.appendChild(content);
+        ['treebarState', 'treebarLingerMs'].forEach(function(k){
+            if (next.dataset[k] === undefined) delete item.dataset[k]; else item.dataset[k] = next.dataset[k];
+        });
+        if (window.htmx) htmx.process(content);
+    }
+    function reconcileBoard(board, incoming){
+        var list = boardList(board), next = boardList(incoming);
+        if (!list || !next) return;
+        var live = {}, seen = {}, prev = null;
+        boardItems(list).forEach(function(it){ live[it.dataset.treebarKey] = it; });
+        boardItems(next).forEach(function(n){
+            var key = n.dataset.treebarKey, state = n.dataset.treebarState, item = live[key];
+            seen[key] = true;
+            if (!item){
+                item = document.importNode(n, true);
+                if (window.htmx) htmx.process(item);
+            } else {
+                // Listed again after dropping out (a flapping filter): it stays.
+                cancelLeave(item);
+                updateItem(item, n);
+            }
+            var at = prev ? prev.nextSibling : list.firstChild;
+            if (item !== at) list.insertBefore(item, at);
+            prev = item;
+        });
+        Object.keys(live).forEach(function(key){ if (!seen[key]) endItem(board, live[key]); });
+        var count = board.querySelector(':scope > .treebar-board-header > .treebar-board-count');
+        var ncount = incoming.querySelector(':scope > .treebar-board-header > .treebar-board-count');
+        if (count && ncount) count.replaceWith(document.importNode(ncount, true));
+        boardEmpty(board);
+        reanchorAll(); tickAll();
+    }
+    function parseBoards(html){
+        if (typeof html !== 'string' || html.indexOf('treebar-board') === -1) return [];
+        var t = document.createElement('template');
+        t.innerHTML = html;
+        return Array.prototype.slice.call(t.content.querySelectorAll('.treebar-board'));
+    }
+    // Apply every board in `html` to the live board with the same id; returns
+    // how many were applied (or dropped because that board is paused). The
+    // single client entry point for any transport — polls and htmx WebSocket
+    // frames route through it; SSE or custom sockets can call it directly.
+    function updateBoards(html){
+        var n = 0;
+        parseBoards(html).forEach(function(incoming){
+            var board = incoming.id && document.getElementById(incoming.id);
+            if (!board || !board.classList.contains('treebar-board')) return;
+            n += 1;
+            if (board.dataset.paused !== '1') reconcileBoard(board, incoming);
+        });
+        return n;
+    }
+    window.treebarUpdateBoard = updateBoards;
+    // Board polls: htmx would replace the board (the no-script fallback the
+    // poll element's hx-target/hx-select describe); hand the response to the
+    // reconciler instead.
+    document.addEventListener('htmx:beforeSwap', function(evt){
+        var d = evt.detail || {};
+        if (!d.shouldSwap) return;
+        // detail.elt is the swap TARGET here; the requester is on requestConfig.
+        var el = (d.requestConfig && d.requestConfig.elt) || d.elt;
+        var board = el && el.classList && el.classList.contains('treebar-board-poll') ?
+            el.closest('.treebar-board') : d.target;
+        if (!board || !board.classList || !board.classList.contains('treebar-board')) return;
+        d.shouldSwap = false;
+        if (board.dataset.paused === '1') return;
+        var incoming = parseBoards(d.serverResponse).filter(function(b){ return b.id === board.id; })[0];
+        if (incoming) reconcileBoard(board, incoming);
+    });
+    // WebSocket boards (htmx ws extension, see ws_board): same reconciler.
+    document.addEventListener('htmx:wsBeforeMessage', function(evt){
+        if (updateBoards(evt.detail && evt.detail.message) > 0) evt.preventDefault();
+    });
+    // Remember a board item's tree expansion on its wrapper (toggle does not
+    // bubble, hence the capture listener).
+    document.addEventListener('toggle', function(evt){
+        var d = evt.target;
+        if (!d.classList || !d.classList.contains('treebar-board-tree')) return;
+        var item = d.closest('.treebar-board-item');
+        if (item) item.dataset.open = d.open ? '1' : '0';
+    }, true);
     // Pause: cancel a poller's own `every Xs` poll request while its wrapper
     // is data-paused. Scoped to the .treebar-poller-inner element, so the
     // Stop/cancel request (a different element) still fires when paused. The
@@ -291,6 +492,11 @@ htmx_treebar_script() = h.script(Raw("""
         if (el && el.classList.contains('treebar-poller-inner')){
             var p = el.closest('.treebar-poller');
             if (p && p.dataset.paused === '1') evt.preventDefault();
+        }
+        // A board's poll element pauses the same way, keyed on its board.
+        if (el && el.classList.contains('treebar-board-poll')){
+            var b = el.closest('.treebar-board');
+            if (b && b.dataset.paused === '1') evt.preventDefault();
         }
     });
     // Pause for push transports (WebSocket / SSE): there is no request to
@@ -429,12 +635,14 @@ end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
-# Pill onclick: prefer the .treebar-poller (so polling toggles survive across
-# polls); fall back to the closest .treebar-children for static one-shot
-# renders (no poller in scope). The two-step `closest` (rather than a single
-# comma selector) is intentional — `closest('.treebar-poller, .treebar-children')`
-# returns whichever is the closer ancestor, which is always .treebar-children.
-_pill_onclick(key) = """var s = this.closest('.treebar-poller') || this.closest('.treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
+# Pill onclick: prefer the persistent wrapper — a .treebar-poller, or a
+# .treebar-board-item on a board — so toggles survive across updates; fall back
+# to the closest .treebar-children for static one-shot renders (no wrapper in
+# scope). The two-step `closest` (rather than one comma selector over all three)
+# is intentional — `closest('.treebar-poller, .treebar-children')` returns
+# whichever is the closer ancestor, which is always .treebar-children. The two
+# wrappers share one selector: the nearer one governs its own subtree.
+_pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-item') || this.closest('.treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
 
 # Render just the children of a ProgressNode (for top-level substatus display).
 # When `scoped=true` (default) the wrapper carries data-show-* attrs so pills
@@ -558,8 +766,171 @@ of `polling_fetchindex` with `htmx_ws_container` keeps them.
 """
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
+# --- Keyed board ---------------------------------------------------------------
+#
+# A board is a keyed, changing collection of progress trees (a "running jobs"
+# list). The server always renders the FULL current list; the client script
+# (`htmx_treebar_script`) reconciles it into the live board by
+# `data-treebar-key`, so each `.treebar-board-item` wrapper — and the UI state on
+# it — persists while only its content is replaced. See `htmx_render_board` in
+# src/interface.jl for the entry contract.
+
+const _BOARD_STATES = (:queued, :running, :done, :failed)
+
+# Entries are NamedTuples by contract; any object with the same properties works.
+_board_get(entry, name::Symbol, default) =
+    hasproperty(entry, name) ? getproperty(entry, name) : default
+
+# `meta` is a NamedTuple / Dict of label => value, or any iterable of Pairs.
+_board_meta_pairs(meta::Union{NamedTuple,AbstractDict}) = [string(k) => v for (k, v) in pairs(meta)]
+_board_meta_pairs(::Nothing) = Pair{String,Any}[]
+_board_meta_pairs(meta) = [string(first(p)) => last(p) for p in meta]
+
+_board_blank(v) = v === nothing || v === missing || (v isa AbstractString && isempty(v))
+_board_value(v) = v isa Node || v isa AbstractString ? v : string(v)
+
+_board_ms(::Nothing) = 0
+_board_ms(ms::Real) = isfinite(ms) ? max(0, round(Int, ms)) : 0
+_board_ms(p::Dates.Period) = max(0, Dates.value(convert(Millisecond, p)))
+
+# Header duration. The same `.treebar-duration` contract as a tree node, so a
+# running item ticks locally between updates through the existing ticker; the
+# extra class lets the reconciler find the header span when it ends an item.
+# A queued item reads like a pending node — no clock, just its queue position.
+function _board_duration_span(state::Symbol, ms::Int, position)
+    d = short_duration(Millisecond(ms))
+    cls = "treebar-duration treebar-board-duration"
+    if state === :queued
+        text = isnothing(position) ? " — queued" : " — queued · #$(position)"
+        return h.span(class=cls, data_treebar_status="pending")(text)
+    end
+    status, text = state === :running ? ("running", " — $(d) so far") :
+                   state === :done    ? ("finished", " — done ($(d))") :
+                                        ("failed", " — failed ($(d))")
+    h.span(class=cls, data_treebar_status=status, data_elapsed_ms=string(ms))(text)
+end
+
+# The tree collapses under the item header. `scoped=false`: the item wrapper
+# carries the data-show-* pill state, like `.treebar-poller` does. A terminal
+# item's tree is frozen, so a node it still holds as "running" does not tick.
+function _board_tree(node; open::Bool, frozen::Bool)
+    body = node isa ProgressNode ? htmx_render(node; scoped=false) : node
+    cls = frozen ? "treebar-board-tree treebar-frozen" : "treebar-board-tree"
+    open ? h.details(class=cls, open=true)(h.summary("Progress"), body) :
+           h.details(class=cls)(h.summary("Progress"), body)
+end
+
+function _board_item(entry; expanded::Bool)
+    state = Symbol(entry.state)
+    state in _BOARD_STATES || throw(ArgumentError(
+        "board entry state must be one of $(_BOARD_STATES) (got $(repr(entry.state)))"))
+    ms = _board_ms(_board_get(entry, :elapsed_ms, 0))
+    node = _board_get(entry, :node, nothing)
+    href = _board_get(entry, :href, nothing)
+    meta = _board_meta_pairs(_board_get(entry, :meta, ()))
+    # `position` is the queue position a queued item's state text shows; it is
+    # not repeated as a meta item.
+    position = nothing
+    shown = Node[]
+    for (k, v) in meta
+        if k == "position"
+            position = _board_blank(v) ? nothing : v
+            continue
+        end
+        _board_blank(v) && continue
+        push!(shown, h.span(class="treebar-board-meta-item")(
+            h.span(class="treebar-board-meta-key")(k), " ", _board_value(v)))
+    end
+    label = string(entry.label)
+    label_node = isnothing(href) ?
+        h.strong(class="treebar-board-label")(label) :
+        h.a(class="treebar-board-label", href=string(href))(label)
+    h.div(class="treebar-board-item",
+        data_treebar_key=string(entry.key),
+        data_treebar_state=string(state),
+        data_open=expanded ? "1" : "0",
+        data_show_finished="0",
+        data_show_pending="1",
+        data_show_failed="1",
+        data_show_skipped="0")(
+        h.div(class="treebar-board-item-content")(
+            h.div(class="treebar-board-item-header")(
+                label_node,
+                _board_duration_span(state, ms, position),
+                isempty(shown) ? "" : h.div(class="treebar-board-meta")(shown...),
+            ),
+            isnothing(node) ? "" : _board_tree(node; open=expanded, frozen=state in (:done, :failed)),
+        ),
+    )
+end
+
+# Board-level Pause: toggles data-paused on the board; the script then cancels
+# its poll requests, drops pushed frames, freezes its clocks and holds lingering
+# items — the `.treebar-pause` mechanism, keyed on the board.
+_board_pause_button() = h.button(class="treebar-board-pause", type="button",
+    onclick="var b=this.closest('.treebar-board'); if(!b) return; var v=b.dataset.paused==='1'?'0':'1'; b.dataset.paused=v; this.textContent=v==='1'?'Resume':'Pause';")("Pause")
+
+function _board_count(entries)
+    n_running = count(e -> Symbol(e.state) === :running, entries)
+    n_queued = count(e -> Symbol(e.state) === :queued, entries)
+    text = n_queued == 0 ? "$(n_running) running" : "$(n_running) running · $(n_queued) queued"
+    h.span(class="treebar-board-count", data_running=string(n_running),
+           data_queued=string(n_queued))(text)
+end
+
+function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
+        empty="No running jobs.", id="treebar-board", linger_ms::Integer=3000,
+        expanded::Bool=false, live::Bool=!isnothing(poll_url))
+    # First occurrence of a key wins: the client matches items by key, so a
+    # duplicate would make two DOM items fight over one identity.
+    seen = Set{String}()
+    unique_entries = [e for e in entries if !(string(e.key) in seen) && (push!(seen, string(e.key)); true)]
+    items = [_board_item(e; expanded) for e in unique_entries]
+    # The poll element's hx-target/hx-select describe the no-script fallback
+    # (replace the whole board); with `htmx_treebar_script` loaded, the
+    # `htmx:beforeSwap` hook hands the response to the keyed reconciler instead.
+    poller = isnothing(poll_url) ? "" :
+        h.div(class="treebar-board-poll",
+            hx_get=string(poll_url),
+            hx_trigger="every $poll_interval",
+            hx_target="closest .treebar-board",
+            hx_swap="outerHTML",
+            hx_select="#$(id)")()
+    empty_node = isempty(items) ?
+        h.p(class="treebar-board-empty")(empty) :
+        h.p(class="treebar-board-empty", hidden=true)(empty)
+    h.div(class="treebar-board", id=string(id), data_paused="0",
+          data_treebar_linger_ms=string(linger_ms))(
+        h.div(class="treebar-board-header")(
+            _board_count(unique_entries),
+            live ? _board_pause_button() : "",
+        ),
+        h.div(class="treebar-board-list")(items...),
+        empty_node,
+        poller,
+    )
+end
+
+htmx_ws_render_board(entries; kwargs...) =
+    node_to_html(htmx_render_board(entries; live=true, kwargs..., poll_url=nothing))
+
+function ws_board(ws::WebSocket, entries; interval=1.0, until=() -> false, kwargs...)
+    while true
+        stop = until()
+        frame = htmx_ws_render_board(entries(); kwargs...)
+        try
+            send(ws, frame)
+        catch
+            break   # client gone
+        end
+        stop && break
+        sleep(interval)
+    end
+    nothing
+end
+
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, error_obj=nothing, req=nothing, track_job=true, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -614,9 +985,15 @@ naturally — no custom OOB / HX-Retarget gymnastics.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
   (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
   Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
+- `track_job`: when a poller is emitted for in-flight work, report the compute
+  to HTMXObjects' job ledger through `HTMXObjects.track_job!` (with `label`,
+  the progress tree and `req`), so hand-rolled pollers appear on the runtime
+  dashboard and job boards (default `true`). Skipped on HTMXObjects generations
+  without that API; a tracking failure never affects the poller. HTMXObjects'
+  own operation transport passes `false` — it records its jobs itself.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, track_job=true, kwargs...)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -633,6 +1010,10 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     # would discard the tree). keep_progress=false (or sync) re-throws as before.
     try
         fetchindex(ip, keys...; force, kwargs...) do rv, status
+            # About to emit a poller for in-flight work: report it to
+            # HTMXObjects' job ledger (runtime dashboard / job boards).
+            track_job && !sync && _is_unresolved_handle(rv) &&
+                _track_job(rv, status, ip; label, req)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
                              ip_ctx=_ip_ctx(ip, keys, kwargs))
         end
@@ -674,6 +1055,37 @@ _polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_u
     istaskfailed(rv) ? throw(rv.result) :
     sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url)
+
+# Report a hand-rolled poller's in-flight compute to HTMXObjects' job ledger
+# (`HTMXObjects.track_job!`), so it shows on the runtime dashboard and job
+# boards like the operations HTMXObjects starts itself. Guarded twice over: an
+# HTMXObjects generation without the ledger API is skipped, and a ledger
+# failure never reaches the poller. The label never carries the cache keys —
+# they are request data — only the caller's label, the tree's own
+# description, or the property name.
+function _track_job(handle, status, ip; label=nothing, req=nothing)
+    isdefined(HTMXObjects, :track_job!) || return nothing
+    try
+        HTMXObjects.track_job!(handle; label=_track_job_label(label, status, ip),
+                               progress=status, req)
+    catch err
+        @debug "Treebars: job tracking failed; polling continues" exception=(err, catch_backtrace())
+    end
+    nothing
+end
+
+function _track_job_label(label, status, ip)
+    isnothing(label) || return string(label)
+    if status isa ProgressNode{<:StateProgress}
+        description = strip(status.impl.description)
+        isempty(description) || return String(description)
+    end
+    try
+        string(HTMXObjects.DynamicObjects.name(ip))
+    catch
+        "Job"
+    end
+end
 
 # Human-readable "which IP, which key" for the unresolved-handle error below.
 # Best-effort: an IP that does not expose `name`/`o` still yields a usable string.
