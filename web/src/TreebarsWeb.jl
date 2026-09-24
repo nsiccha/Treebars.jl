@@ -2,7 +2,6 @@ module TreebarsWeb
 
 using HTMXObjects
 using Treebars
-import HTTP.WebSockets: send
 using TestModules
 using Random
 
@@ -14,11 +13,12 @@ node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 # features. Kept at module level because the real compute is ambient-independent
 # (no AppData coupling) and four separate features invoke it — a shared
 # module-level function stays DRY without forcing each XData to re-host it.
-function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
+function fake_sampling(progress; n_steps=200, sleep_per_step=0.02, fail_at=nothing)
     child = initialize_progress!(progress, n_steps; description="MCMC", propagates=true)
     result = Float64[]
     x = 0.0
     for i in 1:n_steps
+        i == fail_at && error("Simulated failure at step $i")
         x += randn() * 0.1
         push!(result, x)
         update_progress!(child, i;
@@ -187,16 +187,22 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("2. WebSocket (server push)"),
-        h.p("Server pushes HTML updates over a persistent connection."; class="u-text-sm u-text-muted"),
-        h.div(; hx_ext="ws", ws_connect="/websockets/ws")(
-            h.form(; ws_send="true")(
-                h.fieldset(; role="group")(
-                    h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
-                    h.button("Run (websocket)"; type="submit"),
-                ),
+        h.p("The server pushes a frame whenever the tree changes. Each run gets its own ",
+            h.code("htmx_ws_container"), " (a generated id travels to the socket route in its URL), ",
+            "so runs stack without colliding; pill toggles and Pause persist across frames.";
+            class="u-text-sm u-text-muted"),
+        h.form(; hx_get = __self__ / "websockets/start",
+                 hx_target = "#ws-runs", hx_swap = "afterbegin")(
+            h.fieldset(; role="group")(
+                h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
+                h.input(; type="number", name="n_steps", value="200", placeholder="Steps", class="tb-input-narrow"),
+                h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
+                h.button("Run (websocket)"; type="submit"),
             ),
+            h.label(h.input(; type="checkbox", name="fail", value="true"), " fail midway"),
+            h.label(h.input(; type="checkbox", name="force", value="true"), " force recompute"),
         ),
-        h.div(; id="ws-result"),
+        h.div(; id="ws-runs"),
 
         h.hr(),
         h.h3("3. Inline child substatus"),
@@ -232,24 +238,6 @@ const APPDATA = AppData()
                 h.div(; id="doc-param-right"),
             ),
         ),
-
-        h.hr(),
-        h.h3("5. WebSocket with kwargs"),
-        h.p("Kwargs from query string. Submitting swaps a fresh ", h.code("ws-connect"),
-            " element into the socket container, so htmx opens the connection reliably — ",
-            "mutating ", h.code("ws-connect"), " on an already-processed element does not reconnect.";
-            class="u-text-sm u-text-muted"),
-        h.form(; hx_get = __self__ / "websockets/connect",
-                 hx_target = "#param-ws-container", hx_swap = "innerHTML")(
-            h.fieldset(; role="group")(
-                h.input(; type="text", name="key", value="param-demo", placeholder="Key"),
-                h.input(; type="number", name="n_steps", value="100", placeholder="Steps", class="tb-input-narrow"),
-                h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
-                h.button("Run"; type="submit"),
-            ),
-        ),
-        h.div(; id="param-ws-container", hx_ext="ws"),
-        h.div(; id="ws-param-result"),
     )
 end
 

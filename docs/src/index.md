@@ -28,8 +28,11 @@ parent–child relationships for hierarchical progress tracking.
   renders `StateProgress` trees as HTML with toggle pills, and
   [`polling_fetchindex`](@ref) wraps the entire fetchindex + HTMX polling +
   cancel pattern into a single call.
-- **WebSocket streaming** — when `HTTP` is loaded, [`ws_progress`](@ref) pushes
-  rendered progress over a WebSocket until the node finalises.
+- **WebSocket streaming** — the WebSocket method of
+  [`polling_fetchindex`](@ref), with [`htmx_ws_container`](@ref) on the page,
+  pushes the same fragments over a socket whenever the tree changes. The
+  lower-level [`ws_progress`](@ref) (loaded with `HTTP`) streams any rendering
+  of a node until it is finished, failed or skipped.
 - **Thread-safe** — children and labels are guarded by `ReentrantLock`-backed
   wrappers (`ThreadsafeSet` / `ThreadsafeDict`) so concurrent multi-thread
   progress reporting + polling is safe.

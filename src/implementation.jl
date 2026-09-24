@@ -223,6 +223,8 @@ Lifecycle fields:
 - `finalized_at` — `nothing` while the node is running, set to `now()` by
   [`finalize_progress!`](@ref) or [`fail_progress!`](@ref).
 - `failed` — `true` after [`fail_progress!`](@ref).
+- `version` — bumped by every Treebars mutator (under `lock`), so a push
+  transport can tell an unchanged node from a changed one without rendering it.
 
 Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
 [`is_finished`](@ref), [`is_failed`](@ref), [`is_skipped`](@ref),
@@ -256,9 +258,13 @@ mutable struct StateProgress
     # pre-enumerated and then bypassed.
     started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
     finalized_at::Union{DateTime,Nothing}
+    # Change counter: every mutator below bumps it while holding `lock`, and
+    # readers take `lock` too. A plain field, not `@atomic` — the lock is
+    # already held, so the bump is free, where an atomic store measurably is not.
+    version::Int
     StateProgress(; description="Running...", N=nothing, pending=false) = new(
         ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(),
-        !pending, false, pending ? nothing : now(), nothing
+        !pending, false, pending ? nothing : now(), nothing, 0
     )
 end
 
@@ -465,6 +471,7 @@ function start_progress!(sp::StateProgress)
         if isnothing(sp.started_at)
             sp.started_at = now()
             sp.running = true
+            sp.version += 1
         end
     end
 end
@@ -476,16 +483,19 @@ function update_progress!(sp::StateProgress, i::Integer)
         else
             sp.i = clamp(i, 0, sp.N)
         end
+        sp.version += 1
     end
 end
 function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
     lock(sp.lock) do
         sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
+        sp.version += 1
     end
 end
 function update_progress!(sp::StateProgress, msg::AbstractString)
     lock(sp.lock) do
         sp.message = msg
+        sp.version += 1
     end
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
@@ -497,6 +507,7 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
+        sp.version += 1
     end
 end
 function finalize_progress!(sp::StateProgress)
@@ -505,6 +516,7 @@ function finalize_progress!(sp::StateProgress)
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
+        sp.version += 1
     end
 end
 # Terminate a pending node WITHOUT backfilling `started_at` — the one thing
@@ -516,6 +528,7 @@ function skip_progress!(sp::StateProgress)
         if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.running = false
             sp.finalized_at = now()
+            sp.version += 1
         end
     end
 end

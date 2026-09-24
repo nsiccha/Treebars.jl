@@ -1,4 +1,7 @@
 using TestModules
+# Explicit, so it wins over `Test.@testset` that busy_retry.jl's `using Test`
+# brings in: two `using`-exported `@testset`s are ambiguous and fail to resolve.
+using TestModules: @testset
 using Treebars
 using Dates
 
@@ -1437,4 +1440,330 @@ end
     end
     # One line only: the root. The label-less wrap contributed no row.
     @test length(split(strip(txt2), '\n')) == 1
+end
+
+# ── Push transports: WebSocket ───────────────────────────────────────────────
+# The frame loop (`Treebars._stream_frames`) is exercised directly, with a
+# collecting `emit`; the WebSocket paths over a real local HTTP server and an
+# HTTP.WebSockets client, which works on HTTP.jl 1.x and 2.x alike.
+
+import HTTP
+
+# Each step waits for the test to release it, so a stream can be observed
+# mid-compute without timing races.
+const _STREAM_GATES = Dict{Any,Channel{Nothing}}()
+const _STREAM_GATES_LOCK = ReentrantLock()
+_stream_gate(key) = lock(() -> get!(() -> Channel{Nothing}(Inf), _STREAM_GATES, key), _STREAM_GATES_LOCK)
+_release!(key, n=1) = foreach(_ -> put!(_stream_gate(key), nothing), 1:n)
+
+@dynamicstruct struct _StreamFixture
+    __status__ = initialize_progress!(:state; description="StreamRoot")
+    "Streaming $key"
+    results(key) = begin
+        with_progress(__status__, 3; description="steps") do p
+            for i in 1:3
+                take!(_stream_gate(key))
+                update_progress!(p, i)
+            end
+        end
+        occursin("boom", string(key)) && error("boom: $key")
+        "value-$key"
+    end
+end
+
+_tb_ext() = Base.get_extension(Treebars, :HTMXObjectsExt)
+
+# A WebSocket server on a free port. `listen!` throws synchronously when the
+# port is taken, so random ports plus a retry need neither Sockets nor a
+# version-specific way to ask the server for its port.
+function _listen_ws(handler)
+    for _ in 1:50
+        port = rand(30000:60000)
+        server = try
+            HTTP.WebSockets.listen!(handler, "127.0.0.1", port)
+        catch
+            continue
+        end
+        return server, port
+    end
+    error("no free port for the test WebSocket server")
+end
+
+# Connect, hand every message to `on_message(frame)`, and return all frames.
+# `on_message` returning `:close` disconnects the client right there.
+function _ws_frames(port; on_message=_ -> nothing)
+    frames = String[]
+    HTTP.WebSockets.open("ws://127.0.0.1:$port") do ws
+        for msg in ws
+            push!(frames, String(msg))
+            on_message(last(frames)) === :close && break
+        end
+    end
+    frames
+end
+
+# Run `f` with its logging silenced, including tasks it spawns — so wrap the
+# server's creation: its connection handlers inherit that logger. The failure
+# paths record errors through HTMXObjects' `safely`, which logs at @error.
+_quietly(f) = Base.CoreLogging.with_logger(f, Base.CoreLogging.NullLogger())
+
+@testset "stream loop: a pending node is streamed until terminal" begin
+    root = initialize_progress!(:state; description="root")
+    phase = prepare_progress!(root; description="phase")
+    @test is_pending(phase) && !Treebars._is_terminal(phase)
+    label(n) = is_pending(n) ? "pending" : is_running(n) ? "running $(n.impl.message)" : "terminal"
+    frames = String[]
+    worker = Threads.@spawn begin
+        sleep(0.15)
+        start_progress!(phase)
+        for i in 1:2
+            update_progress!(phase, "step $i")
+            sleep(0.08)
+        end
+        finalize_progress!(phase)
+    end
+    alive = Treebars._stream_frames(f -> (push!(frames, f); true), phase;
+        interval=0.01, render=label, final=true)
+    wait(worker)
+    @test alive
+    # Before the fix the loop exited on `running == false`: one "pending" frame.
+    @test first(frames) == "pending"
+    @test "running step 1" in frames && "running step 2" in frames
+    @test last(frames) == "terminal"
+    # ~15 ticks while pending, but an unchanged frame is sent once.
+    @test count(==("pending"), frames) == 1
+    finalize_progress!(root)
+end
+
+@testset "stream loop: unchanged frames are not re-sent" begin
+    root = initialize_progress!(:state; description="root")
+    chain = initialize_progress!(root, 10; description="chain")
+    update_progress!(chain, 3)
+
+    # Every mutator bumps the change counter.
+    v = chain.impl.version
+    update_progress!(chain, 4);       @test chain.impl.version == v + 1
+    update_progress!(chain);          @test chain.impl.version == v + 2
+    update_progress!(chain, "msg");   @test chain.impl.version == v + 3
+    pending = prepare_progress!(root; description="later")
+    w = pending.impl.version
+    start_progress!(pending);  @test pending.impl.version == w + 1
+    start_progress!(pending);  @test pending.impl.version == w + 1   # idempotent: no change
+    finalize_progress!(pending); @test pending.impl.version == w + 2
+
+    # A running node's elapsed time / ETA differ between renders but are ticked
+    # on the client: frames that differ only there have equal signatures.
+    html1 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
+    sleep(0.02)
+    html2 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
+    @test html1 != html2
+    @test occursin("data-elapsed-ms", html1) && occursin("data-eta-ms", html1)
+    @test Treebars._frame_signature(html1) == Treebars._frame_signature(html2)
+    update_progress!(chain, 7)
+    html3 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
+    @test Treebars._frame_signature(html3) != Treebars._frame_signature(html2)
+
+    # The loop: an idle tree is rendered once (the fingerprint does not move)
+    # and sent once; a change is rendered and sent again.
+    renders = Ref(0)
+    frames = String[]
+    render(n) = (renders[] += 1; _tb_ext().node_to_html(htmx_render(n; scoped=false)))
+    stopper = Threads.@spawn begin
+        sleep(0.2)                        # ~20 idle ticks
+        update_progress!(chain, 8)
+        sleep(0.2)
+        finalize_progress!(root)
+    end
+    @test Treebars._stream_frames(f -> (push!(frames, f); true), root; interval=0.01, render)
+    wait(stopper)
+    @test length(frames) == 2
+    @test occursin("7 / 10", frames[1]) && occursin("8 / 10", frames[2])
+    @test renders[] <= 3
+end
+
+@testset "stream loop: a gone client ends the stream quietly" begin
+    root = initialize_progress!(:state; description="root")
+    chain = initialize_progress!(root, 100; description="chain")
+    renders = Ref(0)
+    sends = Ref(0)
+    ticker = Threads.@spawn for i in 1:40
+        update_progress!(chain, i); sleep(0.005)
+    end
+    # The client is gone after the first frame: `emit` reports `false`.
+    alive = Treebars._stream_frames(root; interval=0.005, render=n -> (renders[] += 1; "frame $(renders[])")) do f
+        sends[] += 1
+        sends[] == 1
+    end
+    @test alive == false
+    @test sends[] == 2 && renders[] == 2   # stopped at the failed send
+    wait(ticker)
+    finalize_progress!(root)
+end
+
+@testset "stream loop: the terminal frame follows the handle, not the tick" begin
+    root = initialize_progress!(:state; description="root")
+    handle = Threads.@spawn (sleep(0.1); :value)
+    t = @elapsed alive = Treebars._stream_frames(_ -> true, root; interval=5.0, render=repr, done=handle)
+    @test alive
+    @test t < 2.0     # would be ≥ 5 s with a fixed sleep(interval)
+    @test is_running(root)   # it ended on the handle, not on the node
+    finalize_progress!(root)
+end
+
+@testset "htmx_ws_container: wrapper owns the UX state, inner carries the id" begin
+    ext = _tb_ext()
+    html = ext.node_to_html(htmx_ws_container(id -> "/ws/run?id=$id"; id="tb-1"))
+    @test startswith(html, "<div class=\"treebar-poller\" hx-ext=\"ws\" ws-connect=\"/ws/run?id=tb-1\"")
+    for attr in ("data-paused=\"0\"", "data-show-finished=\"0\"", "data-show-pending=\"1\"",
+                 "data-show-failed=\"1\"", "data-show-skipped=\"0\"")
+        @test occursin(attr, html)
+    end
+    @test occursin("class=\"treebar-pause\"", html)
+    # The inner placeholder is a DIRECT child of the wrapper (after the Pause
+    # button), which is where every frame lands.
+    @test occursin(r"<div class=\"treebar-poller\"[^>]*><button class=\"treebar-pause\"[^>]*>Pause</button><div id=\"tb-1\" class=\"treebar-poller-inner\">", html)
+    # Fresh ids by default: two containers on one page never collide.
+    a = ext.node_to_html(htmx_ws_container("/ws"))
+    b = ext.node_to_html(htmx_ws_container("/ws"))
+    id_of(s) = match(r"<div id=\"([^\"]+)\" class=\"treebar-poller-inner\"", s).captures[1]
+    @test id_of(a) != id_of(b)
+    # A string URL is used as is; the function form receives the generated id.
+    seen = Ref("")
+    c = ext.node_to_html(htmx_ws_container(id -> (seen[] = id; "/ws?id=$id")))
+    @test id_of(c) == seen[] && occursin("ws-connect=\"/ws?id=$(seen[])\"", c)
+    # Pause shows for push-transport wrappers; the page script handles WS/SSE pause.
+    css = ext.node_to_html(htmx_treebar_styles())
+    @test occursin(".treebar-poller[ws-connect]:has(> .treebar-poller-inner) > .treebar-pause", css)
+    js = ext.node_to_html(htmx_treebar_script())
+    @test occursin("htmx:wsBeforeMessage", js) && occursin("htmx:sseBeforeMessage", js)
+    @test occursin("treebar-terminal-content", js)   # terminal frames are never held
+end
+
+@testset "ws_progress round trip: a pending node gets frames" begin
+    root = initialize_progress!(:state; description="root")
+    phase = prepare_progress!(root; description="phase")
+    label(n) = is_pending(n) ? "pending" : is_running(n) ? "running $(n.impl.message)" : "terminal"
+    returned = Ref{Any}(nothing)
+    server, port = _listen_ws(ws -> (returned[] = ws_progress(ws, phase; interval=0.01, render=label)))
+    worker = Threads.@spawn begin
+        sleep(0.2)
+        start_progress!(phase)
+        for i in 1:2
+            update_progress!(phase, "step $i"); sleep(0.05)
+        end
+        finalize_progress!(phase)
+    end
+    frames = try
+        _ws_frames(port)
+    finally
+        wait(worker); close(server)
+    end
+    @test first(frames) == "pending"
+    @test "running step 1" in frames && "running step 2" in frames
+    @test last(frames) == "terminal"
+    @test returned[] === true
+    finalize_progress!(root)
+end
+
+@testset "WebSocket polling_fetchindex: running, terminal and scope markup" begin
+    app = _StreamFixture()
+    key = "ws-ok-$(rand(UInt32))"
+    id = "tb-ws-ok"
+    server, port = _listen_ws(ws -> polling_fetchindex(ws, app.results, key; id, interval=0.01) do rv
+        h.p("result: $rv")
+    end)
+    frames = try
+        _ws_frames(port; on_message = f -> (occursin("treebar-poller-inner", f) && _release!(key); nothing))
+    finally
+        close(server)
+    end
+    running, terminal = frames[1:end-1], frames[end]
+    @test !isempty(running)
+    for f in running
+        @test startswith(f, "<div id=\"$id\" class=\"treebar-poller-inner\">")
+        @test !occursin("data-show-", f)                # scoped=false: the wrapper owns toggles
+        @test !occursin("class=\"treebar-poller\"", f)  # frames never replace the wrapper
+    end
+    @test any(f -> occursin("class=\"treebar-children\"", f), running)
+    @test any(f -> occursin("Streaming $key", f), running)
+    # Terminal frame: the polling terminal shape, carrying the inner's id so it
+    # replaces the inner and stays a direct child of the wrapper.
+    @test startswith(terminal, "<div id=\"$id\" class=\"treebar-terminal-content\">")
+    @test occursin("result: value-$key", terminal)
+    @test occursin("<details class=\"treebar-frozen\"><summary>Progress</summary>", terminal)  # collapsed
+    @test !occursin("treebar-poller-inner", terminal)
+    # Nothing but the tree changing produces a frame: 3 steps (+ the tree
+    # appearing) in far fewer frames than the ~dozens of 10 ms ticks.
+    @test length(running) <= 6
+end
+
+@testset "WebSocket polling_fetchindex: failure frame and keep_progress=false" begin
+    app = _StreamFixture()
+    key = "ws-boom-$(rand(UInt32))"
+    id = "tb-ws-boom"
+    handler(; kw...) = ws -> polling_fetchindex(ws, app.results, key; id, interval=0.01, kw...) do rv
+        h.p("result: $rv")
+    end
+    # Fails while streaming: the fetch inside the stream rethrows.
+    server, port = _quietly(() -> _listen_ws(handler()))
+    frames = try
+        _ws_frames(port; on_message = f -> (occursin("treebar-poller-inner", f) && _release!(key); nothing))
+    finally
+        close(server)
+    end
+    terminal = last(frames)
+    @test startswith(terminal, "<div id=\"$id\" class=\"treebar-terminal-content\">")
+    @test occursin("aria-invalid", terminal)                          # the recorded error
+    @test occursin("<details class=\"treebar-frozen\" open", terminal)  # the tree, open
+    @test occursin("Streaming $key", terminal)
+    @test count(f -> occursin("treebar-terminal-content", f), frames) == 1
+
+    # Already failed: fetchindex rethrows before the callback runs. Same shape,
+    # and it is the only frame.
+    server, port = _quietly(() -> _listen_ws(handler()))
+    again = try
+        _ws_frames(port)
+    finally
+        close(server)
+    end
+    @test length(again) == 1
+    @test startswith(only(again), "<div id=\"$id\" class=\"treebar-terminal-content\">")
+    @test occursin("aria-invalid", only(again)) && occursin("treebar-frozen", only(again))
+
+    # keep_progress=false: the error alone.
+    server, port = _quietly(() -> _listen_ws(handler(; keep_progress=false)))
+    bare = try
+        _ws_frames(port)
+    finally
+        close(server)
+    end
+    @test occursin("aria-invalid", only(bare)) && !occursin("treebar-frozen", only(bare))
+end
+
+@testset "WebSocket polling_fetchindex: client disconnect leaves the compute running" begin
+    app = _StreamFixture()
+    key = "ws-gone-$(rand(UInt32))"
+    outcome = Ref{Any}(:running)
+    server, port = _listen_ws(ws -> begin
+        # Closed before the stream starts, every send fails exactly as it does
+        # once the client has gone.
+        close(ws)
+        outcome[] = try
+            polling_fetchindex(ws, app.results, key; interval=0.01) do rv
+                h.p("result: $rv")
+            end
+            :returned
+        catch err
+            err
+        end
+    end)
+    try
+        @test isempty(_ws_frames(port))
+        @test timedwait(() -> outcome[] !== :running, 10.0) === :ok
+    finally
+        close(server)
+    end
+    @test outcome[] === :returned       # a gone client is not an error
+    _release!(key, 3)                   # the compute is still in flight: let it finish
+    @test fetchindex((rv, _) -> fetch(rv), app.results, key) == "value-$key"
 end

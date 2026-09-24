@@ -220,16 +220,30 @@ function htmx_treebar_script end
 
 # ws_progress fallback
 """
-    ws_progress(ws, node; interval=0.1, render=repr)
+    ws_progress(ws, node; interval=0.1, render=repr, done=nothing) -> Bool
 
-Push live progress updates over a WebSocket until `node` finalises.
-Implementation lives in the HTTP package extension — load `HTTP` to activate
-it.
+Push live progress updates over a WebSocket until `node` is terminal
+(finished, failed or skipped). A *pending* node is not terminal, so the stream
+keeps going until it has started and ended. Implementation lives in the HTTP
+package extension — load `HTTP` to activate it.
 
-`render(node)` is called every `interval` seconds and the resulting string is
-sent over `ws`. The default `render=repr` is text-only; load `HTMXObjects` to
-get [`htmx_ws_render`](@ref), which produces an HTML fragment with a stable
-`id` suitable for HTMX swap-by-id.
+`render(node)` returns the `String` to send. The tree is re-rendered only when
+it changed (see `StateProgress`'s `version`) and a frame is sent only when it
+differs from the previous one; a running node's elapsed time and ETA do not
+count as a difference, because [`htmx_treebar_script`](@ref) advances them on
+the client. The terminal state is sent last.
+
+`done`: optional compute handle (a `Task`, or anything with `isready`). The
+stream also ends as soon as it settles, without waiting out the interval.
+
+Returns `true` when the stream ran to its end, `false` if the client
+disconnected (a failed send ends the stream quietly and never touches the
+compute).
+
+The default `render=repr` is text-only. With `HTMXObjects` loaded, prefer the
+WebSocket method of [`polling_fetchindex`](@ref) together with
+[`htmx_ws_container`](@ref): it renders the frames, the result and failures
+for you.
 """
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 
@@ -237,8 +251,52 @@ ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress
 """
     htmx_ws_render(node; id="treebar-progress")
 
-Default `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded.
-Wraps [`htmx_render`](@ref) in a `<div id=…>` so the HTMX ws extension swaps
-by element id.
+A `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded. Wraps
+[`htmx_render`](@ref) in a `<div id=…>` so the HTMX ws extension swaps by
+element id.
+
+Each frame replaces the whole tree, so pill toggles reset on every frame. For
+toggles that persist, a Pause control and a terminal result, use the
+WebSocket method of [`polling_fetchindex`](@ref) with
+[`htmx_ws_container`](@ref).
 """
 htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_render. Load HTMXObjects to enable HTML WebSocket rendering."
+
+"""
+    htmx_ws_container(url; id=<unique>, placeholder=…)
+    htmx_ws_container(id -> url; id=<unique>, placeholder=…)
+
+Client-side markup for a WebSocket progress stream served by the WebSocket
+method of [`polling_fetchindex`](@ref). Implementation lives in the
+HTMXObjects package extension.
+
+Renders the persistent `.treebar-poller` wrapper, which also carries
+`hx-ext="ws" ws-connect=url`, and an initial `.treebar-poller-inner`
+placeholder with `id`:
+
+```html
+<div class="treebar-poller" hx-ext="ws" ws-connect="…" data-paused="0" data-show-…>
+  <button class="treebar-pause" …>Pause</button>
+  <div id="ID" class="treebar-poller-inner">…placeholder…</div>
+</div>
+```
+
+Every frame the server sends is an element with that same `id`, which htmx's
+ws extension swaps in place of the inner. The wrapper is never replaced, so
+its pill toggles and Pause state persist and the socket stays open.
+
+The server must use the same `id`. Pass `url` as a function of the id so the
+id is generated here and handed to the route in its URL:
+
+```julia
+@get start(; key) = htmx_ws_container(id -> query_url(__self__ / "run"; key, id))
+@ws run(; key, id) = polling_fetchindex(__ws__, app.results, key; id) do rv
+    render_result(rv)
+end
+```
+
+`id` defaults to a fresh random id, so several streams on one page never
+collide. Needs htmx's ws extension, plus [`htmx_treebar_styles`](@ref) and
+[`htmx_treebar_script`](@ref) on the page.
+"""
+function htmx_ws_container end

@@ -211,3 +211,22 @@ my_computation()                  # silent
 my_computation(progress=:term)    # terminal bars
 my_computation(progress=:state)   # web-ready tree
 ```
+
+## Showing progress in a web page
+
+With `HTMXObjects` loaded, a `:state` progress tree can be shown live in the
+browser while a `DynamicObjects` property computes, then replaced by its
+result. Every transport renders the same markup: a persistent
+`.treebar-poller` wrapper (pill toggles, Pause) around an inner fragment that
+is replaced while the compute runs, and finally by the result (plus the frozen
+tree) as `.treebar-terminal-content`.
+
+- **HTTP polling** — [`polling_fetchindex`](@ref)`(render_result, ip, keys...)`:
+  the inner re-fetches itself every `poll_interval`.
+- **WebSocket** — the WebSocket method of [`polling_fetchindex`](@ref)
+  (`polling_fetchindex(__ws__, ip, keys...) do rv … end`) with
+  [`htmx_ws_container`](@ref) on the page: the server pushes a frame whenever
+  the tree changes and the result as soon as the compute finishes.
+
+Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) once
+per page. See [Backends](backends.md) for the details of each transport.

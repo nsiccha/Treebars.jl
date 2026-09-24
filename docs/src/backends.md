@@ -70,7 +70,9 @@ htmx(...; extra_head=(htmx_treebar_styles(), htmx_treebar_script(), ...))
   `treebar-*` CSS classes.
 - [`htmx_treebar_script`](@ref) returns a `<script>` node with a client-side
   duration ticker that advances running nodes locally between server polls
-  (so the elapsed-time counter doesn't stutter).
+  (so the elapsed-time counter doesn't stutter). It also owns Pause (for
+  polling, WebSocket and SSE streams alike) and turns a finished stream's
+  wrapper into `.treebar-terminal`.
 
 ### Polling with cancel — `polling_fetchindex`
 
@@ -99,24 +101,72 @@ Three states are handled automatically:
 - **Completed** — calls the `render_result` callback and terminalizes the stable
   wrapper as `.treebar-terminal`; no active poll transport or controls remain.
 
+### WebSocket push — `polling_fetchindex(ws, …)`
+
+The WebSocket method of [`polling_fetchindex`](@ref) streams the same frames
+over a socket instead of being polled: the server sends a frame when the tree
+changes and the result as soon as the compute finishes. Pair it with
+[`htmx_ws_container`](@ref), which renders the client side. The page needs
+htmx's ws extension (`htmx-ext-ws`) in addition to the Treebars assets.
+
+```julia
+@htmx struct Routes
+    # The container: persistent wrapper + an inner with a fresh id. The id is
+    # generated here and travels to the socket route in its URL, so several
+    # streams on one page never collide.
+    @get start(; key) = htmx_ws_container(id -> query_url(__self__ / "run"; key, id))
+
+    @ws run(; key, id) = polling_fetchindex(__ws__, app.results, key; id,
+                                            label="Computing '$key'") do rv
+        render_result(rv)
+    end
+end
+```
+
+The frames follow the polling design:
+
+- The `.treebar-poller` wrapper carries `hx-ext="ws" ws-connect=…`, the
+  `data-show-*` pill state, `data-paused` and the Pause button. Frames never
+  replace it, so toggles and Pause survive and the socket stays open.
+- Each running frame is `<div id=ID class="treebar-poller-inner">…</div>`, the
+  tree rendered with `scoped=false`. htmx's ws extension swaps it in place of
+  the inner by id. Pending nodes stream like running ones.
+- A frame is sent only when the tree changed. A running node's elapsed time
+  and ETA are ticked on the client, so they do not count as a change.
+- The terminal frame is `<div id=ID class="treebar-terminal-content">`: the
+  rendered result plus, with `keep_progress=true` (the default), the frozen
+  tree in a collapsed `<details class="treebar-frozen">`. The page script then
+  turns the wrapper into `.treebar-terminal` and removes Pause.
+- A failed compute (or a throwing `render_result`) is recorded through
+  HTMXObjects' `safely` (pass `error_obj` / `req` for the route context) and
+  sent as the terminal frame, beside the tree in an open `<details>`.
+- If the client disconnects, the stream stops quietly and the compute runs on;
+  its value lands in the cache for the next visitor.
+- Pause holds back running frames on the client (the newest one is applied on
+  Resume); the terminal frame is never held back.
+
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides
-[`ws_progress`](@ref): a push loop that sends rendered progress over a
-WebSocket until the node finalises.
+[`ws_progress`](@ref): the push loop underneath the WebSocket method above,
+for a progress node you manage yourself. It streams `render(node)` until the
+node is terminal
+(finished, failed or skipped — a pending node keeps it going), sends only
+changed frames, and ends early when the optional `done` handle settles. It
+returns `false` if the client disconnected.
 
 ```julia
-@ws ws = begin
+@ws feed = begin
     p = initialize_progress!(:state; description="Running")
     task = Threads.@spawn expensive_computation(p)
-    ws_progress(__ws__, p; render=htmx_ws_render)
-    send(__ws__, render_result(fetch(task)))
+    ws_progress(__ws__, p; render=htmx_ws_render, done=task) &&
+        send(__ws__, render_result(fetch(task)))
 end
 ```
 
 The default `render` is `repr`; load `HTMXObjects` to use
 [`htmx_ws_render`](@ref) which wraps `htmx_render` in a stable-id `<div>` for
-HTMX swap-by-id.
+HTMX swap-by-id (each frame replaces the whole tree, so pill toggles reset).
 
 ## Custom backends
 

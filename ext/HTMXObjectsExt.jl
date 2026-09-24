@@ -3,7 +3,7 @@ import HTMXObjects
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
-    ws_progress, polling_fetchindex,
+    ws_progress, polling_fetchindex, htmx_ws_container, _stream_frames, _ws_emit,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
 import Dates
@@ -124,6 +124,12 @@ htmx_treebar_styles() = h.style(Raw("""
    see comment below). Pause cancels the request via JS but keeps the element (and
    its hx-trigger), so a paused poller still matches → button stays → Resume works. */
 .treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
+/* Push transports (WebSocket / SSE) put the connection on the wrapper and send
+   inners without hx-trigger: there, a direct-child .treebar-poller-inner is the
+   running state, and the terminal frame (.treebar-terminal-content) hides the
+   button the same way. */
+.treebar-poller[ws-connect]:has(> .treebar-poller-inner) > .treebar-pause,
+.treebar-poller[sse-connect]:has(> .treebar-poller-inner) > .treebar-pause { display: inline-block; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 /* Message-bearing nodes now use the same treebar-node + treebar-header structure
    as container nodes, so treebar-label/treebar-value/treebar-description classes
@@ -242,8 +248,8 @@ htmx_treebar_script() = h.script(Raw("""
         // integer minute/hour, so those ticks are mostly no-ops.
         if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
-    function terminalizePoller(evt){
-        var el = evt && evt.detail && evt.detail.elt;
+    function terminalizePoller(evt){ terminalize(evt && evt.detail && evt.detail.elt); }
+    function terminalize(el){
         if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return;
         var p = el.parentElement;
         if (!p || !p.classList.contains('treebar-poller')) return;
@@ -253,6 +259,7 @@ htmx_treebar_script() = h.script(Raw("""
         });
         var pause = p.querySelector(':scope > .treebar-pause');
         if (pause) pause.remove();
+        p._tbHeld = undefined;
     }
     function reanchorAll(){
         document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
@@ -263,6 +270,15 @@ htmx_treebar_script() = h.script(Raw("""
     function reanchorAndTick(evt){ terminalizePoller(evt); reanchorAll(); tickAll(); }
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
+    // A WebSocket frame keeps the inner's id, and htmx "settles" an element
+    // whose id survives a swap: until the swap's settle tasks run — after
+    // htmx:oobAfterSwap — the new element still wears the old element's
+    // attributes, class included, so the check above cannot recognise a
+    // terminal frame yet. htmx:wsAfterMessage fires once they have run.
+    document.addEventListener('htmx:wsAfterMessage', function(evt){
+        var id = frameId(evt.detail && evt.detail.message);
+        if (id) terminalize(document.getElementById(id));
+    });
     // Pause: cancel a poller's own `every Xs` poll request while its wrapper
     // is data-paused. Scoped to the .treebar-poller-inner element, so the
     // Stop/cancel request (a different element) still fires when paused. The
@@ -275,6 +291,50 @@ htmx_treebar_script() = h.script(Raw("""
             var p = el.closest('.treebar-poller');
             if (p && p.dataset.paused === '1') evt.preventDefault();
         }
+    });
+    // Pause for push transports (WebSocket / SSE): there is no request to
+    // cancel, so hold back running frames while the wrapper is data-paused.
+    // The newest held frame is applied on Resume: the server sends a frame only
+    // when the tree changes, so without it a resumed view could stay stale
+    // until the next change. The terminal frame is never held back.
+    function isTerminalFrame(html){
+        return /^\\s*<[^>]*\\btreebar-terminal-content\\b/.test(html);
+    }
+    // The id on a frame's top-level element (WebSocket frames swap by id).
+    function frameId(html){
+        var m = typeof html === 'string' && /^\\s*<[^>]*\\sid="([^"]+)"/.exec(html);
+        return m ? m[1] : null;
+    }
+    function holdIfPaused(evt, p, html){
+        if (!p || !p.classList.contains('treebar-poller') || p.dataset.paused !== '1') return;
+        evt.preventDefault();
+        p._tbHeld = html;
+    }
+    document.addEventListener('htmx:wsBeforeMessage', function(evt){
+        var d = evt.detail || {}, html = d.message;
+        if (typeof html !== 'string' || isTerminalFrame(html)) return;
+        // Frames swap by id, so the poller is the parent of the element with
+        // the frame's id; without an id, fall back to the socket's element.
+        var id = frameId(html), p;
+        if (id){ var t = document.getElementById(id); p = t && t.parentElement; }
+        else p = d.elt && d.elt.closest && d.elt.closest('.treebar-poller');
+        holdIfPaused(evt, p, html);
+    });
+    document.addEventListener('htmx:sseBeforeMessage', function(evt){
+        // detail is the MessageEvent: type is the SSE event name.
+        var d = evt.detail || {}, html = d.data;
+        if (d.type === 'done' || typeof html !== 'string' || isTerminalFrame(html)) return;
+        holdIfPaused(evt, d.elt && d.elt.closest && d.elt.closest('.treebar-poller'), html);
+    });
+    // Resume. A document listener runs after the button's own onclick, so
+    // data-paused has already flipped back to '0' here.
+    document.addEventListener('click', function(evt){
+        var b = evt.target && evt.target.closest && evt.target.closest('.treebar-pause');
+        var p = b && b.parentElement;
+        if (!p || p.dataset.paused === '1' || !p._tbHeld) return;
+        var html = p._tbHeld, inner = p.querySelector(':scope > .treebar-poller-inner');
+        p._tbHeld = undefined;
+        if (inner && window.htmx && htmx.swap) htmx.swap(inner, html, {swapStyle: 'outerHTML'});
     });
     function start(){
         reanchorAndTick();
@@ -482,7 +542,7 @@ end
 """
     htmx_ws_render(node; id="treebar-progress")
 
-Default `render` function for `ws_progress` when HTMXObjects is loaded.
+A `render` function for `ws_progress` when HTMXObjects is loaded.
 Returns an HTML string with a stable `id` so the HTMX ws extension swaps by element id.
 
 Client-side:
@@ -491,6 +551,9 @@ Client-side:
     <div id="treebar-progress"></div>
 </div>
 ```
+
+Each frame replaces the whole tree (pill toggles reset). The WebSocket method
+of `polling_fetchindex` with `htmx_ws_container` keeps them.
 """
 htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
 
@@ -677,12 +740,17 @@ _caught_error_ex(err, error_obj, req) =
         throw(err)
     end
 
-function _polling_running(status; label, poll_url, poll_interval, cancel_url)
+_polling_running(status; label, poll_url, poll_interval, cancel_url) =
+    _polling_wrap(_polling_inner_running(poll_url, poll_interval, _running_body(status; label, cancel_url)); pausable=true)
+
+# What a running inner shows, for every transport: the live tree rendered
+# scoped=false (the persistent wrapper owns the data-show-* toggles), under an
+# optional labelled header.
+function _running_body(status; label=nothing, cancel_url="")
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-    inner_body = isnothing(label) ? htmx_render(status; article=true, scoped=false) :
+    isnothing(label) ? htmx_render(status; article=true, scoped=false) :
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
-    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body); pausable=true)
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
@@ -741,66 +809,182 @@ _polling_inner_done(body...) = h.div(class="treebar-terminal-content")(body...)
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(identity, ip, keys...; kwargs...)
 
+# --- Push transports ---------------------------------------------------------
+#
+# WebSocket (and, below, SSE) streams reuse the polling design: a persistent
+# `.treebar-poller` wrapper that frames never replace (so its pill toggles,
+# Pause state and the connection it carries survive), holding one
+# `.treebar-poller-inner` child that each running frame replaces, until the
+# terminal frame replaces it with `.treebar-terminal-content`. The frame BODIES
+# are the polling ones; a transport only decides how a frame names its target
+# and how it is sent.
+
+# htmx's ws extension swaps each top-level element of a message out-of-band by
+# id (outerHTML), so every WebSocket frame carries the inner's id.
+struct _WSFrames
+    ws::WebSocket
+    id::String
+end
+_running_frame(t::_WSFrames, body) =
+    node_to_html(h.div(; id=t.id, class="treebar-poller-inner")(body))
+_terminal_frame(t::_WSFrames, body...) =
+    node_to_html(h.div(; id=t.id, class="treebar-terminal-content")(body...))
+_send_progress(t::_WSFrames, frame) = _ws_emit(t.ws, frame)
+_send_done(t::_WSFrames, frame) = _ws_emit(t.ws, frame)
+
+# The persistent wrapper of a push stream: the polling wrapper's UX state plus
+# the attributes that open the connection. htmx closes a connection when its
+# element leaves the DOM, which is why frames target the inner, never this.
+_live_wrap(inner; transport...) = h.div(; class="treebar-poller", transport...,
+        data_paused="0",
+        data_show_finished="0",
+        data_show_pending="1",
+        data_show_failed="1",
+        data_show_skipped="0")(_pause_button(), inner)
+
+# Unique per process (the counter) and across restarts (the clock), and
+# independent of the global RNG, which a compute may have seeded.
+const _ID_COUNTER = Threads.Atomic{UInt}(0)
+_fresh_id() = "treebar-" * string(hash(time_ns(), Threads.atomic_add!(_ID_COUNTER, UInt(1))); base=36)
+_connecting() = h.p("Connecting…"; class="u-text-muted", aria_busy="true")
+
+_container_url(url::Function, id) = string(url(id))
+_container_url(url, id) = string(url)
+
+function htmx_ws_container(url; id=_fresh_id(), placeholder=_connecting())
+    id = string(id)
+    _live_wrap(h.div(; id, class="treebar-poller-inner")(placeholder);
+        hx_ext="ws", ws_connect=_container_url(url, id))
+end
+
+# The value behind a handle. A failed compute rethrows its own exception; a
+# `Task` wraps it in a TaskFailedException, unwrapped as the polling path does.
+function _fetch_value(rv::Task)
+    try
+        fetch(rv)
+    catch err
+        err isa TaskFailedException ? throw(err.task.result) : rethrow()
+    end
+end
+_fetch_value(rv) = fetch(rv)
+
+# fetchindex + a push stream. Streams running frames while the compute is in
+# flight, then returns the terminal frame to send — or `nothing` when the
+# client went away mid-stream (the compute is left running; its value lands in
+# the cache for the next visitor). Mirrors the polling failure path: a failed
+# compute is re-thrown by `fetchindex` before the callback runs (or by the
+# fetch inside it), so the WHOLE call is wrapped, and the failure is recorded
+# and rendered through `safely` next to the kept tree. A failed send is not a
+# failure: `_send_*` report it as `false` and never throw.
+function _stream_fetchindex(t, render_result, ip, keys...; interval=0.1, force=false, label=nothing,
+        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    frame = try
+        fetchindex(ip, keys...; force, kwargs...) do rv, status
+            _stream_resolve(t, rv, status; interval, label, keep_progress, render_result)
+        end
+    catch err
+        _terminal_frame(t, _caught_error_ex(err, error_obj, req),
+            keep_progress ? _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true) : "")
+    end
+    isnothing(frame) || _send_done(t, frame)
+    nothing
+end
+
+function _stream_resolve(t, rv, status; interval, label, keep_progress, render_result)
+    if _is_unresolved_handle(rv)
+        # No status tree → no progress frames: just wait for the value.
+        if !isnothing(status)
+            live = _stream_frames(frame -> _send_progress(t, frame), status; interval, done=rv,
+                render = node -> _running_frame(t, _running_body(node; label)))
+            live || return nothing
+        end
+        rv = _fetch_value(rv)
+    elseif _is_handle(rv)
+        # A handle that became ready between DynamicObjects' snapshot and this
+        # callback (see `_polling_resolve`): resolve it, never render it raw.
+        rv = _fetch_value(rv)
+    end
+    body = render_result(rv)
+    keep_progress ? _terminal_frame(t, body, _kept_progress(status; open=false)) : _terminal_frame(t, body)
+end
+
 """
-    polling_fetchindex(ws::WebSocket, render_result, ip, keys...; id="treebar-progress", interval=0.1, force=false, kwargs...)
+    polling_fetchindex(ws::WebSocket, render_result, ip, keys...; id="treebar-progress", interval=0.1, force=false, label=nothing, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
 
-WebSocket sibling of [`polling_fetchindex`](@ref). Same `fetchindex(ip, keys...) do rv, status`
-dispatch — but instead of returning a polling HTMX fragment, streams progress
-over `ws` via [`ws_progress`](@ref) and pushes the final rendered result as
-one last frame on completion.
+WebSocket sibling of [`polling_fetchindex`](@ref): the same
+`fetchindex(ip, keys...) do rv, status` dispatch and the same frame shapes, but
+pushed over `ws` instead of polled. Pair it with
+[`htmx_ws_container`](@ref), which renders the client side with a matching
+`id`.
 
-Producer task is NOT cancelled on client disconnect — `ws_progress` exits
-its send loop on WS error and leaves the compute alone; the in-flight compute
-runs to completion and its value lands in the IP cache, so the next visitor
-reuses it.
+While the compute runs, each changed state of the tree is sent as
+
+    <div id=ID class="treebar-poller-inner">…tree, rendered scoped=false…</div>
+
+which htmx's ws extension swaps in place of the inner by id. The persistent
+`.treebar-poller` wrapper around it is never replaced, so pill toggles and
+Pause survive. A pending status node is streamed like a running one. Frames are
+sent only when the tree changed; a running node's elapsed time and ETA tick on
+the client (see [`htmx_treebar_script`](@ref)).
+
+When the compute finishes (as soon as the handle settles, not on the next
+tick) the terminal frame replaces the inner, exactly like the polling terminal
+content:
+
+    <div id=ID class="treebar-terminal-content">result [+ frozen tree]</div>
+
+It holds `render_result(value)` and, with `keep_progress=true` (the default),
+the frozen tree in a collapsed `<details class="treebar-frozen">`. The page
+script then turns the wrapper into `.treebar-terminal` and drops its Pause
+button. A failed compute (re-thrown by `fetchindex`, or by the fetch while
+streaming) or a throwing `render_result` is recorded and rendered through
+HTMXObjects' `safely` (`error_obj` / `req` as in the polling path) and sent as
+the terminal frame, beside the tree in an open `<details>`; with
+`keep_progress=false` the error is sent alone.
+
+If the client disconnects, the stream stops quietly (logged at `@debug`) and
+the compute is left running; its value lands in the IP cache for the next
+visitor.
 
 Use inside an `@ws` route body, passing `__ws__` as the first argument:
 
-    @ws fit(; model, method, ...) = polling_fetchindex(__ws__, sc.fit, model, method; force, ...) do rv
+    @ws fit(; model, id) = polling_fetchindex(__ws__, sc.fit, model; id) do rv
         render_fit(rv)
     end
 
-Both progress frames and the final frame are wrapped in `<div id=\$id>…</div>`
-so the htmx ws-extension swaps by element id on the client.
-
 - `ws`: the WebSocket handle (from `__ws__`)
-- `render_result(rv)`: function rendering the final result Node (supports `do` syntax)
-- `ip`: IndexableProperty
-- `keys...`: cache key(s)
-- `id`: stable wrapper element id for ws-extension swap-by-id (default `"treebar-progress"`)
-- `interval`: progress push interval in seconds (default `0.1`)
+- `render_result(rv)`: renders the final result (supports `do` syntax)
+- `ip`, `keys...`: the IndexableProperty and its cache key(s)
+- `id`: the inner element's id — the same id [`htmx_ws_container`](@ref) gave
+  the client (default `"treebar-progress"`)
+- `interval`: seconds between progress checks (default `0.1`)
 - `force`: force re-computation (default `false`)
+- `label`: optional header over the running tree, as in the polling path
+- `keep_progress`: keep the frozen tree in the terminal frame (default `true`)
+- `error_obj` / `req`: route context for `safely` on the failure path
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
-        id="treebar-progress", interval=0.1, force=false, kwargs...)
-    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
-    final_html(content)   = node_to_html(h.div(; id)(content))
-    fetchindex(ip, keys...; force, kwargs...) do rv, status
-        if rv isa Task
-            ws_progress(ws, status; render=progress_render, interval)
-            istaskfailed(rv) ||
-                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
-        elseif _is_unresolved_handle(rv)
-            ws_progress(ws, status; render=progress_render, interval)
-            # Block for the finished value and push the final frame. A failed
-            # compute makes `fetch` re-throw (caught here → no final frame sent).
-            try; send(ws, final_html(render_result(fetch(rv)))); catch; end
-        else
-            # A resolved VALUE, or a compatible READY handle from the legal
-            # completion race described above. Resolve the handle BEFORE the
-            # swallow-catch so its serialization can never reach the client raw.
-            val = rv
-            if _is_handle(rv)
-                val = fetch(rv)
-            end
-            try; send(ws, final_html(render_result(val))); catch; end
-        end
-    end
+        id="treebar-progress", interval=0.1, force=false, label=nothing,
+        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    _stream_fetchindex(_WSFrames(ws, string(id)), render_result, ip, keys...;
+        interval, force, label, keep_progress, error_obj, req, kwargs...)
 end
 
 # Convenience: WS form with no render_result defaults to identity.
 polling_fetchindex(ws::WebSocket, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(ws, identity, ip, keys...; kwargs...)
+
+# `do` syntax passes the block FIRST: `polling_fetchindex(ws, ip, key) do rv … end`
+# arrives as `(render_result, ws, ip, key)`. Without this method that call fell
+# through to the HTTP polling method, with the WebSocket taken for the IP.
+polling_fetchindex(render_result, ws::WebSocket, ip, keys...; kwargs...) =
+    polling_fetchindex(ws, render_result, ip, keys...; kwargs...)
+# Tie-breakers for argument orders nobody means. Each is exactly the overlap of
+# two methods above, which keeps the method table free of ambiguities.
+polling_fetchindex(::WebSocket, ::WebSocket, ip, keys...; kwargs...) = _misordered_ws()
+polling_fetchindex(::HTMXObjects.DynamicObjects.IndexableProperty, ::WebSocket, ip, keys...; kwargs...) = _misordered_ws()
+_misordered_ws() = throw(ArgumentError(
+    "polling_fetchindex: pass the WebSocket, then render_result (or use `do` syntax), the IndexableProperty and its keys"))
 
 end

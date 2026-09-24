@@ -7,7 +7,7 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     initialize_progress!, update_progress!, fail_progress!, finalize_progress!,
     BusyRetryPolicy, ResourceBusy, ResourceAcquired, BusyRetryExhausted, with_busy_retry,
     add_child!,
-    ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render,
+    ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render, htmx_ws_container,
     polling_fetchindex,
     is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, duration, eta, short_duration,
     prepare_progress!, start_progress!, skip_progress!,
@@ -23,6 +23,7 @@ function round2 end
 function short_string end
 include("formatting.jl")
 include("text.jl")
+include("streaming.jl")
 include("convenience.jl")
 include("busy_retry.jl")
 

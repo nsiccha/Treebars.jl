@@ -1,73 +1,29 @@
-# WebSocket push progress demos. `fake_sampling` creates per-connection state
-# in memory; no persistent cache, so WebSocketsData is empty.
+# WebSocket push progress demo: `htmx_ws_container` renders the client side
+# (persistent wrapper + inner with a generated id, carried to the socket route
+# in its URL) and the WebSocket method of `polling_fetchindex` streams the tree
+# into it, then the result — or the recorded failure beside the frozen tree.
 
-@dynamicstruct struct WebSocketsData end
+@dynamicstruct struct WebSocketsData
+    __status__ = initialize_progress!(:state; description="WebSockets")
 
-# Wrap WS payload: `<div id=target_id><article><header>title</header>body…</article></div>`.
-# Used both for progress pushes (body = htmx_render(node)) and final results.
-_ws_html(target_id, title, body...) =
-    node_to_html(h.div(; id=target_id)(h.article(h.header(title), body...)))
+    "Sampling '$(key)' ($(n_steps) steps @ $(speed)ms)"
+    runs(key, n_steps, speed, fail) = fake_sampling(__status__;
+        n_steps, sleep_per_step = speed / 1000, fail_at = fail ? n_steps ÷ 2 : nothing)
+end
 
 @htmx struct WebSocketsRoutes
-    # HTML helper: renders a task's final article (result or error).
-    send_result(key, task) = begin
-        if istaskfailed(task)
-            _ws_html("ws-result", "Failed", h.pre(sprint(showerror, task.result)))
-        else
-            rv = fetch(task)
-            _ws_html("ws-result", "Result for '$key'", sample_summary(rv), sample_minmax(rv))
-        end
-    end
+    (; websockets) = __appdata__
+    (; runs) = websockets
 
-    # Simple form submission: HTMX WS sends JSON with the form's `key` field;
-    # parse it out, spawn a fake sampling task, stream progress via ws_progress,
-    # then send the final result article.
-    @ws ws() = begin
-        for msg in __ws__
-            m = match(r"\"key\"\s*:\s*\"([^\"]+)\"", msg)
-            key = isnothing(m) ? msg : m.captures[1]
-            p = initialize_progress!(:state; description="Running '$key'")
-            task = Threads.@spawn fake_sampling(p)
-            ws_progress(__ws__, p;
-                render = node -> _ws_html("ws-result", "Computing '$key'...", htmx_render(node)))
-            try
-                send(__ws__, send_result(key, task))
-            catch err
-                # Client disconnected mid-stream — expected on tab close.
-                # Log and break the loop rather than silently swallowing.
-                @debug "ws send_result failed (client gone?)" key=key exception=(err, catch_backtrace())
-                break
-            end
-        end
-    end
+    # Client side of one run. The index form prepends it to the run list, so
+    # several streams share the page; each gets its own id, generated here and
+    # handed to the socket route in its URL.
+    @get start(; key="ws-demo", n_steps::Int=200, speed::Int=20, fail::Bool=false, force::Bool=false) =
+        htmx_ws_container(id -> query_url(__self__ / "run"; key, n_steps, speed, fail, force, id))
 
-    # Fresh `ws-connect` element for the chosen kwargs. The index form `hx-get`s
-    # this and swaps the result into the persistent `hx-ext=ws` container; htmx
-    # processes the swapped-in child, so the (already-active) ws extension opens
-    # the socket. This is the reliable way to (re)connect with dynamic params —
-    # mutating `ws-connect` on an already-processed element does NOT reconnect.
-    @get connect(; key="default", n_steps::Int=200, speed::Int=20) =
-        h.div(; ws_connect = query_url(__self__ / "run"; key, n_steps, speed))
-
-    # Kwargs pulled from the query string (key/n_steps/speed).
-    @ws run(; key="default", n_steps::Int=200, speed::Int=20) = begin
-        sleep_per_step = speed / 1000.0
-        p = initialize_progress!(:state; description="Running '$key' ($(n_steps) steps, $(speed)ms)")
-        task = Threads.@spawn fake_sampling(p; n_steps, sleep_per_step)
-        ws_progress(__ws__, p;
-            render = node -> _ws_html("ws-param-result", "'$key' — $(n_steps) steps @ $(speed)ms", htmx_render(node)))
-        html = if istaskfailed(task)
-            _ws_html("ws-param-result", "Failed")
-        else
-            rv = fetch(task)
-            _ws_html("ws-param-result", "Result for '$key'",
-                h.p("$(length(rv)) values. Final: $(short_string(rv[end]))"))
+    @ws run(; key="ws-demo", n_steps::Int=200, speed::Int=20, fail::Bool=false, force::Bool=false, id) =
+        polling_fetchindex(__ws__, runs, key, n_steps, speed, fail; id, force,
+                           label = "Computing '$key'") do rv
+            result_article("Result for '$key'", sample_summary(rv), sample_minmax(rv))
         end
-        try
-            send(__ws__, html)
-        catch err
-            # Client disconnected before final result; nothing to recover.
-            @debug "ws run final send failed (client gone?)" key=key exception=(err, catch_backtrace())
-        end
-    end
 end
