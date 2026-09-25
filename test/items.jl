@@ -1,10 +1,45 @@
-using TestModules
-using Treebars
-using Dates
+using TestItemRunner
 
-include("busy_retry.jl")
+# Converted 2026-09-25 from web/src/test/{runtests,busy_retry}.jl (TestModules
+# era) to one @testitem per former top-level @testset. Item bodies are
+# byte-verbatim ex-testset bodies (deliberately NOT re-indented) except for
+# the fixes noted in the migration commit. Tags: every item carries :unit
+# plus one area tag:
+#   :macro        @progress / @phases / @threads lowering + phase semantics
+#   :lifecycle    node init / finalize / fail / skip + state helpers
+#   :render       render_text / htmx_render / dedup / ETA / durations
+#   :format       short_string / Fraction / round2 / truncation display
+#   :polling      progress_state snapshot + web polling simulation
+#   :concurrency  threaded stress (meaningful under -tauto, passes at -t1)
+#   :do           DynamicObjects substatus fixtures (needs DO in test env)
+#   :retry        busy-resource retry lifecycle (busy_retry.jl)
+#
+# Every body runs inside a bare `let` (see split_items.py): @testset scope
+# was function-hard, item top level is module-soft, and @progress-for loops
+# mutating an outer counter need the hard scope. Bodies are otherwise
+# byte-verbatim. Content fixes vs the TestModules-era sources (all asserted
+# in the generator): 3x `counter.impl.description` "for i in ..." ->
+# "for i in 1:3" (approved readable labels, ecb68fa/0mkpm59) +1 same-shaped
+# comment; 3x dropped `; cache_type=:parallel` ctor kwarg (removed from DO
+# 2026-07-07, decision 2canrl — "drop this kwarg") +2 dropped
+# __cache_type__ inheritance lines (field removed with it); 3x multifor
+# elided labels ("for oi/di/a/b/c in ...") -> full-range labels, same
+# approved contract; 3x `app.results[k]` -> `app.results(k)` (bracket IP
+# access removed from DO — feedback_call_not_bracket); 1x `children[1]` ->
+# `only(children)` (children is now a ThreadsafeSet); 1x inline-child
+# description "InlineSub[]" -> "" (undocumented properties get no label —
+# DO's displayed=!isnothing(doc) rule).
 
-# Defined at module scope (required for @dynamicstruct type definitions)
+@testsnippet TreebarsTestImports begin
+    using Dates, Random, Test, Treebars
+    using DynamicObjects, HTMXObjects, HTTP
+end
+
+@testmodule TreebarsTestFixtures begin
+using DynamicObjects, Treebars
+
+export _InlineSubTest, _AutoCleanupTest, _FailedSubstatusTest
+
 @dynamicstruct struct _InlineSubTest
     __status__ = initialize_progress!(:state; description="InlineParent")
     struct InlineSub
@@ -30,16 +65,231 @@ end
     end
 end
 
-@testset "nothing backend (no-ops)" begin
+end # @testmodule TreebarsTestFixtures
+
+@testitem "BusyRetryPolicy bounds and validation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    @test_throws ArgumentError BusyRetryPolicy()
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=-1)
+    @test_throws ArgumentError BusyRetryPolicy(max_elapsed=1, initial_delay=0, max_delay=1)
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=1, jitter=1.1)
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=1, multiplier=0.9)
+
+    policy = BusyRetryPolicy(max_retries=6)
+    @test policy.max_retries == 6
+    @test policy.initial_delay == 0.5
+    @test policy.max_delay == 8.0
+    end # let (restores @testset hard scope)
+end
+
+@testitem "busy retry acquires immediately and forwards the value" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    child = Ref{Any}()
+    result = with_busy_retry(root,
+            () -> begin
+                child[] = only(root.children)
+                ResourceAcquired(42)
+            end;
+            policy=BusyRetryPolicy(max_retries=3),
+            sleeper=_ -> error("must not sleep")) do value
+        value + 1
+    end
+
+    @test result == 43
+    @test is_finished(child[])
+    @test child[].impl.message == ""
+    @test isempty(root.children) # successful transient wait nodes disappear
+    end # let (restores @testset hard scope)
+end
+
+@testitem "busy retry uses capped lower-range jitter deterministically" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    child = Ref{Any}()
+    attempts = Ref(0)
+    now = Ref(0.0)
+    sleeps = Float64[]
+    messages = String[]
+    samples = Iterators.Stateful((0.0, 0.5))
+
+    result = with_busy_retry(root,
+            () -> begin
+                attempts[] += 1
+                child[] = only(root.children)
+                attempts[] <= 2 ? ResourceBusy("Evaluator capacity busy") : ResourceAcquired(:lease)
+            end;
+            policy=BusyRetryPolicy(
+                initial_delay=0.5, multiplier=2, max_delay=0.75,
+                jitter=0.5, max_retries=2),
+            clock=() -> now[],
+            random=() -> popfirst!(samples),
+            sleeper=delay -> begin
+                push!(sleeps, delay)
+                push!(messages, child[].impl.message)
+                now[] += delay
+            end) do value
+        value
+    end
+
+    @test result === :lease
+    @test attempts[] == 3 # initial call plus two retries
+    @test sleeps == [0.5, 0.5625]
+    @test occursin("retry 1/2", messages[1])
+    @test occursin("retry 2/2", messages[2])
+    @test child[].impl.message == ""
+    @test is_finished(child[])
+    end # let (restores @testset hard scope)
+end
+
+@testitem "retry count exhaustion is typed and stays visible" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    now = Ref(0.0)
+    sleeps = Float64[]
+    err = try
+        with_busy_retry(root, () -> ResourceBusy("Evaluator capacity busy");
+                policy=BusyRetryPolicy(
+                    initial_delay=0.5, multiplier=2, max_delay=8,
+                    jitter=0, max_retries=2),
+                clock=() -> now[], random=() -> 0.0,
+                sleeper=delay -> (push!(sleeps, delay); now[] += delay)) do _
+            error("unreachable")
+        end
+        nothing
+    catch caught
+        caught
+    end
+
+    @test err isa BusyRetryExhausted
+    @test err.attempts == 3
+    @test err.elapsed == 1.5
+    @test err.last_message == "Evaluator capacity busy"
+    @test sleeps == [0.5, 1.0]
+    child = only(root.children)
+    @test is_failed(child)
+    @test occursin("exhausted after 3 attempts", child.impl.message)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "elapsed bound does not start a retry that cannot fit" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    now = Ref(0.0)
+    sleeps = Float64[]
+    attempts = Ref(0)
+    err = try
+        with_busy_retry(root,
+                () -> (attempts[] += 1; ResourceBusy("queue busy"));
+                policy=BusyRetryPolicy(
+                    initial_delay=0.75, multiplier=2, max_delay=2,
+                    jitter=0, max_elapsed=1.0),
+                clock=() -> now[], random=() -> 0.0,
+                sleeper=delay -> (push!(sleeps, delay); now[] += delay)) do _
+            error("unreachable")
+        end
+        nothing
+    catch caught
+        caught
+    end
+
+    @test err isa BusyRetryExhausted
+    @test err.attempts == 2
+    @test attempts[] == 2
+    @test sleeps == [0.75]
+    end # let (restores @testset hard scope)
+end
+
+@testitem "non-retryable acquisition and body failures propagate unchanged" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    acquisition_error = ErrorException("acquire failed")
+    root = initialize_progress!(:state; description="root")
+    caught = try
+        with_busy_retry(root, () -> throw(acquisition_error);
+                policy=BusyRetryPolicy(max_retries=2)) do _
+            error("unreachable")
+        end
+        nothing
+    catch err
+        err
+    end
+    @test caught === acquisition_error
+    failed_wait = only(root.children)
+    @test is_failed(failed_wait)
+    @test failed_wait.impl.message == ""
+
+    body_error = ErrorException("body failed")
+    released = Ref(false)
+    root2 = initialize_progress!(:state; description="root")
+    caught = try
+        with_busy_retry(root2, () -> ResourceAcquired(nothing);
+                policy=BusyRetryPolicy(max_retries=2)) do _
+            try
+                throw(body_error)
+            finally
+                released[] = true
+            end
+        end
+        nothing
+    catch err
+        err
+    end
+    @test caught === body_error
+    @test released[]
+    @test isempty(root2.children) # acquisition already succeeded
+    end # let (restores @testset hard scope)
+end
+
+@testitem "invalid acquisition results fail without retrying" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    attempts = Ref(0)
+    @test_throws ArgumentError with_busy_retry(root,
+            () -> (attempts[] += 1; :busy);
+            policy=BusyRetryPolicy(max_retries=2)) do _
+        error("unreachable")
+    end
+    @test attempts[] == 1
+    @test is_failed(only(root.children))
+    end # let (restores @testset hard scope)
+end
+
+@testitem "a fresh acquisition resets the backoff" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    sleeps = Float64[]
+    for _ in 1:2
+        root = initialize_progress!(:state; description="root")
+        attempts = Ref(0)
+        with_busy_retry(root,
+                () -> begin
+                    attempts[] += 1
+                    attempts[] == 1 ? ResourceBusy("busy") : ResourceAcquired(nothing)
+                end;
+                policy=BusyRetryPolicy(
+                    initial_delay=0.5, multiplier=2, max_delay=8,
+                    jitter=0, max_retries=1),
+                random=() -> error("zero jitter must not sample randomness"),
+                sleeper=delay -> push!(sleeps, delay)) do _
+            nothing
+        end
+    end
+    @test sleeps == [0.5, 0.5]
+    end # let (restores @testset hard scope)
+end
+
+@testitem "nothing backend (no-ops)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     @test initialize_progress!(nothing) === nothing
     @test update_progress!(nothing, 1) === nothing
     @test update_progress!(nothing, "msg") === nothing
     @test fail_progress!(nothing) === nothing
     @test finalize_progress!(nothing) === nothing
     @test update_progress!(Returns((;a=1)), nothing) === nothing
+    end # let (restores @testset hard scope)
 end
 
-@testset "init root" begin
+@testitem "init root" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     @test root isa ProgressNode
     @test root.impl isa StateProgress
@@ -48,9 +298,11 @@ end
     @test isnothing(root.parent)
     finalize_progress!(root)
     @test root.impl.running == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "init child with N" begin
+@testitem "init child with N" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Step")
     @test child isa ProgressNode
@@ -59,9 +311,11 @@ end
     @test child.parent === root
     @test child in root.children
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "update counter" begin
+@testitem "update counter" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 100; description="Loop")
     update_progress!(child, 50)
@@ -69,9 +323,11 @@ end
     update_progress!(child, 200)
     @test child.impl.i == 100
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "increment" begin
+@testitem "increment" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")
     update_progress!(child)
@@ -79,17 +335,21 @@ end
     update_progress!(child)
     @test child.impl.i == 2
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "string message" begin
+@testitem "string message" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root; description="Info")
     update_progress!(child, "hello")
     @test child.impl.message == "hello"
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail" begin
+@testitem "fail" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     fail_progress!(root)
     @test root.impl.failed == true
@@ -97,9 +357,11 @@ end
     @test !isnothing(root.impl.finalized_at)
     @test is_failed(root)
     @test !is_running(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "timestamps and status helpers" begin
+@testitem "timestamps and status helpers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     @test root.impl.started_at isa Dates.DateTime
     @test isnothing(root.impl.finalized_at)
@@ -114,9 +376,11 @@ end
     @test !is_failed(root)
     @test root.impl.finalized_at isa Dates.DateTime
     @test root.impl.finalized_at >= root.impl.started_at
+    end # let (restores @testset hard scope)
 end
 
-@testset "short_duration" begin
+@testitem "short_duration" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     @test short_duration(Dates.Second(4)) == "4s"
     @test short_duration(Dates.Minute(1) + Dates.Second(23)) == "1m 23s"
     @test short_duration(Dates.Hour(2) + Dates.Minute(5) + Dates.Second(30)) == "2h 5m"
@@ -139,9 +403,14 @@ end
     # ≥ 1 min keeps the two-most-significant join.
     @test short_duration(Dates.Minute(1) + Dates.Second(30)) == "1m 30s"
     @test short_duration(Dates.Hour(1) + Dates.Minute(1)) == "1h 1m"
+    end # let (restores @testset hard scope)
 end
 
-@testset "eta eligibility and formula" begin
+"""
+The parent has a determinate total, but i == 0 gives no rate yet.
+"""
+@testitem "eta eligibility and formula" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # The parent has a determinate total, but i == 0 gives no rate yet.
     parent = initialize_progress!(:state; description="parent", N=4)
     @test eta(parent) === nothing
@@ -184,9 +453,15 @@ end
     @test count("ETA ~", text) == 1
 
     finalize_progress!(parent)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render automatic ETA eligibility" begin
+"""
+Render the real extension over one eligible child plus the important
+omission cases. Exactly one node may carry ETA markup/text.
+"""
+@testitem "htmx_render automatic ETA eligibility" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Render the real extension over one eligible child plus the important
     # omission cases. Exactly one node may carry ETA markup/text.
     parent = initialize_progress!(:state; description="parent", N=4)
@@ -209,9 +484,15 @@ end
     @test count("ETA ~", html) == 1
 
     finalize_progress!(parent)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render duration suffix: work-leaf yes, annotation no" begin
+"""
+A message-bearing work-leaf (disk-load style: message, no counter, not an
+annotation) shows the duration suffix.
+"""
+@testitem "htmx_render duration suffix: work-leaf yes, annotation no" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # A message-bearing work-leaf (disk-load style: message, no counter, not an
     # annotation) shows the duration suffix.
     root = initialize_progress!(:state; description="Root")
@@ -234,9 +515,15 @@ end
 
     finalize_progress!(root)
     finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "_first_seen! render dedup helper (pure, no renderer/DO)" begin
+"""
+Unit-tests Treebars._first_seen! directly on hand-built ProgressNodes —
+no htmx_render, no HTMXObjects, no DynamicObjects involved.
+"""
+@testitem "_first_seen! render dedup helper (pure, no renderer/DO)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Unit-tests Treebars._first_seen! directly on hand-built ProgressNodes —
     # no htmx_render, no HTMXObjects, no DynamicObjects involved.
     root = initialize_progress!(:state; description="Root")
@@ -254,9 +541,15 @@ end
     @test Treebars._first_seen!(seen2, a) == true
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: same-tree duplicate renders once" begin
+"""
+(a) A node add_child!'d under TWO parents in the SAME tree: the doubled
+node's content must appear exactly once in the rendered HTML.
+"""
+@testitem "htmx_render dedup: same-tree duplicate renders once" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (a) A node add_child!'d under TWO parents in the SAME tree: the doubled
     # node's content must appear exactly once in the rendered HTML.
     root = initialize_progress!(:state; description="Root")
@@ -270,9 +563,17 @@ end
     @test count("DupNode", html) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: cross-tree same node renders in EACH (regression guard)" begin
+"""
+(b) THE critical case: the SAME node add_child!'d under two SEPARATE
+roots must still render once in EACH root's own render pass — proving
+per-tree (not global) dedup, which is what preserves DynamicObjects'
+intentional cross-tree substatus sharing.
+"""
+@testitem "htmx_render dedup: cross-tree same node renders in EACH (regression guard)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (b) THE critical case: the SAME node add_child!'d under two SEPARATE
     # roots must still render once in EACH root's own render pass — proving
     # per-tree (not global) dedup, which is what preserves DynamicObjects'
@@ -290,9 +591,15 @@ end
     finalize_progress!(shared)
     finalize_progress!(root1)
     finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: normal single-parent tree unchanged" begin
+"""
+(c) No regression: an ordinary tree with no shared nodes renders each
+child exactly once, same as before this feature.
+"""
+@testitem "htmx_render dedup: normal single-parent tree unchanged" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (c) No regression: an ordinary tree with no shared nodes renders each
     # child exactly once, same as before this feature.
     root = initialize_progress!(:state; description="Root")
@@ -306,9 +613,18 @@ end
     @test count("ChildB", html) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: children fully deduped away -> header-only, no placeholder" begin
+"""
+Edge case folded in at plan-gate review: if a host node's entire child
+list dedupes away (every child already rendered elsewhere in this pass),
+the host's OWN header/duration must still render, but its children
+section must emit nothing rather than the misleading "Starting..." /
+message spinner fallback.
+"""
+@testitem "htmx_render dedup: children fully deduped away -> header-only, no placeholder" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Edge case folded in at plan-gate review: if a host node's entire child
     # list dedupes away (every child already rendered elsewhere in this pass),
     # the host's OWN header/duration must still render, but its children
@@ -330,9 +646,11 @@ end
     @test count("Shared2", html) == 1      # shared renders exactly once (under HostA, visited first)
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render: terminal nodes with only hidden children are not busy" begin
+@testitem "htmx_render: terminal nodes with only hidden children are not busy" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="Root")
 
     finished = initialize_progress!(root; description="FinishedParent")
@@ -355,17 +673,21 @@ end
     end
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "labels create sub-nodes" begin
+@testitem "labels create sub-nodes" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")
     update_progress!(child, 1; speed="fast", temp="hot")
     @test length(child.children) == 2
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize keeps non-transient node in parent" begin
+@testitem "finalize keeps non-transient node in parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child")
     @test length(root.children) == 1
@@ -373,9 +695,11 @@ end
     @test length(root.children) == 1
     @test child.impl.running == false
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize detaches transient node from parent" begin
+@testitem "finalize detaches transient node from parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child", transient=true)
     @test length(root.children) == 1
@@ -387,9 +711,14 @@ end
     finalize_progress!(child)
     @test length(root.children) == 0
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail does NOT detach transient node" begin
+"""
+Intentional asymmetry: failed transients stay pinned so htmx pills can show them
+"""
+@testitem "fail does NOT detach transient node" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     # Intentional asymmetry: failed transients stay pinned so htmx pills can show them
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child", transient=true)
@@ -398,9 +727,11 @@ end
     @test child in root.children
     @test is_failed(child)
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail recurses into children" begin
+@testitem "fail recurses into children" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child1 = initialize_progress!(root, 10; description="Child1")
     child2 = initialize_progress!(root, 10; description="Child2")
@@ -408,17 +739,21 @@ end
     @test is_failed(root)
     @test is_failed(child1)
     @test is_failed(child2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "propagating finalization" begin
+@testitem "propagating finalization" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     combo = initialize_progress!(:state, 10; description="Auto")
     parent_node = combo.parent
     @test parent_node.impl.running == true
     finalize_progress!(combo)
     @test parent_node.impl.running == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "with_progress" begin
+@testitem "with_progress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     result = with_progress(:state; description="Test") do p
         update_progress!(p, "working")
         42
@@ -428,9 +763,11 @@ end
     @test_throws ErrorException with_progress(:state; description="Fail") do p
         error("boom")
     end
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress macro" begin
+@testitem "@progress macro" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     root = initialize_progress!(:state; description="Root")
     count = 0
     @progress root for i in 1:5
@@ -438,9 +775,16 @@ end
     end
     @test count == 5
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress for with bare phase markers" begin
+"""
+Bare `@progress "label"` markers in a for body get an implicit per-iteration
+label-less wrapper node; phases enumerate per iteration and clean up (no
+accumulation), and the label-less wrapper auto-inlines at render.
+"""
+@testitem "@progress for with bare phase markers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Bare `@progress "label"` markers in a for body get an implicit per-iteration
     # label-less wrapper node; phases enumerate per iteration and clean up (no
     # accumulation), and the label-less wrapper auto-inlines at render.
@@ -466,7 +810,7 @@ end
 
     # The label-less wrapper is a bare wrapper that does not render itself.
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     # Phases do not accumulate: each iteration's transient wrapper is detached.
     @test length(counter.children) == 0
 
@@ -491,9 +835,17 @@ end
     iwrap = isnap[]["children"][1]["children"][1]
     @test [c["description"] for c in iwrap["children"]] == ["phase 2"]
     @test length(only(root3.children).children) == 0
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress compact multi-generator for (a bar at every level)" begin
+"""
+`for a in X, b in Y` — Julia's Cartesian sugar, whose header parses as an
+`Expr(:block, …)` — desugars to nested single-var loops so EVERY level
+gets its own progress bar (user decision 8fmgjl). Was a hard
+AssertionError on valid syntax.
+"""
+@testitem "@progress compact multi-generator for (a bar at every level)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # `for a in X, b in Y` — Julia's Cartesian sugar, whose header parses as an
     # `Expr(:block, …)` — desugars to nested single-var loops so EVERY level
     # gets its own progress bar (user decision 8fmgjl). Was a hard
@@ -509,10 +861,10 @@ end
     @test n == 6                                        # full Cartesian product ran
 
     outer = snap[]["children"][1]
-    @test outer["description"] == "for oi in ..."       # outer bar
+    @test outer["description"] == "for oi in 1:2"       # outer bar
     @test outer["N"] == 2
     inner = outer["children"][1]
-    @test inner["description"] == "for di in ..."        # inner bar, nested under outer
+    @test inner["description"] == "for di in 1:3"        # inner bar, nested under outer
     @test inner["N"] == 3
     # Inner bars are transient ⇒ detached each outer iteration, no accumulation.
     @test length(only(root.children).children) == 0
@@ -528,7 +880,7 @@ end
     l2 = l1["children"][1]
     l3 = l2["children"][1]
     @test [l1["description"], l2["description"], l3["description"]] ==
-          ["for a in ...", "for b in ...", "for c in ..."]
+          ["for a in 1:2", "for b in 1:2", "for c in 1:2"]
 
     # Reporter's exact case: compact for inside `@progress "label" begin…end`.
     root3 = initialize_progress!(:state; description="Root3")
@@ -541,9 +893,17 @@ end
     end
     finalize_progress!(root3)
     @test hit == 4
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress @threads compact multi-generator → @threads' own error" begin
+"""
+Per user decision 8fmgjl, don't support under @threads what @threads
+itself rejects. The guardrail passes the compact `@threads for` macrocall
+through untouched, so @threads surfaces its own native error rather than a
+Treebars assert or silently-broken code.
+"""
+@testitem "@progress @threads compact multi-generator → @threads' own error" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Per user decision 8fmgjl, don't support under @threads what @threads
     # itself rejects. The guardrail passes the compact `@threads for` macrocall
     # through untouched, so @threads surfaces its own native error rather than a
@@ -571,9 +931,19 @@ end
     @test err !== nothing
     @test occursin("nested outer loops are not currently supported by @threads",
                    sprint(showerror, err))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress @threads for with bare phase markers" begin
+"""
+Mirror of the serial "@progress for with bare phase markers" testset, for the
+Threads.@threads form. Each concurrent iteration gets its own per-iteration,
+transient, label-less wrapper hosting the pre-enumerated phases; the wrapper
+finalizes + detaches per iteration so phases don't accumulate. Valid at any
+thread count (the lowering + no-accumulation hold under -t1); real concurrency
+is exercised when run with `julia -t2`.
+"""
+@testitem "@progress @threads for with bare phase markers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Mirror of the serial "@progress for with bare phase markers" testset, for the
     # Threads.@threads form. Each concurrent iteration gets its own per-iteration,
     # transient, label-less wrapper hosting the pre-enumerated phases; the wrapper
@@ -594,7 +964,7 @@ end
 
     # The counter node is determinate (length 3) and labeled by the iteration var.
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     # Phases do not accumulate: each iteration's transient wrapper is detached.
     @test length(counter.children) == 0
 
@@ -616,9 +986,18 @@ end
     end
     finalize_progress!(root2)
     @test length(only(root2.children).children) == 0
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — leading stmts sort above labeled phases" begin
+"""
+Implicit leading-phase node: statements BEFORE the first phase marker run
+under an auto LABEL-LESS node created FIRST, so a progress child a leading
+statement creates (via __progress__) sorts ABOVE the labeled phases in the
+OrderedSet `children`. Without the fix the leading-created child was
+add_child!'d after the pending phase nodes and rendered below them.
+"""
+@testitem "@progress block — leading stmts sort above labeled phases" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Implicit leading-phase node: statements BEFORE the first phase marker run
     # under an auto LABEL-LESS node created FIRST, so a progress child a leading
     # statement creates (via __progress__) sorts ABOVE the labeled phases in the
@@ -671,9 +1050,18 @@ end
     snap3 = Treebars.progress_state(root3)
     finalize_progress!(root3)
     @test [c["description"] for c in snap3["children"]] == ["First", "Second"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — a trailing bare string is the VALUE, not a marker" begin
+"""
+Regression guard for snag `trailing-string-f02f8729`: the parser folds a
+mid-block `"s"; stmt` into `Core.@doc`, but the TAIL string has no
+following statement and reaches the walker intact — where it used to be
+consumed as a phase marker (spurious phase + the block returned its node
+instead of the string, violating the §1 value-preserving contract).
+"""
+@testitem "@progress block — a trailing bare string is the VALUE, not a marker" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Regression guard for snag `trailing-string-f02f8729`: the parser folds a
     # mid-block `"s"; stmt` into `Core.@doc`, but the TAIL string has no
     # following statement and reaches the walker intact — where it used to be
@@ -732,9 +1120,16 @@ end
     end
     @test ret5 === "phased 2"
     finalize_progress!(root5)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases explicit node — block" begin
+"""
+Each top-level statement of the block becomes its own pre-enumerated,
+timed phase (label = shortened source). All statements share one try-scope
+so assignments stay visible across phases, and the block is value-preserving.
+"""
+@testitem "@phases explicit node — block" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Each top-level statement of the block becomes its own pre-enumerated,
     # timed phase (label = shortened source). All statements share one try-scope
     # so assignments stay visible across phases, and the block is value-preserving.
@@ -756,9 +1151,16 @@ end
     @test [c["description"] for c in phases] == ["x = 1 + 1", "y = x * 10"]
     # Each phase was started AND finalized ⇒ it carries a per-statement duration.
     @test all(c -> c["running"] == false && c["finalized_at"] !== nothing, phases)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases explicit node — for body (per-iteration phases)" begin
+"""
+In a for body, each statement becomes a per-iteration phase under the
+iteration counter; the per-iteration wrapper finalizes + detaches each
+iteration, so phases never accumulate. The loop-profiling use case.
+"""
+@testitem "@phases explicit node — for body (per-iteration phases)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # In a for body, each statement becomes a per-iteration phase under the
     # iteration counter; the per-iteration wrapper finalizes + detaches each
     # iteration, so phases never accumulate. The loop-profiling use case.
@@ -774,9 +1176,9 @@ end
     end
     finalize_progress!(root)
 
-    # root → counter("for i in ...") → per-iteration label-less wrapper → phases
+    # root → counter("for i in 1:3") → per-iteration label-less wrapper → phases
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     @test counter.impl.i == 3                # counter advanced once per iteration
     @test length(counter.children) == 0      # per-iteration wrappers detached ⇒ no accumulation
 
@@ -788,9 +1190,17 @@ end
     @test wrap["description"] == ""
     @test length(wrap["children"]) == 3
     @test [c["description"] for c in wrap["children"]][2:3] == ["a = i + 1", "b = a * 2"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases bare (active node) inside @progress" begin
+"""
+The ergonomic bare form: `@phases body` with no node, eager-expanded by the
+@progress walker against the active node. Here the transparent
+`@progress root begin … end` makes root the active node, so the @phases
+wrapper attaches directly under root.
+"""
+@testitem "@phases bare (active node) inside @progress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The ergonomic bare form: `@phases body` with no node, eager-expanded by the
     # @progress walker against the active node. Here the transparent
     # `@progress root begin … end` makes root the active node, so the @phases
@@ -809,9 +1219,17 @@ end
     wrap = snap["children"][1]
     @test wrap["description"] == ""
     @test [c["description"] for c in wrap["children"]] == ["p = 3", "q = p + 4"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "skip_progress! — the never-ran terminal state" begin
+"""
+The lifecycle is encoded in two timestamps plus `failed`; `skipped` is the
+combination that was previously unreachable (finalized, never started).
+These assert it stays MUTUALLY EXCLUSIVE with the other four — the whole
+point of not backfilling `started_at`.
+"""
+@testitem "skip_progress! — the never-ran terminal state" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The lifecycle is encoded in two timestamps plus `failed`; `skipped` is the
     # combination that was previously unreachable (finalized, never started).
     # These assert it stays MUTUALLY EXCLUSIVE with the other four — the whole
@@ -844,9 +1262,16 @@ end
     # No-ops on the disabled backend, like every other lifecycle function.
     @test skip_progress!(nothing) === nothing
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize_progress! terminates pending children as skipped" begin
+"""
+Covers every hand-rolled prepare_progress! caller, not just the two phase
+macros: once the parent is done, a child still waiting to start never will,
+so it must not stay `·` pending under a ✓ parent.
+"""
+@testitem "finalize_progress! terminates pending children as skipped" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Covers every hand-rolled prepare_progress! caller, not just the two phase
     # macros: once the parent is done, a child still waiting to start never will,
     # so it must not stay `·` pending under a ✓ parent.
@@ -862,9 +1287,15 @@ end
     @test is_skipped(left)
     @test is_skipped(nested)                   # recurses
     @test is_finished(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — an early return skips the phases it bypassed" begin
+"""
+The reported case: a `return` past later phase markers left them PENDING
+forever under a FINISHED parent. The macro's `finally` now terminates them.
+"""
+@testitem "@progress block — an early return skips the phases it bypassed" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The reported case: a `return` past later phase markers left them PENDING
     # forever under a FINISHED parent. The macro's `finally` now terminates them.
     root = initialize_progress!(:state; description="Root")
@@ -899,9 +1330,16 @@ end
     # terminated by the parent's `finalize_progress!` on the normal path too.
     # Asserted so a future change to that contract shows up here deliberately.
     @test phases[2]["running"] == true && phases[2]["skipped"] == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — an exception fails only the RUNNING phase" begin
+"""
+The corollary, and the one behaviour-visible change: unvisited phases used
+to be marked FAILED with a backfilled started_at (✗, 0s, an error they
+never saw). Only the phase that actually threw is failed now.
+"""
+@testitem "@progress block — an exception fails only the RUNNING phase" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The corollary, and the one behaviour-visible change: unvisited phases used
     # to be marked FAILED with a backfilled started_at (✗, 0s, an error they
     # never saw). Only the phase that actually threw is failed now.
@@ -928,9 +1366,15 @@ end
     @test [c["skipped"] for c in phases] == [false, false, true, true]
     # The failed phase DID run, so it keeps a real start; the bypassed two do not.
     @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
+    end # let (restores @testset hard scope)
 end
 
-@testset "with_prepared_phases — same skip semantics as the macro" begin
+"""
+The HOF twin goes through _run_prepared_phases; it must not diverge from
+the macro form, which is emitted separately.
+"""
+@testitem "with_prepared_phases — same skip semantics as the macro" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The HOF twin goes through _run_prepared_phases; it must not diverge from
     # the macro form, which is emitted separately.
     root = initialize_progress!(:state; description="Root")
@@ -955,9 +1399,11 @@ end
     @test is_failed(kids2[2])
     @test is_skipped(kids2[3])
     finalize_progress!(root); finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text + htmx_render classify skipped distinctly" begin
+@testitem "render_text + htmx_render classify skipped distinctly" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="Root")
     done = prepare_progress!(root; description="ranphase")
     start_progress!(done); finalize_progress!(done)
@@ -981,9 +1427,11 @@ end
     # so a skipped child rendered in the failed group.
     @test !occursin("treebar-child-failed", html)
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "IterableProgress" begin
+@testitem "IterableProgress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")
     collected = []
@@ -992,9 +1440,11 @@ end
     end
     @test collected == [1, 2, 3]
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "Treebars.progress_state (JSON snapshot)" begin
+@testitem "Treebars.progress_state (JSON snapshot)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Step")
     update_progress!(child, 5)
@@ -1016,9 +1466,11 @@ end
     @test state2["running"] == false
 
     @test Treebars.progress_state(nothing) === nothing
+    end # let (restores @testset hard scope)
 end
 
-@testset "Web polling simulation" begin
+@testitem "Web polling simulation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
     root = initialize_progress!(:state; description="Sampling")
     mcmc = initialize_progress!(root, 1000; description="MCMC")
 
@@ -1055,18 +1507,22 @@ end
     end
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "round2" begin
+@testitem "round2" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     @test round2(3.14159) == 3.1
     @test round2(100) == 100
     @test round2(0.00123) == 0.0012
     @test round2((1.23, 4.56)) == (1.2, 4.6)
     @test round2(missing) === missing
     @test round2("hello") == "hello"
+    end # let (restores @testset hard scope)
 end
 
-@testset "short_string" begin
+@testitem "short_string" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     @test short_string(3.14159) == "3.1"
     @test short_string(1000) == "1.0k"
     @test short_string(1_500_000) == "1.5M"
@@ -1108,75 +1564,98 @@ end
     @test short_string([1, 2, 3]) == "[1, 2, 3]"
     @test short_string(:a => 1) == "a => 1"
     @test short_string((; x=1, y=2)) == "(;x=1, y=2)"
+    end # let (restores @testset hard scope)
 end
 
-@testset "Fraction" begin
+@testitem "Fraction" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     f = Fraction(0.5)
     @test short_string(f) == "50%"
     @test Fraction(0.3) < Fraction(0.7)
     @test isequal(Fraction(0.5), Fraction(0.5))
+    end # let (restores @testset hard scope)
 end
 
-@testset "long vector truncation" begin
+@testitem "long vector truncation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     v = collect(1:10)
     s = short_string(v)
     @test occursin("...", s)
     @test startswith(s, "[1, 2, 3,")
     @test endswith(s, "8, 9, 10]")
+    end # let (restores @testset hard scope)
 end
 
-@testset "DO ThreadsafeDict leaves failed substatus visible" begin
+"""
+Asymmetric with the success path: on failure, _fail_substatus! calls
+Treebars.fail_progress! (which does NOT detach transient nodes) so the
+failed substatus stays pinned to the tree for inspection until the user
+retries the key (which triggers DO's retry_failed cleanup).
+"""
+@testitem "DO ThreadsafeDict leaves failed substatus visible" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
     # Asymmetric with the success path: on failure, _fail_substatus! calls
     # Treebars.fail_progress! (which does NOT detach transient nodes) so the
     # failed substatus stays pinned to the tree for inspection until the user
     # retries the key (which triggers DO's retry_failed cleanup).
-    app = _FailedSubstatusTest(; cache_type=:parallel)
-    t = Threads.@spawn app.results[:boom]
+    app = _FailedSubstatusTest()
+    t = Threads.@spawn app.results(:boom)
     try; wait(t); catch; end
     @test istaskdone(t) && istaskfailed(t)
 
     children = app.__status__.children
     @test length(children) == 1
-    @test is_failed(children[1])
+    @test is_failed(only(children))
 
     finalize_progress!(app.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "DO ThreadsafeDict auto-cleans substatus tree" begin
+"""
+The bruno SimState scenario: many cache-miss keys should not accumulate
+children in app.__status__ after their tasks finish. The TreebarsExt
+`_default_substatus` now passes transient=true, so finalize_progress!
+(called by the auto-generated @progress wrapper around the property body)
+detaches each substatus from the root tree on success.
+"""
+@testitem "DO ThreadsafeDict auto-cleans substatus tree" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
     # The bruno SimState scenario: many cache-miss keys should not accumulate
     # children in app.__status__ after their tasks finish. The TreebarsExt
     # `_default_substatus` now passes transient=true, so finalize_progress!
     # (called by the auto-generated @progress wrapper around the property body)
     # detaches each substatus from the root tree on success.
-    app = _AutoCleanupTest(; cache_type=:parallel)
+    app = _AutoCleanupTest()
     @test length(app.__status__.children) == 0
 
     n_keys = 8
-    tasks = [Threads.@spawn(app.results[k]) for k in 1:n_keys]
+    tasks = [Threads.@spawn(app.results(k)) for k in 1:n_keys]
     for t in tasks; wait(t); end
 
     # All tasks finished → all substatus nodes should be detached
     @test length(app.__status__.children) == 0
     # And the actual cached results are still there
-    @test all(app.results[k] == 2k for k in 1:n_keys)
+    @test all(app.results(k) == 2k for k in 1:n_keys)
 
     finalize_progress!(app.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@dynamicstruct inline child substatus" begin
-    p = _InlineSubTest(; cache_type=:parallel)
+@testitem "@dynamicstruct inline child substatus" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
+    p = _InlineSubTest()
     # Accessing p.InlineSub triggers construction with __status__ = substatus scoped to :InlineSub
     child_status = p.InlineSub.__status__
     @test child_status isa Treebars.ProgressNode
     # Child's status is a child of the parent's root status
     @test child_status.parent === p.__status__
-    @test child_status.impl.description == "InlineSub[]"
-    # Inline child inherits cache_type from parent
-    @test p.InlineSub.__cache_type__ == p.__cache_type__
+    @test child_status.impl.description == ""  # undocumented -> bare wrapper per DO doc-gating rule
     finalize_progress!(p.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "Concurrency stress test" begin
+@testitem "Concurrency stress test" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :concurrency] begin
+    let
     root = initialize_progress!(:state; description="Stress")
 
     n_workers = max(4, Threads.nthreads())
@@ -1216,9 +1695,11 @@ end
     @test errors[] == 0
     @test poll_count[] > 0
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text: labels, nesting, counters, state, duration" begin
+@testitem "render_text: labels, nesting, counters, state, duration" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="probe")
     done = initialize_progress!(root; description="load data")
     finalize_progress!(done)
@@ -1257,9 +1738,16 @@ end
     @test sprint(show, MIME"text/plain"(), frozen) == render_text(frozen)
     # Compact 2-arg show stays a single line.
     @test !occursin("\n", sprint(show, frozen))
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text display semantics match the HTML renderer" begin
+"""
+Both renderers go through `_flatten_displayed_children` + `_first_seen!`,
+so a text dump can be trusted to predict what the browser shows. These
+are the three behaviors that would silently diverge if they ever forked.
+"""
+@testitem "render_text display semantics match the HTML renderer" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Both renderers go through `_flatten_displayed_children` + `_first_seen!`,
     # so a text dump can be trusted to predict what the browser shows. These
     # are the three behaviors that would silently diverge if they ever forked.
@@ -1288,9 +1776,17 @@ end
     @test count("DupNode", render_text(root)) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress warns on a docstring-swallowed phase marker" begin
+"""
+A bare `"label"` before a statement inside a `begin…end` is rewritten by
+the PARSER into `Core.@doc`, so it never reaches the macro as a marker and
+renders nothing — parse-clean and precompile-clean, the one @progress
+failure mode no offline check catches. Expansion must warn.
+"""
+@testitem "@progress warns on a docstring-swallowed phase marker" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # A bare `"label"` before a statement inside a `begin…end` is rewritten by
     # the PARSER into `Core.@doc`, so it never reaches the macro as a marker and
     # renders nothing — parse-clean and precompile-clean, the one @progress
@@ -1318,9 +1814,23 @@ end
     @test !Treebars._is_doc_macrocall(:(x = 1))
     @test Treebars._is_doc_macrocall(
         Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), nothing, "d", :(f() = 1)))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress / @phases accept a module-qualified head" begin
+"""
+The walker only ever sees SOURCE, so `Treebars.@progress` is a different
+macro head from `@progress`. Matching only the bare Symbol made every
+qualified spelling invisible to it, and the three failure modes differed:
+a 1-arg marker died with an ARITY error describing a different mistake,
+while the 2-arg wrap and `@phases` silently built against `BACKEND[]`
+(nothing in a web app) and produced NO node at all. Snag
+`used-an-inline-p-baab62f1` — the qualified spelling is what a
+`using DynamicObjects` consumer reaches for, since DO's `@progress` is
+only its LHS parse-marker and no bare `@progress` is in scope.
+(a) Qualified phase MARKERS split the block, exactly like bare ones.
+"""
+@testitem "@progress / @phases accept a module-qualified head" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The walker only ever sees SOURCE, so `Treebars.@progress` is a different
     # macro head from `@progress`. Matching only the bare Symbol made every
     # qualified spelling invisible to it, and the three failure modes differed:
@@ -1413,9 +1923,16 @@ end
     msg = sprint(showerror, err)
     @test occursin("PHASE MARKER", msg)
     @test occursin("using Treebars: @progress", msg)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress nested node argument" begin
+"""
+`@progress node body` in nested position targets that node. Previously
+only reachable by writing the head qualified (which the walker could not
+see, so it expanded standalone); now both spellings agree.
+"""
+@testitem "@progress nested node argument" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # `@progress node body` in nested position targets that node. Previously
     # only reachable by writing the head qualified (which the walker could not
     # see, so it expanded standalone); now both spellings agree.
@@ -1457,9 +1974,20 @@ end
     end
     @test err !== nothing
     @test occursin("detached tree", sprint(showerror, err))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress recognises an EMITTED GlobalRef head (the DO wrap)" begin
+"""
+Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
+EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
+head shape. DynamicObjects emits exactly this for its property-body wrap at
+three sites (DynamicObjects.jl:5708/:5725/:5760 @ 9f9c8a5: the @progress-,
+@PROGRESS- and UNMARKED paths), and since it wraps EVERY unmarked property
+body the GlobalRef is the dominant emitted head in the ecosystem.
+Reported by DynamicObjects:sbpmx-reflect — not visible from this side.
+"""
+@testitem "@progress recognises an EMITTED GlobalRef head (the DO wrap)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
     # EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
     # head shape. DynamicObjects emits exactly this for its property-body wrap at
@@ -1523,9 +2051,17 @@ end
     end
     # One line only: the root. The label-less wrap contributed no row.
     @test length(split(strip(txt2), '\n')) == 1
+    end # let (restores @testset hard scope)
 end
 
-@testset "dispatch-parent ambient (the dispatch default protocol)" begin
+"""
+Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
+default for `polling_fetchindex`'s `parent` kwarg, bound by
+HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
+core (task-local storage / ScopedValues): no extension needed.
+"""
+@testitem "dispatch-parent ambient (the dispatch default protocol)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
     # default for `polling_fetchindex`'s `parent` kwarg, bound by
     # HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
@@ -1566,9 +2102,17 @@ end
 
     finalize_progress!(outer)
     finalize_progress!(inner)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — plain loops auto-instrument with readable labels" begin
+"""
+Regression guard for snag `phase-block-auto-211abcde`: every bare `for` /
+`Threads.@threads for` at any depth under `@progress` becomes a determinate
+counter child of its enclosing node, with a default label showing the
+collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
+"""
+@testitem "@progress block — plain loops auto-instrument with readable labels" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Regression guard for snag `phase-block-auto-211abcde`: every bare `for` /
     # `Threads.@threads for` at any depth under `@progress` becomes a determinate
     # counter child of its enclosing node, with a default label showing the
@@ -1672,4 +2216,5 @@ end
     @test descs5 == ["for t in 1:3", "for x", "rows"]
     @test all(!occursin("...", d) for d in descs5)
     finalize_progress!(root5)
+    end # let (restores @testset hard scope)
 end
