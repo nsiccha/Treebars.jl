@@ -38,7 +38,8 @@ jobs:
           julia --project=test -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="../DynamicObjects.jl"), PackageSpec(path="../HTMX.jl"), PackageSpec(path="../HTMXObjects.jl")]); Pkg.instantiate(); Pkg.precompile()'
       # Direct include, NOT Pkg.test: Pkg.test's 1.10 sandbox cannot resolve
       # this dep shape (unregistered direct + transitive deps). -tauto: the
-      # concurrency stress item needs >= 2 threads (poll_count stays 0 at -t1).
+      # concurrency stress item only exercises true parallelism with >= 2
+      # threads (its handshake makes the assertions hold even at -t1).
       - name: Run tests
         shell: bash
         run: |
