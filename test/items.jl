@@ -423,10 +423,16 @@ The parent has a determinate total, but i == 0 gives no rate yet.
     update_progress!(eligible, 2)
     remaining = eta(eligible)
     @test remaining isa Dates.Millisecond
+    # Loose tolerance is load-bearing: `eta` and `duration` each read the
+    # wall clock, so the two elapsed values differ by the inter-statement
+    # gap — amplified ×4 by the (N-i)/i factor. A loaded CI runner (macOS
+    # 1.13 job: 14ms gap → 56ms, just over the old atol=50) trips a tight
+    # bound. 500ms is still a real formula check: a wrong factor would be
+    # off by seconds against the ~8s magnitude.
     @test isapprox(
         Dates.value(remaining),
         4 * Dates.value(duration(eligible));
-        atol=50,
+        atol=500,
     )
 
     # Automatic ETA is omitted when there is no meaningful estimate.
