@@ -1,0 +1,29 @@
+# Test-only environment (the modern layout). Unregistered deps resolve via
+# `Pkg.develop`, NEVER [sources]: Julia 1.10 ignores [sources] in the test
+# sandbox entirely (gen_target_project drops them; the temp resolve trips
+# "expected package X to be registered"), so [sources] entries here would be
+# dead weight locally and a 1.12+ conflict risk. Instead:
+#   julia --project=test -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()),
+#     PackageSpec(path="<DynamicObjects.jl>"), PackageSpec(path="<HTMX.jl>"),
+#     PackageSpec(path="<HTMXObjects.jl>")]); Pkg.instantiate()'
+# then `Pkg.test()` (or `julia --project=test -e 'include("test/runtests.jl")'`).
+# CI (test.yml) develops GitHub checkouts at exactly these validated SHAs:
+#   DynamicObjects.jl pre-inference  463b82aebc0aff443e9894ea6cec6413c3707ce5
+#   HTMX.jl dev                      d52ce5be0f42e3c375370c85499ba5c395f781a8
+#   HTMXObjects.jl devibe            c7ee273303c130501c47a30d56483f3b3e7a5737
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
+HTMX = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
+HTMXObjects = "b12ef442-5798-4353-80f3-9562b03a0cb6"
+HTTP = "cd3eb016-35fb-5094-929b-558a96fad6f3"
+Pkg = "44cfe95a-1eb2-52ea-b672-e2afdf69b78f"
+Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+TestItemRunner = "f8b46487-2199-4994-9208-9a1283c18c0a"
+Treebars = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
+
+[compat]
+HTTP = "1"
+TestItemRunner = "1"
+julia = "1.10"

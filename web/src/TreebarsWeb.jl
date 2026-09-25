@@ -3,10 +3,7 @@ module TreebarsWeb
 using HTMXObjects
 using Treebars
 import HTTP.WebSockets: send
-using TestModules
 using Random
-
-include("test/runtests.jl")
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
@@ -120,7 +117,7 @@ const APPDATA = AppData()
         ),
     )
 
-    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
+    @include tests = TestRoutes(; project=pkgdir(Treebars))
     @include async       = AsyncComputationsRoutes()
     @include nested      = NestedRoutes()
     @include phases      = PhasesRoutes()
