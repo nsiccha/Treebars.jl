@@ -34,7 +34,7 @@ jobs:
           git clone -b dev https://github.com/nsiccha/HTMX.jl.git ../HTMX.jl
           git -C ../HTMX.jl checkout d52ce5be0f42e3c375370c85499ba5c395f781a8
           git clone -b devibe https://github.com/nsiccha/HTMXObjects.jl.git ../HTMXObjects.jl
-          git -C ../HTMXObjects.jl checkout c7ee273303c130501c47a30d56483f3b3e7a5737
+          git -C ../HTMXObjects.jl checkout 008509ef908d255d9b73eebfceb4bd70bbe6f10c
           julia --project=test -e 'using Pkg; Pkg.develop([PackageSpec(path=pwd()), PackageSpec(path="../DynamicObjects.jl"), PackageSpec(path="../HTMX.jl"), PackageSpec(path="../HTMXObjects.jl")]); Pkg.instantiate(); Pkg.precompile()'
       # Direct include, NOT Pkg.test: Pkg.test's 1.10 sandbox cannot resolve
       # this dep shape (unregistered direct + transitive deps). -tauto: the
