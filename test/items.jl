@@ -969,15 +969,28 @@ is exercised when run with `julia -t2`.
     # Phases do not accumulate: each iteration's transient wrapper is detached.
     @test length(counter.children) == 0
 
-    # Mid-run: at least one label-less wrapper sits under the counter, each carrying
-    # the two pre-enumerated phases. (Under concurrency >1 wrapper may coexist; the
-    # finished-pill filter hides completed ones at render — that's expected.)
+    # Mid-run: at least one label-less wrapper sits under the counter (the
+    # snapshotting iteration's own is always present). A sibling wrapper shows
+    # only the phases it has not finished yet — transient phases detach at
+    # finalize, so a sibling caught inside "fit" shows ["fit"], one between
+    # the two prepares shows ["load"], and one past both shows []. Asserting
+    # every wrapper shows both phases was the Windows-LTS CI failure
+    # (evaluated `["fit"] == ["load", "fit"]`): scheduling luck, not a
+    # product bug. The timing-independent facts: every wrapper's children
+    # are a subsequence of the pre-enumerated ["load", "fit"], and at least
+    # one wrapper — our own, since the snapshot precedes its finalize(load)
+    # in program order — shows both.
     counter_snap = snap[]["children"][1]
-    @test length(counter_snap["children"]) >= 1
-    for wrap_snap in counter_snap["children"]
-        @test wrap_snap["description"] == ""                    # label-less ⇒ auto-inlines
-        @test [c["description"] for c in wrap_snap["children"]] == ["load", "fit"]
+    wrappers = counter_snap["children"]
+    @test length(wrappers) >= 1
+    @test all(w -> w["description"] == "", wrappers)            # label-less ⇒ auto-inlines
+    # NB: progress_state omits "children" for a childless node, so a wrapper
+    # past both phases (both detached, wrapper not yet) has no such key.
+    descs = [[c["description"] for c in get(w, "children", [])] for w in wrappers]
+    @test all(descs) do d
+        d == ["load", "fit"] || d == ["fit"] || d == ["load"] || isempty(d)
     end
+    @test ["load", "fit"] in descs
 
     # Bare @threads for WITHOUT markers (and no nested @progress) is unchanged: the
     # body attaches straight to the counter, no wrapper, no phase children.
