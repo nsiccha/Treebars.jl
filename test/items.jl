@@ -10,15 +10,16 @@ using TestItemRunner
 #   :render       render_text / htmx_render / dedup / ETA / durations
 #   :format       short_string / Fraction / round2 / truncation display
 #   :polling      progress_state snapshot + web polling simulation
-#   :concurrency  threaded stress (meaningful under -tauto, passes at -t1)
+#   :concurrency  threaded stress (handshake-gated first poll; see item)
 #   :do           DynamicObjects substatus fixtures (needs DO in test env)
 #   :retry        busy-resource retry lifecycle (busy_retry.jl)
 #
-# Every body runs inside a bare `let` (see split_items.py): @testset scope
-# was function-hard, item top level is module-soft, and @progress-for loops
-# mutating an outer counter need the hard scope. Bodies are otherwise
-# byte-verbatim. Content fixes vs the TestModules-era sources (all asserted
-# in the generator): 3x `counter.impl.description` "for i in ..." ->
+# Every body runs inside a bare `let`: @testset scope was function-hard,
+# item top level is module-soft, and @progress-for loops mutating an outer
+# counter need the hard scope. Bodies are otherwise byte-verbatim ex-testset
+# bodies; this file is maintained by hand now (the one-shot converter is
+# gone with the TestModules-era sources). Content fixes applied at
+# conversion: 3x `counter.impl.description` "for i in ..." ->
 # "for i in 1:3" (approved readable labels, ecb68fa/0mkpm59) +1 same-shaped
 # comment; 3x dropped `; cache_type=:parallel` ctor kwarg (removed from DO
 # 2026-07-07, decision 2canrl — "drop this kwarg") +2 dropped
@@ -1662,6 +1663,33 @@ end
     n_iterations = 100
     errors = Threads.Atomic{Int}(0)
 
+    # Concurrent poller that reads the tree while it's being mutated. It
+    # starts FIRST and handshakes one snapshot through `first_snap` before
+    # the main task spawns the workers, so `poll_count >= 1` holds
+    # deterministically: without the handshake the assertion races poller
+    # startup against worker completion, and a fast scheduler can finish all
+    # workers before the poller polls once (observed: `0 > 0` on Julia 1.13
+    # CI). The stop flag (not `istaskdone`) ends the poll loop, since the
+    # poller is alive before `workers` exists.
+    poll_count = Threads.Atomic{Int}(0)
+    stop_poller = Threads.Atomic{Bool}(false)
+    snapshot!() = try
+        Treebars.progress_state(root)
+        Threads.atomic_add!(poll_count, 1)
+    catch e
+        Threads.atomic_add!(errors, 1)
+    end
+    first_snap = Channel{Nothing}(1)
+    poller = Threads.@spawn begin
+        snapshot!()
+        put!(first_snap, nothing)
+        while !stop_poller[]
+            snapshot!()
+            yield()
+        end
+    end
+    take!(first_snap)   # block until the first snapshot is banked
+
     # Spawn workers that rapidly create, update, and finalize children
     workers = map(1:n_workers) do w
         Threads.@spawn begin
@@ -1675,21 +1703,8 @@ end
         end
     end
 
-    # Concurrent poller that reads the tree while it's being mutated
-    poll_count = Threads.Atomic{Int}(0)
-    poller = Threads.@spawn begin
-        while any(!istaskdone, workers)
-            try
-                Treebars.progress_state(root)
-                Threads.atomic_add!(poll_count, 1)
-            catch e
-                Threads.atomic_add!(errors, 1)
-            end
-            yield()
-        end
-    end
-
     for w in workers; wait(w); end
+    stop_poller[] = true
     wait(poller)
 
     @test errors[] == 0
