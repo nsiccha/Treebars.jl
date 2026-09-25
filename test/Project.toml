@@ -10,7 +10,7 @@
 # CI (test.yml) develops GitHub checkouts at exactly these validated SHAs:
 #   DynamicObjects.jl pre-inference  463b82aebc0aff443e9894ea6cec6413c3707ce5
 #   HTMX.jl dev                      d52ce5be0f42e3c375370c85499ba5c395f781a8
-#   HTMXObjects.jl devibe            c7ee273303c130501c47a30d56483f3b3e7a5737
+#   HTMXObjects.jl devibe            008509ef908d255d9b73eebfceb4bd70bbe6f10c
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
 DynamicObjects = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
