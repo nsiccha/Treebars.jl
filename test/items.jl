@@ -13,6 +13,7 @@ using TestItemRunner
 #   :concurrency  threaded stress (handshake-gated first poll; see item)
 #   :do           DynamicObjects substatus fixtures (needs DO in test env)
 #   :retry        busy-resource retry lifecycle (busy_retry.jl)
+#   :term         Term backend lifecycle (items_term.jl; needs Term in test env)
 #
 # Every body runs inside a bare `let`: @testset scope was function-hard,
 # item top level is module-soft, and @progress-for loops mutating an outer
