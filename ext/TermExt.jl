@@ -3,7 +3,7 @@ import Term
 import Term.Progress: ProgressBar, ProgressJob, AbstractColumn, DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn
 import Treebars
 import Treebars: initialize_progress!, finalize_progress!, update_progress!, fail_progress!,
-    IncrementBy, ProgressNode, propagates_finalization, root, labels
+    IncrementBy, ProgressNode, propagates_finalization, root, labels, isrunning
 
 TermProgressNode{I<:Union{ProgressBar,ProgressJob},M,C} = ProgressNode{I,M,C}
 
@@ -136,5 +136,20 @@ function finalize_progress!(pbar::ProgressBar)
     Term.Progress.stop!(pbar)
 end
 finalize_progress!(pjob::ProgressJob) = Term.Progress.stop!(pjob)
+
+# Terminal state for Term nodes. Term.jl tracks it on the impl object: a root
+# bar runs until `stop!` clears `running`; a child job is done once `stop!`
+# sets `finished`. Without these the core finalize/fail walk keeps seeing the
+# `isrunning(::ProgressNode) = true` fallback and recurses child -> parent ->
+# child without end (snag with-progress-te-b4c1f9b9).
+isrunning(node::TermProgressNode{ProgressBar}) = node.impl.running
+isrunning(node::TermProgressNode{ProgressJob}) = !node.impl.finished
+
+# Failing a Term node stops it, exactly like finalizing: Term.jl has no failed
+# display state, so both outcomes mean terminal. Without these the fail walk
+# never reaches terminal state (the generic fallback only logs) and recurses
+# the same way.
+fail_progress!(pbar::ProgressBar, args...; kwargs...) = finalize_progress!(pbar)
+fail_progress!(pjob::ProgressJob, args...; kwargs...) = finalize_progress!(pjob)
 
 end
