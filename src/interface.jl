@@ -238,6 +238,47 @@ get [`htmx_ws_render`](@ref), which produces an HTML fragment with a stable
 """
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 
+"""
+    ws_progress(produce, ws; id, description="Working...", N=nothing,
+                parent=nothing, interval=0.1, buffer=64)
+    ws_progress(produce, ws, progress; id, interval=0.1, buffer=64)
+
+Run `produce(publish, progress)` while streaming HTML updates to a matching
+[`htmx_ws_progress`](@ref) view. Load `HTMXObjects` and `HTTP` to activate it.
+The callback receives a normal `:state` progress node and `publish(fragment)`:
+use the node with `@progress` and publish HTMX update nodes as partial results
+arrive. Treebars owns the bounded queue and the sole WebSocket sender; the
+initial tree is sent before the producer starts, and queued updates are flushed
+before the completed tree. The producer runs on the default thread pool.
+
+The return value is the producer's result. Exceptions mark the tree failed and
+are rethrown after its final frame. Disconnecting stops delivery but lets the
+producer finish; blocked publishers are released. The provided-node form owns
+that node's lifecycle; `parent=` instead creates a dedicated child node.
+"""
+ws_progress(produce::Function, ws; kwargs...) =
+    throw(ArgumentError("Load HTMXObjects and HTTP to stream partial results with ws_progress."))
+ws_progress(produce::Function, ws, progress; kwargs...) =
+    throw(ArgumentError("Load HTMXObjects and HTTP to stream partial results with ws_progress."))
+
+"""
+    htmx_ws_progress(content; url, id, progress=nothing,
+                     description="Working...", N=nothing, collapsed=false)
+
+Render the initial content and an open, unobtrusive progress tree, connecting
+to `url` through the htmx WebSocket extension. Pair this with the producer form
+of [`ws_progress`](@ref), using the same unique `id` on both routes. The content
+stays mounted; progress and published updates have separate stable targets.
+`collapsed=true` starts the tree closed; the viewer's choice survives updates.
+An optional `progress` renders an existing node; otherwise show a pending node.
+
+Include `htmx_treebar_styles()` and `htmx_treebar_script()` once in the host
+page's `extra_head`; HTMXObjects' `htmx()` supplies the WebSocket extension.
+This helper accepts any initial HTMX content and update nodes, including AOV
+plots and `append_data`/`update_data`, without a plotting dependency in Treebars.
+"""
+function htmx_ws_progress end
+
 # htmx_ws_render fallback
 """
     htmx_ws_render(node; id="treebar-progress")
