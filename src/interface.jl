@@ -252,9 +252,13 @@ initial tree is sent before the producer starts, and queued updates are flushed
 before the completed tree. The producer runs on the default thread pool.
 
 The return value is the producer's result. Exceptions mark the tree failed and
-are rethrown after its final frame. Disconnecting stops delivery but lets the
-producer finish; blocked publishers are released. The provided-node form owns
-that node's lifecycle; `parent=` instead creates a dedicated child node.
+are rethrown after its final frame. The exception text is never rendered
+into a frame: frames carry tree state, counters and pills only. A consumer
+that wants the reason visible in the browser publishes its own escaped
+alert fragment through `publish` before rethrowing. Disconnecting stops
+delivery but lets the producer finish; blocked publishers are released.
+The provided-node form owns that node's lifecycle; `parent=` instead
+creates a dedicated child node.
 """
 ws_progress(produce::Function, ws; kwargs...) =
     throw(ArgumentError("Load HTMXObjects and HTTP to stream partial results with ws_progress."))
