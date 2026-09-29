@@ -101,6 +101,33 @@ end
     @test occursin("producer failed deliberately", sprint(showerror, last(outcome)))
     @test occursin("data-treebar-status=\"failed\"", last(frames))
     @test length(findall("window.partial();", join(frames))) == 1
+    # Contract (snag popui-stream-err-b8a57b9e): failed frames carry tree
+    # state, counters and pills only — the tree renderer never renders the
+    # exception text. The reason propagates to the route, not the browser.
+    @test all(frame -> !occursin("producer failed deliberately", frame), frames)
+
+    # A consumer that wants the reason visible in the browser publishes its
+    # own escaped alert through `publish` and rethrows the original error.
+    frames, outcome = StreamingFixtures.capture_stream() do ws
+        ws_progress(ws; id="stream", interval=0.001, buffer=8) do publish, p
+            try
+                @progress p for i in 1:32
+                    i == 1 && error("vessel must be 1..5 (got 0)")
+                end
+            catch err
+                publish(h.div(role="alert")("Sampling failed: vessel must be 1..5 (got 0) <done>"))
+                rethrow()
+            end
+        end
+    end
+    @test first(outcome) == :error
+    @test last(outcome) isa TaskFailedException
+    @test occursin("vessel must be", sprint(showerror, last(outcome)))
+    alerted = join(frames)
+    @test occursin("Sampling failed:", alerted)
+    @test occursin("&lt;done&gt;", alerted)
+    @test !occursin("<done>", alerted)
+    @test occursin("data-treebar-status=\"failed\"", last(frames))
 
     frames, outcome = StreamingFixtures.capture_stream() do ws
         p = initialize_progress!(:state; description="Render failure")
