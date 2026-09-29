@@ -3,10 +3,11 @@ import HTMXObjects
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
-    ws_progress, polling_fetchindex,
+    ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children
 import Treebars: add_child!
+import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
 import Treebars: current_dispatch_parent
 import Dates
 using Dates: Millisecond
@@ -603,7 +604,100 @@ Client-side:
 </div>
 ```
 """
-htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+htmx_ws_render(node::ProgressNode; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+
+function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
+        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false)
+    isempty(id) && throw(ArgumentError("htmx_ws_progress requires a nonempty unique id"))
+    node = isnothing(progress) ?
+        initialize_progress!(:state; description, N, pending=true) : progress
+    h.div(; hx_ext="ws", ws_connect=url)(
+        content,
+        h.details(; id=id * "-disclosure", open=(collapsed ? nothing : true))(
+            h.summary("Progress"),
+            h.div(; id=id * "-progress")(htmx_render(node))),
+        h.div(; id=id * "-updates")(),
+    )
+end
+
+_ws_progress_root(::Nothing, N; description) = initialize_progress!(:state; description, N)
+_ws_progress_root(parent::ProgressNode, ::Nothing; description) =
+    initialize_progress!(parent; description, transient=false)
+_ws_progress_root(parent::ProgressNode, N::Integer; description) =
+    initialize_progress!(parent, N; description, transient=false)
+
+function _validate_ws_progress(id, interval, buffer)
+    isempty(id) && throw(ArgumentError("ws_progress requires a nonempty unique id"))
+    interval > 0 || throw(ArgumentError("ws_progress interval must be positive"))
+    buffer > 0 || throw(ArgumentError("ws_progress buffer must be positive"))
+end
+
+function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
+        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64)
+    _validate_ws_progress(id, interval, buffer)
+    node = _ws_progress_root(parent, N; description)
+    ws_progress(produce, ws, node; id, interval, buffer)
+end
+
+function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:StateProgress};
+        id::AbstractString, interval=0.1, buffer::Integer=64)
+    _validate_ws_progress(id, interval, buffer)
+    (is_pending(node) || is_running(node)) ||
+        throw(ArgumentError("ws_progress producer requires a pending or running node"))
+    start_progress!(node)
+    queue = Channel{Any}(buffer)
+    connected = Threads.Atomic{Bool}(true)
+    publish = fragment -> begin
+        connected[] || return nothing
+        try
+            put!(queue, fragment)
+        catch err
+            # Closing the queue releases a blocked publisher on disconnect.
+            connected[] && rethrow()
+            err isa InvalidStateException || rethrow()
+        end
+        nothing
+    end
+    # Render outside the send catch: serialization errors are not disconnects.
+    initial = htmx_ws_render(node; id=id * "-progress")
+    try
+        send(ws, initial)
+    catch err
+        connected[] = false
+        close(queue)
+        @debug "ws_progress client disconnected before production" exception=(err, catch_backtrace())
+    end
+    producer = Threads.@spawn begin
+        try
+            produce(publish, node)
+        catch err
+            fail_progress!(node, err)
+            rethrow()
+        finally
+            finalize_progress!(node)
+        end
+    end
+    render_live = progress -> begin
+        fragments = Any[]
+        for _ in 1:buffer
+            isready(queue) || break
+            push!(fragments, take!(queue))
+        end
+        payload = htmx_ws_render(progress; id=id * "-progress")
+        isempty(fragments) ? payload :
+            payload * node_to_html(h.div(; id=id * "-updates")(fragments...))
+    end
+    result = nothing
+    try
+        connected[] && ws_progress(ws, node; interval, render=render_live)
+    finally
+        connected[] = false
+        isopen(queue) && close(queue)
+        # Observe producer failures even when delivery or rendering failed.
+        result = fetch(producer)
+    end
+    result
+end
 
 """
     polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, kwargs...)
