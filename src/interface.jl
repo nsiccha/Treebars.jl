@@ -250,6 +250,10 @@ use the node with `@progress` and publish HTMX update nodes as partial results
 arrive. Treebars owns the bounded queue and the sole WebSocket sender; the
 initial tree is sent before the producer starts, and queued updates are flushed
 before the completed tree. The producer runs on the default thread pool.
+`publish` honors `hx-swap-oob`: a published `Node` carrying that attribute is
+delivered as a top-level message sibling, so the htmx ws extension swaps it
+into its target outside the `<id>-updates` sink instead of appending it there.
+`Raw`/`String` fragments always sink.
 
 The return value is the producer's result. Exceptions mark the tree failed and
 are rethrown after its final frame. The exception text is never rendered
