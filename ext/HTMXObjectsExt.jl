@@ -234,8 +234,11 @@ htmx_treebar_styles() = h.style(Raw("""
 
 # Client-side duration ticker. Anchors each running .treebar-duration on first
 # sight (and re-anchors after every htmx swap, since data-elapsed-ms comes back
-# fresh from the server) then ticks textContent every 250ms locally — so the
+# fresh from the server) then ticks textContent every 100ms locally — so the
 # counter advances smoothly between server polls instead of stuttering.
+# Tracking is incremental: two live sets (running spans, poller wrappers)
+# seeded once and kept current by a MutationObserver, so ticks and swaps cost
+# work proportional to the active nodes / changed fragment, never the document.
 htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
@@ -354,18 +357,93 @@ htmx_treebar_script() = h.script(Raw("""
             if (el._tbLast !== t){ el.textContent = t; el._tbLast = t; }
         }
     }
+    // Incremental active-progress tracking: the ticker NEVER scans the
+    // document. Two live sets — running duration spans and poller wrappers —
+    // are seeded once at startup and kept current by a MutationObserver
+    // below, so each tick costs work proportional to the active progress
+    // nodes and each swap costs work proportional to the changed fragment;
+    // settled hidden trees cost nothing. (Was: document-wide
+    // querySelectorAll on every 100ms tick and every swap — ~0.3 CPU-s per
+    // 30s on a 16k-node page. Snag browser-progress-573fb052.)
+    var liveRunning = new Set();
+    var livePollers = new Set();
+    var RUNNING_SEL = '.treebar-duration[data-treebar-status="running"]';
+    var POLLER_SEL = '.treebar-poller';
+    function trackRunning(el){
+        if (el._tbAnchor === undefined) anchor(el);
+        liveRunning.add(el);
+    }
+    function collectRunning(root){
+        if (root.nodeType === 1 && root.matches(RUNNING_SEL)) trackRunning(root);
+        if (root.nodeType !== 1 && root.nodeType !== 9) return;
+        var q = root.querySelectorAll(RUNNING_SEL);
+        for (var i = 0; i < q.length; i++) trackRunning(q[i]);
+    }
+    function collectPollers(root){
+        if (root.nodeType === 1 && root.matches(POLLER_SEL)) livePollers.add(root);
+        if (root.nodeType !== 1 && root.nodeType !== 9) return;
+        var q = root.querySelectorAll(POLLER_SEL);
+        for (var j = 0; j < q.length; j++) livePollers.add(q[j]);
+    }
+    function collect(root){ collectRunning(root); collectPollers(root); }
+    // Lazy prune: removals and terminalizations drop out on the next tick.
+    function runningAlive(el){
+        if (!el.isConnected || el.dataset.treebarStatus !== 'running'){ liveRunning.delete(el); return false; }
+        return true;
+    }
+    function syncBadgeLive(p){
+        if (!p.isConnected || !p.classList.contains('treebar-poller')){ livePollers.delete(p); return; }
+        syncBadge(p);
+    }
     function syncAllBadges(){
-        document.querySelectorAll('.treebar-poller').forEach(syncBadge);
+        livePollers.forEach(syncBadgeLive);
     }
     window.__tbSyncBadge = syncBadge;
     function reanchorAll(){
-        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(anchor);
+        liveRunning.forEach(function(el){ if (runningAlive(el)) anchor(el); });
     }
     function tickAll(){
-        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
+        liveRunning.forEach(function(el){ if (runningAlive(el)) tick(el); });
         syncAllBadges();
     }
-    function reanchorAndTick(evt){ terminalizePoller(evt); reanchorAll(); tickAll(); }
+    function reanchorAndTick(evt){
+        terminalizePoller(evt);
+        // Scope the synchronous refresh to the swapped target; the observer
+        // below backstops every other insertion path (OOB inserts outside
+        // the target, ws frames, in-place morphs), so this never needs a
+        // document-wide scan.
+        var t = evt && evt.detail && (evt.detail.target || evt.detail.elt);
+        if (t && (t.nodeType === 1 || t.nodeType === 9)) collect(t);
+        reanchorAll();
+        tickAll();
+    }
+    // Backstop: every DOM insertion and every status/estimate edit lands
+    // here, so nodes the swap handler cannot see still join or leave the
+    // live sets. Each callback costs work proportional to the changed nodes
+    // only. Poller wrappers are born by insertion (childList) and die by
+    // terminalization or removal (lazy prune in syncBadgeLive) — never by a
+    // class flip a filter would need to watch, so `class` stays unobserved.
+    var tbObserver = new MutationObserver(function(records){
+        for (var i = 0; i < records.length; i++){
+            var r = records[i];
+            if (r.type === 'childList'){
+                for (var j = 0; j < r.addedNodes.length; j++) collect(r.addedNodes[j]);
+            } else if (r.type === 'attributes' && r.target.nodeType === 1){
+                var el = r.target;
+                if (!el.classList.contains('treebar-duration')) continue;
+                if (r.attributeName === 'data-treebar-status'){
+                    if (el.dataset.treebarStatus === 'running') trackRunning(el);
+                    else liveRunning.delete(el);
+                } else if ((r.attributeName === 'data-elapsed-ms' || r.attributeName === 'data-eta-ms') &&
+                           el.dataset.treebarStatus === 'running'){
+                    // A morph refreshed the server estimate in place:
+                    // re-anchor so the ticker counts from the fresh value.
+                    anchor(el);
+                    liveRunning.add(el);
+                }
+            }
+        }
+    });
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
     // Pause: cancel a poller's own `every Xs` poll request while its wrapper
@@ -382,6 +460,14 @@ htmx_treebar_script() = h.script(Raw("""
         }
     });
     function start(){
+        // The ONE full-document pass: seeds both live sets. Everything
+        // after this is incremental (scoped swap refresh + observer).
+        collect(document);
+        if (!window.__tbObserverStarted){
+            window.__tbObserverStarted = true;
+            tbObserver.observe(document.documentElement, {childList: true, subtree: true,
+                attributes: true, attributeFilter: ['data-treebar-status', 'data-elapsed-ms', 'data-eta-ms']});
+        }
         reanchorAndTick();
         if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 100); }
     }

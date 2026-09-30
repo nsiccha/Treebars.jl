@@ -2253,3 +2253,32 @@ collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
     finalize_progress!(root5)
     end # let (restores @testset hard scope)
 end
+
+@testitem "polling ticker script tracks active progress incrementally (no document scan per tick)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
+    # Snag browser-progress-573fb052: on a 16k-node page the 100ms ticker +
+    # every htmx swap ran document-wide querySelectorAll scans (tickAll /
+    # syncAllBadges / reanchorAll ~0.3 CPU-s per 30s). The script now seeds two
+    # live sets once and maintains them with a MutationObserver, so each tick
+    # costs work proportional to the active progress nodes and each swap costs
+    # work proportional to the changed fragment.
+    ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+    @test ext !== nothing
+    js = sprint(io -> show(io, MIME"text/html"(), Treebars.htmx_treebar_script()))
+    # Incremental tracking present: live sets + observer + lazy prune.
+    @test occursin("MutationObserver", js)
+    @test occursin("liveRunning", js)
+    @test occursin("livePollers", js)
+    @test occursin("attributeFilter", js)
+    @test occursin("isConnected", js)
+    # No document-wide scan anywhere in the runtime: the seeding pass feeds
+    # `document` into scoped-root queries, never `document.querySelectorAll`.
+    @test !occursin("document.querySelectorAll", js)
+    # Preserved behavior: 100ms cadence, swap hooks, pause transport, badge mirror.
+    @test occursin("setInterval(tickAll, 100)", js)
+    @test occursin("htmx:afterSwap", js)
+    @test occursin("htmx:oobAfterSwap", js)
+    @test occursin("htmx:beforeRequest", js)
+    @test occursin("__tbSyncBadge", js)
+    end # let (restores @testset hard scope)
+end
