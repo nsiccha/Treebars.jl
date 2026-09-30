@@ -718,6 +718,35 @@ function _validate_ws_progress(id, interval, buffer)
     buffer > 0 || throw(ArgumentError("ws_progress buffer must be positive"))
 end
 
+# A published fragment carrying `hx-swap-oob` targets an element OUTSIDE the
+# stream sink. The htmx ws extension runs oobSwap over TOP-LEVEL message
+# children only, so such a node must be delivered as a top-level sibling —
+# nested inside the `<id>-updates` wrapper it lands verbatim in the sink
+# (snag ws-progress-publ-d1b74c9b). HTMX hyphenates builder kwargs, so
+# `hx_swap_oob=...` is stored as `Symbol("hx-swap-oob")`; the `data-` prefixed
+# spelling is htmx-equivalent and honored too. Raw/String fragments always sink.
+_is_oob_fragment(f) = f isa Node &&
+    (haskey(f.attrs, Symbol("hx-swap-oob")) || haskey(f.attrs, Symbol("data-hx-swap-oob")))
+
+function _ws_progress_frame(id, progress, fragments)
+    payload = htmx_ws_render(progress; id=id * "-progress")
+    isempty(fragments) && return payload
+    plain = Any[]
+    oob = Any[]
+    for f in fragments
+        if _is_oob_fragment(f)
+            push!(oob, f)
+        else
+            push!(plain, f)
+        end
+    end
+    isempty(plain) || (payload *= node_to_html(h.div(; id=id * "-updates")(plain...)))
+    for f in oob
+        payload *= node_to_html(f)
+    end
+    payload
+end
+
 function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
         description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64)
     _validate_ws_progress(id, interval, buffer)
@@ -769,9 +798,7 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
             isready(queue) || break
             push!(fragments, take!(queue))
         end
-        payload = htmx_ws_render(progress; id=id * "-progress")
-        isempty(fragments) ? payload :
-            payload * node_to_html(h.div(; id=id * "-updates")(fragments...))
+        _ws_progress_frame(id, progress, fragments)
     end
     result = nothing
     try

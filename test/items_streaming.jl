@@ -142,6 +142,67 @@ end
     @test isempty(frames)
 end
 
+@testitem "Streaming OOB fragments swap outside the sink" tags=[:streaming] setup=[TreebarsTestImports, StreamingFixtures] begin
+    # Contract (snag ws-progress-publ-d1b74c9b): a published Node carrying
+    # `hx-swap-oob` targets an element OUTSIDE the `<id>-updates` sink. The
+    # htmx ws extension runs oobSwap over TOP-LEVEL message children only, so
+    # such a node must be delivered as a top-level sibling — nested inside the
+    # sink wrapper it lands verbatim (duplicate ids, stale target).
+    oob_node() = h.div(; id="oob-target", hx_swap_oob="innerHTML")("oob-marker-9c1e")
+
+    # Separated delivery: the plain fragment rides inside the sink wrapper;
+    # the OOB-only frame carries no sink wrapper at all.
+    frames, outcome = StreamingFixtures.capture_stream() do ws
+        ws_progress(ws; id="stream", interval=0.001, buffer=8) do publish, p
+            publish(h.div("plain-marker-7f3a"))
+            sleep(0.05)
+            publish(oob_node())
+            sleep(0.05)
+            :done
+        end
+    end
+    @test outcome == (:ok, :done)
+    plain_frames = filter(f -> occursin("plain-marker-7f3a", f), frames)
+    oob_frames = filter(f -> occursin("oob-marker-9c1e", f), frames)
+    @test length(plain_frames) == 1
+    @test length(oob_frames) == 1
+    @test occursin("id=\"stream-updates\"", only(plain_frames))
+    oob_frame = only(oob_frames)
+    @test !occursin("stream-updates", oob_frame)
+    @test occursin("id=\"stream-progress\"", oob_frame)
+    @test occursin("hx-swap-oob=\"innerHTML\"", oob_frame)
+
+    # Mixed delivery: both fragments in one drain — the sink wrapper closes
+    # before the OOB node opens, so it is a sibling, never nested. The plain
+    # fragment is a script (no divs), so the first `</div>` after the wrapper
+    # opens is the wrapper's own close tag. Robust to either timing outcome:
+    # the same assertions hold when the fragments separate across frames.
+    frames, outcome = StreamingFixtures.capture_stream() do ws
+        ws_progress(ws; id="stream", interval=0.001, buffer=8) do publish, p
+            publish(h.script(Raw("window.plain_marker();")))
+            publish(oob_node())
+            sleep(0.05)
+            :done
+        end
+    end
+    @test outcome == (:ok, :done)
+    joined = join(frames)
+    @test length(findall("window.plain_marker();", joined)) == 1
+    @test length(findall("oob-marker-9c1e", joined)) == 1
+    oob_frames = filter(f -> occursin("oob-marker-9c1e", f), frames)
+    @test !isempty(oob_frames)
+    for frame in oob_frames
+        @test occursin("hx-swap-oob=\"innerHTML\"", frame)
+        i_updates = findfirst("id=\"stream-updates\"", frame)
+        isnothing(i_updates) && continue  # OOB-only frame: trivially outside the sink.
+        rest = frame[last(i_updates):end]
+        i_close = findfirst("</div>", rest)
+        i_oob = findfirst("id=\"oob-target\"", rest)
+        @test !isnothing(i_close) && !isnothing(i_oob)
+        @test last(i_close) < first(i_oob)
+    end
+end
+
 @testitem "Streaming disconnect releases bounded publishers" tags=[:streaming] setup=[TreebarsTestImports, StreamingFixtures] begin
     finished = Ref(false)
     p = initialize_progress!(:state, 96; description="Disconnect")
