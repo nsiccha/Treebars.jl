@@ -105,6 +105,44 @@ Three states are handled automatically:
 - **Completed** — calls the `render_result` callback and terminalizes the stable
   wrapper as `.treebar-terminal`; no active poll transport or controls remain.
 
+While it polls in-flight work, `polling_fetchindex` also reports the compute to
+HTMXObjects' job ledger (`HTMXObjects.track_job!`), so hand-rolled pollers show
+on HTMXObjects' runtime dashboard and job boards. Pass `track_job=false` to opt
+out.
+
+### Live boards — `htmx_render_board`
+
+[`htmx_render_board`](@ref) renders a keyed, changing collection of progress
+trees: a "running jobs" list whose members appear, update in place, and leave.
+The board is generic — the caller supplies the entries:
+
+```julia
+entries = [
+    (; key=job.id, label=job.label, state=job.state,        # :queued/:running/:done/:failed
+       elapsed_ms=job.elapsed_ms, node=job.progress,        # optional ProgressNode
+       meta=(route=job.route, polls=job.polls),             # small label/value pairs
+       href=job.url),                                       # optional link
+    …
+]
+htmx_render_board(entries; poll_url="/jobs", poll_interval="1s",
+                  empty="No running jobs.", id="jobs")
+```
+
+Each poll returns the full current list, and the client script reconciles it
+by `key`: existing items keep their `.treebar-board-item` wrapper (so an
+expanded tree and pill toggles survive) and swap only their content, new items
+are inserted in server order, and items that drop out of the list show their
+final state for `linger_ms` before leaving (a `:done`/`:failed` entry stays as
+long as the server lists it). Running
+items tick locally between polls; queued items render dim, like pending nodes
+(`meta=(position=3,)` reads "queued · #3"). The header carries the
+running/queued count and a Pause button that stops the board's polls and
+freezes it.
+
+For push instead of polling, [`ws_board`](@ref) sends the same full snapshots
+over a WebSocket (the htmx `ws` extension hands each frame to the same
+reconciler); other transports can call `window.treebarUpdateBoard(html)`.
+
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides
