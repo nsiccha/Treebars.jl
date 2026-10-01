@@ -17,15 +17,23 @@ Prefer the convenience entry points ([`@progress`](@ref),
 [`with_progress`](@ref), [`with_prepared_phases`](@ref)) over building
 `ProgressNode`s by hand.
 """
-struct ProgressNode{I,M,C}
-    impl::I
-    meta::M
-    parent::Union{ProgressNode,Nothing}
-    children::C
+# `mutable` with all-`const` fields: the node is never reassigned, but a node's
+# IDENTITY is what every container keys on — `children` sets (`push!`/`pop!` on
+# attach/detach), the renderers' per-pass `IdSet` dedup, DO's repeat
+# `add_child!`. For an immutable struct `objectid`/`hash` are structural and
+# recurse through the boxed `parent` field, i.e. cost O(depth) (~70 ns per
+# ancestor, measured) on every one of those operations; a mutable node hashes
+# by address in O(1). Two distinct nodes are never structurally equal (each owns
+# a fresh `interrupt` Atomic), so `===` means the same thing either way.
+mutable struct ProgressNode{I,M,C}
+    const impl::I
+    const meta::M
+    const parent::Union{ProgressNode,Nothing}
+    const children::C
     # Backend-agnostic, and atomic rather than lock-guarded so a runner can
     # poll `interrupt_requested` in a hot loop while a controller on another
     # thread flips it.
-    interrupt::Threads.Atomic{Bool}
+    const interrupt::Threads.Atomic{Bool}
     function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}())
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
             impl, meta, parent, children, Threads.Atomic{Bool}(false)
