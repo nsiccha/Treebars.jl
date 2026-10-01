@@ -54,14 +54,19 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         let e = eta(sp)
             isnothing(e) || push!(parts, "· ETA ~$(short_duration(e))")
         end
+        _shows_interrupt_request(node) && push!(parts, _INTERRUPT_TEXT)
         join(parts, " ")
     end
 end
 
+const _INTERRUPT_TEXT = "· interrupt requested"
+
 # Backends other than StateProgress (Term.jl bars, custom impls) carry no
 # introspectable state contract — name the impl type and let the tree shape
 # carry the rest.
-_text_summary(node::ProgressNode) = string(_state_marker(node), " ", nameof(typeof(node.impl)))
+_text_summary(node::ProgressNode) = join(filter(!isempty, [
+    _state_marker(node), string(nameof(typeof(node.impl))),
+    _shows_interrupt_request(node) ? _INTERRUPT_TEXT : ""]), " ")
 
 function _print_text_children(io::IO, node::ProgressNode, prefix::String, seen)
     children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
@@ -106,7 +111,9 @@ println(render_text(tree))
 
 Each line is `<state> <description> [(i/N)] [— message] [duration]`, where
 state is `·` pending, `▶` running, `✓` finished, `✗` failed, or `⊘` skipped.
-Pending and skipped nodes show no duration because they never started.
+Pending and skipped nodes show no duration because they never started. A
+pending or running node that [`request_interrupt!`](@ref) was called on ends in
+`· interrupt requested` until it terminates.
 
 Nodes are shown exactly as the HTML renderer would show them: bare wrappers
 (no description, message or counter) and `displayed=false` nodes inline,

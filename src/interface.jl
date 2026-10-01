@@ -114,6 +114,45 @@ skip_progress!(::Nothing) = nothing
 skip_progress!(::Any) = nothing
 
 """
+    request_interrupt!(node) -> node
+
+Ask the work running under `node` to stop early. Sets `node`'s interrupt flag,
+after which [`interrupt_requested`](@ref) reports `true` for `node` and for
+every node below it — including children created after the request — while
+siblings and ancestors are unaffected.
+
+Purely a **request**: nothing throws, stops, or changes lifecycle state. A
+runner opts in by checking [`interrupt_requested`](@ref) at points where it can
+wind down (e.g. a sampler at a checkpoint boundary) and then finalizes or fails
+its node as usual; a runner that never checks simply runs to completion.
+
+Thread-safe and idempotent; the flag stays set for the node's lifetime, so
+target the node of the job you mean to stop rather than a long-lived root that
+later jobs will also hang under. No-op for `nothing`.
+"""
+request_interrupt!(::Nothing) = nothing
+
+"""
+    interrupt_requested(node) -> Bool
+
+`true` when [`request_interrupt!`](@ref) was called on `node` or on any of its
+ancestors. Lock-free (one atomic load per level of the `parent` chain), so it
+is cheap enough to poll inside a hot loop. `false` for `nothing` — a disabled
+progress tree is never interrupted.
+
+```julia
+for i in 1:n_steps
+    interrupt_requested(progress) && break   # opt in: stop early, keep what we have
+    step!(state)
+    update_progress!(progress)
+end
+```
+
+[`throw_if_interrupted`](@ref) is the one-line form for work that simply aborts.
+"""
+interrupt_requested(::Nothing) = false
+
+"""
     htmx_render(node; article=false, scoped=true, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation

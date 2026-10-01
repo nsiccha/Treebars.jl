@@ -6,7 +6,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
     htmx_render_board, htmx_ws_render_board, ws_board,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
-    _flatten_displayed_children
+    _flatten_displayed_children, _shows_interrupt_request
 import Treebars: add_child!
 import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
 import Treebars: current_dispatch_parent
@@ -69,6 +69,11 @@ function _duration_span(sp::StateProgress)
     end
 end
 
+# Pending-interrupt marker for a node header (see `_shows_interrupt_request`):
+# the same text `render_text` prints, so the two renderers agree.
+_interrupt_span(node::ProgressNode) =
+    _shows_interrupt_request(node) ? h.span(class="treebar-interrupt")("interrupt requested") : ""
+
 # Global stylesheet for treebar components — include via extra_head in htmx()
 htmx_treebar_styles() = h.style(Raw("""
 .treebar-pills { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
@@ -103,6 +108,7 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
+.treebar-interrupt { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 .treebar-node { margin-bottom: 0.25rem; }
 
@@ -716,6 +722,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
     children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen)
     lock(sp.lock) do
         duration_node = _duration_span(sp)
+        interrupt_node = _interrupt_span(node)
         pending = is_pending(sp)
         node_class = pending      ? "treebar-node treebar-pending" :
                      is_skipped(sp) ? "treebar-node treebar-skipped" :
@@ -728,6 +735,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
                     !isempty(sp.message) ? h.span(class="treebar-message")(sp.message) : "",
                     duration_node,
+                    interrupt_node,
                 ),
                 h.progress(value=string(sp.i), max=string(sp.N), class="treebar-progress")(),
                 children_node,
@@ -736,20 +744,20 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
             header_text = isempty(sp.description) ? sp.message : "$(sp.description) $(sp.message)"
             h.div(class=node_class)(
                 h.div(class="treebar-header")(header_text,
-                    get(node.meta, :annotation, false) ? "" : duration_node),
+                    get(node.meta, :annotation, false) ? "" : duration_node, interrupt_node),
                 children_node,
             )
         else
             if article
                 # Nested container node
                 h.article(class=node_class)(
-                    !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, duration_node) : "",
+                    !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, duration_node, interrupt_node) : "",
                     children_node,
                 )
             else
                 # Nested container node
                 h.div(class=node_class)(
-                    !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, duration_node) : "",
+                    !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, duration_node, interrupt_node) : "",
                     children_node,
                 )
             end

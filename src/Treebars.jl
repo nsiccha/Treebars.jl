@@ -11,6 +11,7 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     polling_fetchindex, htmx_render_board, htmx_ws_render_board, ws_board,
     is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, duration, eta, short_duration,
     prepare_progress!, start_progress!, skip_progress!,
+    request_interrupt!, interrupt_requested, throw_if_interrupted, ProgressInterrupted,
     round2, short_string, Fraction,
     render_text
 
