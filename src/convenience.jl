@@ -242,7 +242,9 @@ end
 # such loop dispatched `iterate` dynamically and allocated twice per iteration,
 # even with progress disabled. The `:state` impl is additionally kept in a
 # small-`Union` field so the per-iteration tick is a static call; other backends
-# take one dynamic call per iteration.
+# take one dynamic call per iteration. The `iterate` methods are `@inline`:
+# without it the `:state` tick measured ~3 ns/iteration slower than the old
+# node-typed iterator.
 struct IterableProgress{W}
     progress::Any
     counter::Union{Nothing,StateProgress}
@@ -272,11 +274,11 @@ _iterable_node(progress, it; kwargs...) =
                       initialize_progress!(progress; kwargs...)
 initialize_iterable_progress!(progress, it; kwargs...) =
     IterableProgress(_iterable_node(progress, it; kwargs...), it)
-function Base.iterate(p::IterableProgress)
+@inline function Base.iterate(p::IterableProgress)
     _advance!(p, 0)
     iterate(p.wrapped)
 end
-function Base.iterate(p::IterableProgress, state)
+@inline function Base.iterate(p::IterableProgress, state)
     _advance!(p, IncrementBy(1))
     iterate(p.wrapped, state)
 end
