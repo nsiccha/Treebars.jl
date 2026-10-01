@@ -717,7 +717,7 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=_MAX_FINISHED_SHOWN, kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
     children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen, max_finished)
@@ -800,14 +800,14 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 # counts/grouping, so a node already rendered earlier in this same pass (a
 # different parent reached it first) is dropped from this level entirely —
 # no stray pill count, no duplicate render.
-# Per `.treebar-children` container, how many FINISHED children — and,
-# separately, how many SKIPPED ones — are rendered individually. Both groups
-# are hidden by default (`data-show-finished/skipped="0"`), yet rendering every
-# one cost each poll ~14 ms / 220 KB at 1k finished children and ~280 ms /
-# 2.2 MB at 10k (longer than the default 200 ms poll interval). Pending,
-# running and failed children are never elided; pills always count everything.
-# Decision `0cy4jdg`. `render_text` is a debugging dump and keeps printing all.
-const _MAX_FINISHED_SHOWN = 50
+# `max_finished`: an OPT-IN cap on how many FINISHED children — and,
+# separately, how many SKIPPED ones — a `.treebar-children` container renders
+# individually. The default is `nothing`, which renders every child: the user
+# does not want capped output by default (feedback on decision `1vsha8b`).
+# A caller that knowingly trades fidelity for poll cost can pass a number:
+# rendering every hidden finished child cost ~14 ms / 220 KB per poll at 1k
+# finished children and ~280 ms / 2.2 MB at 10k. Pending, running and failed
+# children are never elided, and pills always count everything.
 
 # Which children render individually: of the finished ones only the newest
 # `max_finished` (last in `children` order, i.e. most recently attached), and
@@ -831,7 +831,7 @@ function _elide_finished(children, max_finished)
 end
 
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=_MAX_FINISHED_SHOWN)
+function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
     isnothing(max_finished) || max_finished >= 0 ||
         throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl

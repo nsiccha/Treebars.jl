@@ -153,7 +153,7 @@ end
 interrupt_requested(::Nothing) = false
 
 """
-    htmx_render(node; article=false, scoped=true, max_finished=50, kwargs...)
+    htmx_render(node; article=false, scoped=true, max_finished=nothing, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
 lives in the HTMXObjects package extension — loading `HTMXObjects` activates
@@ -202,7 +202,7 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
 
 # htmx_render_children — implemented in HTMXObjectsExt
 """
-    htmx_render_children(node; scoped=true, max_finished=50)
+    htmx_render_children(node; scoped=true, max_finished=nothing)
 
 Render the children of a `ProgressNode` as an HTML fragment, classifying them
 into pending / running / finished / skipped / failed groups and emitting toggle
@@ -210,14 +210,12 @@ pills (`"N pending"`, `"N finished"`, `"N skipped"`, `"N failed"`) at the top.
 Implementation lives in the HTMXObjects package extension — loading
 `HTMXObjects` activates it.
 
-Pills count every child, but per container only the newest `max_finished`
-finished children are rendered individually (likewise skipped). Older ones are
-replaced by one `.treebar-elided` line ("N earlier finished not shown") that
-shows and hides with that group's pill. Both groups are hidden by default, so
-this bounds each poll's HTML by the visible tree rather than by history.
-Pending, running and failed children are never elided. Pass
-`max_finished=nothing` to render every child (for example a history view).
-[`render_text`](@ref) does not elide.
+Every child is rendered by default (`max_finished=nothing`). As an opt-in,
+`max_finished=k` renders individually only the newest `k` finished children
+per container (likewise skipped). The older ones are replaced by one
+`.treebar-elided` line ("N earlier finished not shown") that shows and hides
+with that group's pill. Pills count every child either way. Pending, running
+and failed children are never elided. [`render_text`](@ref) never elides.
 
 `scoped=true` (the default) emits `data-show-*` attributes on the wrapper so
 the pills toggle visibility scoped to this children container. Inside a

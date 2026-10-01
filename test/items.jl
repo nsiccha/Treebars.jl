@@ -685,7 +685,7 @@ end
     end # let (restores @testset hard scope)
 end
 
-@testitem "htmx_render elides finished/skipped children beyond the newest max_finished" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+@testitem "htmx_render renders every child by default; max_finished elision is opt-in" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
     let
     html(x) = sprint(io -> show(io, MIME"text/html"(), x))
     root = initialize_progress!(:state; description="Root")
@@ -704,7 +704,15 @@ end
     end
     initialize_progress!(loop; description="still-running-")
 
-    out = html(htmx_render(root))
+    # Default: no cap — every child renders, no elision note.
+    full = html(htmx_render(root))
+    @test count(k -> occursin("fin-$k-", full), 1:60) == 60
+    @test count(k -> occursin("skip-$k-", full), 1:55) == 55
+    @test !occursin("treebar-elided", full)
+    explicit = html(htmx_render(root; max_finished=nothing))
+    @test count(k -> occursin("fin-$k-", explicit), 1:60) == 60 && !occursin("treebar-elided", explicit)
+
+    out = html(htmx_render(root; max_finished=50))
     # Pills count EVERY child, elided or not.
     @test occursin("60 finished", out)
     @test occursin("55 skipped", out)
@@ -722,10 +730,7 @@ end
     @test count(k -> occursin("fail-$k-", out), 1:60) == 60
     @test occursin("still-running-", out)
 
-    # `max_finished=nothing` renders everything; a smaller cap applies at every level.
-    full = html(htmx_render(root; max_finished=nothing))
-    @test count(k -> occursin("fin-$k-", full), 1:60) == 60
-    @test !occursin("treebar-elided", full)
+    # A smaller cap applies the same way.
     small = html(htmx_render_children(loop; max_finished=3))
     @test count(k -> occursin("fin-$k-", small), 1:60) == 3
     @test occursin("57 earlier finished not shown", small)
@@ -740,7 +745,7 @@ end
     for k in 1:50
         finalize_progress!(initialize_progress!(r2; description="x$k-"))
     end
-    @test !occursin("treebar-elided", html(htmx_render(r2)))
+    @test !occursin("treebar-elided", html(htmx_render(r2; max_finished=50)))
     finalize_progress!(root)
     end # let (restores @testset hard scope)
 end
