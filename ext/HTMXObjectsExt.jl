@@ -879,10 +879,12 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
     # descendant CSS rule applies — otherwise the inner direct-child rule
     # would keep hiding finished children even after the wrapper toggle flips.
     #
-    # `rendered` is passed as ONE Vector child, never splatted: HTMX renders it
-    # byte-identically, while its varargs path is quadratic in the child count
-    # (measured 10k children: 36 ms / 403 MB splatted vs 9 µs as a Vector). The
-    # same holds for every other potentially long child list in this file.
+    # `rendered` is passed as ONE Vector child, never splatted: HTMX flattens an
+    # `AbstractVector` child one level (documented on `Node`/`h`), so the HTML is
+    # byte-identical, without a call carrying thousands of arguments. HTMX
+    # before `8a113ed` also handled varargs quadratically (measured 10k children:
+    # 36 ms / 403 MB splatted vs 9 µs as a Vector), so this matters on older pins
+    # too. The same holds for every other potentially long child list here.
     if scoped
         h.div(class="treebar-children",
             data_show_finished="0",
