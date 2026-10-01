@@ -13,6 +13,7 @@ using TestItemRunner
 #   :concurrency  threaded stress (handshake-gated first poll; see item)
 #   :do           DynamicObjects substatus fixtures (needs DO in test env)
 #   :retry        busy-resource retry lifecycle (busy_retry.jl)
+#   :interrupt    opt-in interrupt flag (request_interrupt! / interrupt_requested)
 #   :term         Term backend lifecycle (items_term.jl; needs Term in test env)
 #
 # Every body runs inside a bare `let`: @testset scope was function-hard,
@@ -2281,4 +2282,114 @@ end
     @test occursin("htmx:beforeRequest", js)
     @test occursin("__tbSyncBadge", js)
     end # let (restores @testset hard scope)
+end
+
+@testitem "interrupt flag: subtree scope, later children, siblings, nothing" setup=[TreebarsTestImports] tags=[:unit, :interrupt] begin
+    let
+    root = initialize_progress!(:state; description="Job")
+    a = initialize_progress!(root, 10; description="chain a")
+    b = initialize_progress!(root, 10; description="chain b")
+    a1 = initialize_progress!(a; description="window")
+
+    @test !interrupt_requested(root) && !interrupt_requested(a) && !interrupt_requested(a1)
+
+    # Requesting on one chain reaches its whole subtree, not siblings/ancestors.
+    @test request_interrupt!(a) === a
+    @test interrupt_requested(a) && interrupt_requested(a1)
+    @test !interrupt_requested(b) && !interrupt_requested(root)
+    # Children created AFTER the request see it too.
+    a2 = initialize_progress!(a1, 3; description="later")
+    @test interrupt_requested(a2)
+
+    # Purely a request: no lifecycle change, updates keep working.
+    @test is_running(a) && is_running(a1)
+    update_progress!(a, 4)
+    @test a.impl.i == 4
+    finalize_progress!(a)
+    @test is_finished(a) && interrupt_requested(a)   # flag survives termination
+
+    # Idempotent; a root request reaches every descendant.
+    request_interrupt!(a)
+    request_interrupt!(root)
+    @test interrupt_requested(b) && interrupt_requested(root)
+
+    # Disabled trees: never interrupted, request is a no-op.
+    @test interrupt_requested(nothing) === false
+    @test request_interrupt!(nothing) === nothing
+
+    # Pending nodes and @progress-built nodes carry the flag too.
+    r2 = initialize_progress!(:state; description="Phases")
+    seen = Bool[]
+    @progress r2 for i in 1:5
+        i == 3 && request_interrupt!(r2)
+        push!(seen, interrupt_requested(__progress__))
+        interrupt_requested(__progress__) && break
+    end
+    @test seen == [false, false, true]
+    end
+end
+
+@testitem "interrupt flag: a runner on another thread stops early" setup=[TreebarsTestImports] tags=[:unit, :interrupt, :concurrency] begin
+    let
+    root = initialize_progress!(:state; description="Job")
+    started = Channel{Nothing}(1)
+    # Deadline-bounded so a broken flag fails the item instead of hanging it.
+    runner = Threads.@spawn with_progress(root, 10^9; description="spin") do p
+        put!(started, nothing)
+        deadline = time() + 60
+        while !interrupt_requested(p) && time() < deadline
+            yield()
+        end
+        interrupt_requested(p)
+    end
+    take!(started)
+    request_interrupt!(root)
+    @test fetch(runner) === true
+    @test !istaskfailed(runner)
+    @test interrupt_requested(root)
+    end
+end
+
+@testitem "interrupt flag: throw helper and render marker" setup=[TreebarsTestImports] tags=[:unit, :interrupt, :render] begin
+    let
+    root = initialize_progress!(:state; description="Job")
+    chain = initialize_progress!(root, 10; description="chain")
+    @test throw_if_interrupted(chain) === nothing
+    @test throw_if_interrupted(nothing) === nothing
+    html_of(n) = sprint(io -> show(io, MIME"text/html"(), htmx_render(n)))
+    @test !occursin("interrupt requested", render_text(root))
+    @test !occursin("treebar-interrupt", html_of(root))
+
+    request_interrupt!(chain)
+    err = try throw_if_interrupted(chain); nothing catch e; e end
+    @test err isa ProgressInterrupted && err.node === chain
+    @test occursin("interrupt requested", sprint(showerror, err))
+
+    # Under with_progress the exception fails the node like any other error.
+    @test_throws ProgressInterrupted with_progress(chain; description="window") do p
+        throw_if_interrupted(p)
+    end
+    window = only(filter(c -> c.impl.description == "window", collect(chain.children)))
+    @test is_failed(window)
+
+    # Marker on the requested node only (not repeated on descendants), in both
+    # renderers, while that node is live.
+    live = initialize_progress!(chain; description="live child")
+    txt = render_text(root)
+    @test count("interrupt requested", txt) == 1
+    @test occursin(r"chain \(0/10\)[^\n]*· interrupt requested", txt)
+    html = html_of(root)
+    @test count("treebar-interrupt", html) == 1
+    @test occursin("interrupt requested", html)
+
+    # Gone once the requested node terminates.
+    finalize_progress!(chain)
+    @test !occursin("interrupt requested", render_text(root))
+    @test !occursin("treebar-interrupt", html_of(root))
+
+    # Pending nodes show it too.
+    p = prepare_progress!(root; description="queued")
+    request_interrupt!(p)
+    @test occursin(r"· queued[^\n]*interrupt requested", render_text(root))
+    end
 end

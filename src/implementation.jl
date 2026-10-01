@@ -7,7 +7,8 @@ end
 
 Tree node of a Treebars progress tree. Wraps a backend-specific `impl`
 (`StateProgress`, Term.jl `ProgressBar` / `ProgressJob`, …) plus metadata,
-a (possibly `nothing`) parent, and a thread-safe set of children.
+a (possibly `nothing`) parent, a thread-safe set of children, and an atomic
+interrupt flag (see [`request_interrupt!`](@ref)).
 
 All progress operations (`update_progress!`, `finalize_progress!`,
 `fail_progress!`, `add_child!`, …) dispatch through `ProgressNode` to the
@@ -21,9 +22,13 @@ struct ProgressNode{I,M,C}
     meta::M
     parent::Union{ProgressNode,Nothing}
     children::C
+    # Backend-agnostic, and atomic rather than lock-guarded so a runner can
+    # poll `interrupt_requested` in a hot loop while a controller on another
+    # thread flips it.
+    interrupt::Threads.Atomic{Bool}
     function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}())
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
-            impl, meta, parent, children
+            impl, meta, parent, children, Threads.Atomic{Bool}(false)
         )
         isnothing(parent) || push!(parent.children, rv)
         rv
@@ -45,6 +50,44 @@ which makes it safe to use with optional/disabled progress trees.
 add_child!(parent::ProgressNode, child::ProgressNode) = push!(parent.children, child)
 add_child!(::Nothing, ::Any) = nothing
 add_child!(::Any, ::Nothing) = nothing
+
+request_interrupt!(node::ProgressNode) = (node.interrupt[] = true; node)
+# Walks `parent` (the creating parent), not `.children` reachability: a node DO
+# also attaches under other trees via `add_child!` is interrupted by its own
+# lineage only, so a request on one caller's tree cannot stop shared work.
+interrupt_requested(node::ProgressNode) = node.interrupt[] || interrupt_requested(node.parent)
+
+"""
+    ProgressInterrupted(node)
+
+Thrown by [`throw_if_interrupted`](@ref) when an interrupt was requested on
+`node` or one of its ancestors. `node` is the node that was checked.
+"""
+struct ProgressInterrupted <: Exception
+    node::ProgressNode
+end
+Base.showerror(io::IO, e::ProgressInterrupted) =
+    print(io, "ProgressInterrupted: interrupt requested for ", e.node)
+
+"""
+    throw_if_interrupted(node) -> nothing
+
+Throw [`ProgressInterrupted`](@ref) if [`interrupt_requested`](@ref)`(node)`,
+else return `nothing` — the one-line opt-in for work that simply aborts. Under
+`@progress` / `with_progress` the exception fails the node like any other
+error. A runner that should instead stop *cleanly* (finish its node, keep a
+partial result) checks [`interrupt_requested`](@ref) and returns. No-op for
+`nothing`.
+"""
+throw_if_interrupted(node) = interrupt_requested(node) ? throw(ProgressInterrupted(node)) : nothing
+
+# Render-side, shared by `render_text` and `htmx_render`: the node a request was
+# made ON shows it until that node terminates, so whoever clicked Stop sees it
+# registered while the runner winds down. Own flag only — repeating one request
+# on every descendant would bury the tree in markers. A terminal node drops it:
+# by then the runner has answered (or ignored) the request.
+_shows_interrupt_request(node::ProgressNode) = node.interrupt[] && (isrunning(node) || is_pending(node))
+
 istransient(node::ProgressNode) = get(node.meta, :transient, false)
 propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
