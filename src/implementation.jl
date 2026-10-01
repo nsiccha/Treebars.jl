@@ -285,7 +285,6 @@ mutable struct StateProgress
     N::Union{Int,Nothing}
     i::Int
     message::String
-    labels::Dict{Symbol,Any}
     running::Bool
     failed::Bool
     # The two timestamps encode all five lifecycle states; there is no separate
@@ -308,7 +307,7 @@ mutable struct StateProgress
     started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
     finalized_at::Union{DateTime,Nothing}
     StateProgress(; description="Running...", N=nothing, pending=false) = new(
-        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(),
+        ReentrantLock(), description, N, 0, "",
         !pending, false, pending ? nothing : now(), nothing
     )
 end
