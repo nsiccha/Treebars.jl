@@ -109,6 +109,7 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
 .treebar-interrupt { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
+.treebar-elided { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
 .treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 .treebar-node { margin-bottom: 0.25rem; }
 
@@ -716,10 +717,10 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=_MAX_FINISHED_SHOWN, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
-    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen)
+    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen, max_finished)
     lock(sp.lock) do
         duration_node = _duration_span(sp)
         interrupt_node = _interrupt_span(node)
@@ -799,8 +800,40 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 # counts/grouping, so a node already rendered earlier in this same pass (a
 # different parent reached it first) is dropped from this level entirely —
 # no stray pill count, no duplicate render.
+# Per `.treebar-children` container, how many FINISHED children — and,
+# separately, how many SKIPPED ones — are rendered individually. Both groups
+# are hidden by default (`data-show-finished/skipped="0"`), yet rendering every
+# one cost each poll ~14 ms / 220 KB at 1k finished children and ~280 ms /
+# 2.2 MB at 10k (longer than the default 200 ms poll interval). Pending,
+# running and failed children are never elided; pills always count everything.
+# Decision `0cy4jdg`. `render_text` is a debugging dump and keeps printing all.
+const _MAX_FINISHED_SHOWN = 50
+
+# Which children render individually: of the finished ones only the newest
+# `max_finished` (last in `children` order, i.e. most recently attached), and
+# likewise of the skipped ones. Returns a keep mask plus, keyed by the position
+# of each group's first elided child, the one-line note standing in for the
+# elided ones. The note carries that group's `treebar-child-*` class, so it
+# shows and hides with the group's pill. `nothing` keeps everything.
+function _elide_finished(children, max_finished)
+    keep = trues(length(children))
+    notes = Dict{Int,Node}()
+    isnothing(max_finished) && return keep, notes
+    for (pred, word) in ((is_finished, "finished"), (is_skipped, "skipped"))
+        idx = findall(pred, children)
+        n = length(idx) - max_finished
+        n > 0 || continue
+        keep[idx[1:n]] .= false
+        notes[first(idx)] = h.div(class="treebar-child-$word treebar-elided")(
+            "$n earlier $word not shown")
+    end
+    keep, notes
+end
+
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}())
+function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=_MAX_FINISHED_SHOWN)
+    isnothing(max_finished) || max_finished >= 0 ||
+        throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl
     # Flatten transparent children: each undisplayed child contributes
     # its own children at this level instead of itself. Grouping/pills/
@@ -867,10 +900,14 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
         is_finished(c) ? "treebar-child-finished" :
         is_failed(c)   ? "treebar-child-failed"   :
                          ""
-    rendered = map(children) do child
+    keep, notes = _elide_finished(children, max_finished)
+    rendered = Any[]
+    for (i, child) in enumerate(children)
+        haskey(notes, i) && push!(rendered, notes[i])
+        keep[i] || continue
         cls = _child_class(child)
-        inner = htmx_render(child; scoped, seen)
-        isempty(cls) ? inner : h.div(class=cls)(inner)
+        inner = htmx_render(child; scoped, seen, max_finished)
+        push!(rendered, isempty(cls) ? inner : h.div(class=cls)(inner))
     end
 
     # Static one-shot renders (no .treebar-poller wrapper in scope) need the
@@ -879,10 +916,12 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
     # descendant CSS rule applies — otherwise the inner direct-child rule
     # would keep hiding finished children even after the wrapper toggle flips.
     #
-    # `rendered` is passed as ONE Vector child, never splatted: HTMX renders it
-    # byte-identically, while its varargs path is quadratic in the child count
-    # (measured 10k children: 36 ms / 403 MB splatted vs 9 µs as a Vector). The
-    # same holds for every other potentially long child list in this file.
+    # `rendered` is passed as ONE Vector child, never splatted: HTMX flattens an
+    # `AbstractVector` child one level (documented on `Node`/`h`), so the HTML is
+    # byte-identical, without a call carrying thousands of arguments. HTMX
+    # before `8a113ed` also handled varargs quadratically (measured 10k children:
+    # 36 ms / 403 MB splatted vs 9 µs as a Vector), so this matters on older pins
+    # too. The same holds for every other potentially long child list here.
     if scoped
         h.div(class="treebar-children",
             data_show_finished="0",

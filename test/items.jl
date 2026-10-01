@@ -685,6 +685,66 @@ end
     end # let (restores @testset hard scope)
 end
 
+@testitem "htmx_render elides finished/skipped children beyond the newest max_finished" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    html(x) = sprint(io -> show(io, MIME"text/html"(), x))
+    root = initialize_progress!(:state; description="Root")
+    loop = initialize_progress!(root, 200; description="Loop")
+    for k in 1:60
+        c = initialize_progress!(loop; description="fin-$k-")
+        finalize_progress!(c)
+    end
+    for k in 1:55
+        c = prepare_progress!(loop; description="skip-$k-")
+        skip_progress!(c)
+    end
+    for k in 1:60
+        c = initialize_progress!(loop; description="fail-$k-")
+        fail_progress!(c)
+    end
+    initialize_progress!(loop; description="still-running-")
+
+    out = html(htmx_render(root))
+    # Pills count EVERY child, elided or not.
+    @test occursin("60 finished", out)
+    @test occursin("55 skipped", out)
+    @test occursin("60 failed", out)
+    # Only the newest 50 of each terminal group render; the oldest are replaced
+    # by one note carrying that group's class (so it toggles with the pill).
+    @test count(k -> occursin("fin-$k-", out), 1:60) == 50
+    @test !occursin("fin-1-", out) && !occursin("fin-10-", out) && occursin("fin-11-", out) && occursin("fin-60-", out)
+    @test count(k -> occursin("skip-$k-", out), 1:55) == 50
+    @test occursin("10 earlier finished not shown", out)
+    @test occursin("5 earlier skipped not shown", out)
+    @test occursin("treebar-child-finished treebar-elided", out)
+    @test occursin("treebar-child-skipped treebar-elided", out)
+    # Failed and running children are never elided.
+    @test count(k -> occursin("fail-$k-", out), 1:60) == 60
+    @test occursin("still-running-", out)
+
+    # `max_finished=nothing` renders everything; a smaller cap applies at every level.
+    full = html(htmx_render(root; max_finished=nothing))
+    @test count(k -> occursin("fin-$k-", full), 1:60) == 60
+    @test !occursin("treebar-elided", full)
+    small = html(htmx_render_children(loop; max_finished=3))
+    @test count(k -> occursin("fin-$k-", small), 1:60) == 3
+    @test occursin("57 earlier finished not shown", small)
+    @test_throws ArgumentError htmx_render_children(loop; max_finished=-1)
+
+    # render_text is a debugging dump and keeps every node.
+    txt = render_text(root)
+    @test count(k -> occursin("fin-$k-", txt), 1:60) == 60
+
+    # Exactly at the cap nothing is elided.
+    r2 = initialize_progress!(:state; description="R2")
+    for k in 1:50
+        finalize_progress!(initialize_progress!(r2; description="x$k-"))
+    end
+    @test !occursin("treebar-elided", html(htmx_render(r2)))
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
 @testitem "labels create sub-nodes" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
     let
     root = initialize_progress!(:state; description="Root")
