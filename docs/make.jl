@@ -6,7 +6,7 @@ makedocs(
     format   = DocumenterVitepress.MarkdownVitepress(
         repo = "github.com/nsiccha/Treebars.jl",
         devurl = "dev",
-        devbranch = "perf/step5-typed-slots",
+        devbranch = "main",
     ),
     pages = [
         "Home" => "index.md",
@@ -30,6 +30,6 @@ end
 
 DocumenterVitepress.deploydocs(
     repo = "github.com/nsiccha/Treebars.jl",
-    devbranch = "perf/step5-typed-slots",
+    devbranch = "main",
     push_preview = true,
 )
