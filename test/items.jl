@@ -1465,6 +1465,29 @@ end
     end # let (restores @testset hard scope)
 end
 
+@testitem "@progress for stays allocation-free per iteration under an uninferred parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro, :perf] begin
+    let
+    # `ref[]` is `Any` at the call site — the shape of `BACKEND[]` and of an
+    # untyped struct field. The loop must not box per iteration: when the node
+    # was a type parameter of the iterator, every iteration dispatched
+    # `iterate` dynamically and allocated (~48 bytes), even for `nothing`.
+    loop_sum(ref, n) = begin
+        s = 0
+        @progress ref[] "loop" for i in 1:n
+            s += i
+        end
+        s
+    end
+    for parent in (nothing, initialize_progress!(:state; description="root"))
+        ref = Ref{Any}(parent)
+        @test loop_sum(ref, 100) == 5050
+        small = @allocated loop_sum(ref, 1_000)
+        large = @allocated loop_sum(ref, 100_000)
+        @test large - small < 1_000
+    end
+    end # let (restores @testset hard scope)
+end
+
 @testitem "Treebars.progress_state (JSON snapshot)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
     let
     root = initialize_progress!(:state; description="Root")

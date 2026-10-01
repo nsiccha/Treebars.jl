@@ -234,31 +234,55 @@ function progress_map(f, parent, itrs...; description="Running...", transient=fa
     end
 end
 
-struct IterableProgress{P,W}
-    progress::P
+# The iterator a `@progress for` loop runs over. Its type depends ONLY on the
+# wrapped iterable: the counter node sits in an untyped field, so the loop stays
+# type-stable (inferred loop variable, no per-iteration boxing) even when the
+# parent node's type is unknown at the call site — the `BACKEND[]` default, an
+# untyped struct field, a `Ref{Any}`. With the node as a type parameter, every
+# such loop dispatched `iterate` dynamically and allocated twice per iteration,
+# even with progress disabled. The `:state` impl is additionally kept in a
+# small-`Union` field so the per-iteration tick is a static call; other backends
+# take one dynamic call per iteration.
+struct IterableProgress{W}
+    progress::Any
+    counter::Union{Nothing,StateProgress}
     wrapped::W
+    IterableProgress(progress, wrapped::W) where {W} = new{W}(progress, _counter(progress), wrapped)
+end
+_counter(node::ProgressNode{<:StateProgress}) = node.impl
+_counter(_) = nothing
+@inline function _advance!(p::IterableProgress, i)
+    c = p.counter
+    if c !== nothing
+        update_progress!(c, i)
+    elseif p.progress !== nothing
+        update_progress!(p.progress, i)
+    end
+    nothing
 end
 _iter_has_length(::Union{Base.HasLength, Base.HasShape}) = true
 _iter_has_length(_) = false
 _has_length(it) = _iter_has_length(Base.IteratorSize(typeof(it)))
-function initialize_iterable_progress!(progress, it; kwargs...)
-    IterableProgress(
-        _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
-                          initialize_progress!(progress; kwargs...),
-        it
-    )
-end
+# The counter node for iterating `it` under `progress`: determinate when `it`
+# has a length. Kept separate from the iterator so the `@progress` lowering can
+# bind the node to a local whose type is inferred whenever `progress`'s is
+# (`__progress__` in the loop body), while the iterator itself is always stable.
+_iterable_node(progress, it; kwargs...) =
+    _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
+                      initialize_progress!(progress; kwargs...)
+initialize_iterable_progress!(progress, it; kwargs...) =
+    IterableProgress(_iterable_node(progress, it; kwargs...), it)
 function Base.iterate(p::IterableProgress)
-    update_progress!(p.progress, 0)
+    _advance!(p, 0)
     iterate(p.wrapped)
 end
 function Base.iterate(p::IterableProgress, state)
-    update_progress!(p.progress, IncrementBy(1))
+    _advance!(p, IncrementBy(1))
     iterate(p.wrapped, state)
 end
 Base.length(p::IterableProgress) = length(p.wrapped)
-Base.eltype(::Type{IterableProgress{P,W}}) where {P,W} = eltype(W)
-Base.IteratorSize(::Type{IterableProgress{P,W}}) where {P,W} = Base.IteratorSize(W)
+Base.eltype(::Type{IterableProgress{W}}) where {W} = eltype(W)
+Base.IteratorSize(::Type{IterableProgress{W}}) where {W} = Base.IteratorSize(W)
 Base.size(p::IterableProgress) = size(p.wrapped)
 Base.axes(p::IterableProgress) = axes(p.wrapped)
 finalize_progress!(p::IterableProgress) = finalize_progress!(p.progress)
@@ -589,7 +613,7 @@ function _build_body(body, label, ctx)
 end
 
 # init → run → fail/finalize sandwich shared by the iterable @progress forms.
-# `subsym` is bound to `init_expr` (an IterableProgress or a ProgressNode), then
+# `subsym` is bound to `init_expr` (a counter ProgressNode), then
 # `run_expr` runs inside the lifecycle try/catch; its value is the block's value.
 function _iterprogress_sandwich(subsym, init_expr, run_expr)
     quote
@@ -653,14 +677,27 @@ function _for_progress_expr(x::Expr, ctx; description)
     @assert Meta.isexpr(head, :(=))
     lhs, rhs = head.args
     desc = description === nothing ? _auto_for_label(lhs, rhs) : description
-    subprogress = gensym(:iterprogress)
-    child_ctx = (progress=:($subprogress.progress), transient=true)
+    node = gensym(:iterprogress)
+    itr = gensym(:itr)
+    child_ctx = (progress=node, transient=true)
     wrapped_body = _wrap_for_body(body, child_ctx)
-    init_expr = :($initialize_iterable_progress!(
-        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
-    ))
-    run_expr = :(for $lhs in $subprogress; $wrapped_body; end)
-    _iterprogress_sandwich(subprogress, init_expr, run_expr)
+    run_expr = :(for $lhs in $IterableProgress($node, $itr); $wrapped_body; end)
+    _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
+end
+
+# Shared init for the serial `for` and comprehension forms: evaluate the parent,
+# then the iterable (once), then bind the counter NODE itself to `node` — not an
+# `IterableProgress` wrapper — so `__progress__` in the body is a local whose
+# type is inferred whenever the parent's is. `run_expr` iterates
+# `IterableProgress(node, itr)`, which is type-stable either way.
+function _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
+    par = gensym(:parent)
+    init_expr = :($_iterable_node($par, $itr; description=$desc, transient=$(ctx.transient)))
+    quote
+        $par = $(ctx.progress)
+        $itr = $rhs
+        $(_iterprogress_sandwich(node, init_expr, run_expr))
+    end
 end
 
 # comprehension wrap — per-element counter (eager). Single, unfiltered iterable
@@ -676,14 +713,13 @@ function _comprehension_progress_expr(x::Expr, ctx; description)
     elem_body = gen.args[1]
     lhs, rhs = gen.args[2].args
     desc = description === nothing ? "comprehension over $lhs" : description
-    sub = gensym(:iterprogress)
-    child_ctx = (progress=:($sub.progress), transient=true)
+    node = gensym(:iterprogress)
+    itr = gensym(:itr)
+    child_ctx = (progress=node, transient=true)
     wrapped_elem = progress_expr(elem_body, child_ctx)
-    new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem, Expr(:(=), lhs, sub)))
-    init_expr = :($initialize_iterable_progress!(
-        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
-    ))
-    _iterprogress_sandwich(sub, init_expr, new_comp)
+    new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem,
+        Expr(:(=), lhs, :($IterableProgress($node, $itr)))))
+    _iterable_progress_expr(node, itr, rhs, ctx, desc, new_comp)
 end
 
 # Recognise a `map(...)` call — plain `map(f, itrs...)` or do-block form
