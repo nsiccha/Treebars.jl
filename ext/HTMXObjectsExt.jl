@@ -3,10 +3,13 @@ import HTMXObjects
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
-    ws_progress, polling_fetchindex, htmx_render_board, htmx_ws_render_board, ws_board, htmx_ws_container, _stream_frames, _ws_emit,
-    sse_fetchindex, htmx_sse_container, _sse_emit,
+    ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
+    htmx_render_board, htmx_ws_render_board, ws_board,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
-    _flatten_displayed_children
+    _flatten_displayed_children, _shows_interrupt_request
+import Treebars: add_child!
+import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
+import Treebars: current_dispatch_parent
 import Dates
 using Dates: Millisecond
 
@@ -66,6 +69,11 @@ function _duration_span(sp::StateProgress)
     end
 end
 
+# Pending-interrupt marker for a node header (see `_shows_interrupt_request`):
+# the same text `render_text` prints, so the two renderers agree.
+_interrupt_span(node::ProgressNode) =
+    _shows_interrupt_request(node) ? h.span(class="treebar-interrupt")("interrupt requested") : ""
+
 # Global stylesheet for treebar components — include via extra_head in htmx()
 htmx_treebar_styles() = h.style(Raw("""
 .treebar-pills { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
@@ -100,37 +108,88 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; margin-right: 3.5rem; }
+.treebar-interrupt { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
+.treebar-elided { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
+.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
 .treebar-node { margin-bottom: 0.25rem; }
 
-/* Pause/resume control. Sits top-right of the persistent .treebar-poller
-   wrapper. The margin-right above keeps the (float:right) Stop button clear
-   of this absolutely-positioned button when cancel_url is set — a constant
-   margin, NOT the inherited-custom-prop visibility scheme, so it does not
-   interact with the nested-poller data-show-* logic below. */
+/* Polling badge chrome. Each live `.treebar-poller` carries one
+   `.treebar-badge`: a hairline strip plus a panel (pause/play control,
+   poll label, status word, progress bar, elapsed) above the live tree.
+   The panel and tree render EXPANDED by default, so a first-load region —
+   nothing on screen yet — shows progress immediately instead of a bare
+   hairline (snag first-load-polle-9728d9da). Quiet chrome (hairline that
+   expands on hover/focus) is opt-in per poller via `data-chrome="quiet"`
+   (the `chrome=:quiet` kwarg), or automatic for a poller diverted into
+   HTMXObjects' live-refresh reporter (`.htmxo-live-reporter`), where
+   settled content is already on screen and the poller is background
+   progress. Visual constraints (binding): no gradient accents, no glowing
+   shadows, no emoji icons (the pause/play glyphs are text), no lift/scale
+   hover effects, and the polling pulse is gated on
+   `prefers-reduced-motion`. */
 .treebar-poller { position: relative; }
 .treebar-terminal { position: static; }
-.treebar-pause {
-    display: none;
-    position: absolute; top: 0.25rem; right: 0.4rem; z-index: 2;
-    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
-    width: auto; cursor: pointer;
+.treebar-badge { display: block; padding: 0.3rem 0 0.15rem; }
+.treebar-badge-strip {
+    display: block; height: 2px; border-radius: 1px;
+    background: var(--pico-muted-color, #888);
+    opacity: 0.55;
 }
-/* Reveal the pause control ONLY while this poller is actively polling — i.e. its
-   DIRECT-CHILD inner still carries hx-trigger (running). The done inner and the
-   error article (article[aria-invalid]) drop hx-trigger, so :has() goes false and
-   the button auto-hides with zero server change. The `>` is load-bearing: without
-   it an outer (done) poller would match a NESTED still-running inner and keep its
-   own button visible (the same nested-poller trap the data-show-* scheme avoids,
-   see comment below). Pause cancels the request via JS but keeps the element (and
-   its hx-trigger), so a paused poller still matches → button stays → Resume works. */
-.treebar-poller:has(> .treebar-poller-inner[hx-trigger]) .treebar-pause { display: inline-block; }
-/* Push transports (WebSocket / SSE) put the connection on the wrapper and send
-   inners without hx-trigger: there, a direct-child .treebar-poller-inner is the
-   running state, and the terminal frame (.treebar-terminal-content) hides the
-   button the same way. */
-.treebar-poller[ws-connect]:has(> .treebar-poller-inner) > .treebar-pause,
-.treebar-poller[sse-connect]:has(> .treebar-poller-inner) > .treebar-pause { display: inline-block; }
+/* The pulse says "polling" without moving anything: the strip never changes
+   size or position, and reduced-motion users get the static strip plus the
+   glyph and status text, which carry the same state. A paused poller holds
+   still at low opacity. */
+@media (prefers-reduced-motion: no-preference) {
+    .treebar-poller[data-paused="0"] .treebar-badge-strip {
+        animation: tb-badge-pulse 1.6s ease-in-out infinite;
+    }
+}
+@keyframes tb-badge-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
+.treebar-poller[data-paused="1"] .treebar-badge-strip { opacity: 0.3; }
+/* The quiet panel is CLIPPED when collapsed, never `display: none` — the
+   pause button stays keyboard-focusable, so tabbing to it matches
+   `:focus-within` and expands the badge in the same frame (no
+   invisible-focus trap). The quiet live tree is `display: none` until
+   then: it carries no focusable controls of its own that must stay
+   reachable (pills reappear with it), and a hidden inner still polls and
+   swaps — htmx never checks visibility. The inner rules use the
+   DIRECT-CHILD `>` so expanding an outer poller never auto-expands a
+   nested one (the same nested-poller trap the data-show-* scheme avoids,
+   see comment below). */
+.treebar-badge-panel {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+}
+.treebar-poller > .treebar-poller-inner { display: block; }
+.treebar-poller[data-chrome="quiet"] .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller .treebar-badge-panel {
+    max-height: 0; overflow: hidden;
+}
+.treebar-poller[data-chrome="quiet"]:hover .treebar-badge-panel,
+.treebar-poller[data-chrome="quiet"]:focus-within .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller:hover .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel { max-height: none; }
+.treebar-poller[data-chrome="quiet"] > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller > .treebar-poller-inner { display: none; }
+.treebar-poller[data-chrome="quiet"]:hover > .treebar-poller-inner,
+.treebar-poller[data-chrome="quiet"]:focus-within > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller:hover > .treebar-poller-inner,
+.htmxo-live-reporter .treebar-poller:focus-within > .treebar-poller-inner { display: block; }
+.treebar-pause {
+    margin: 0; padding: 0.1rem 0.45rem; font-size: 0.75rem; line-height: 1.4;
+    width: auto; cursor: pointer; flex: none;
+}
+/* The badge label WRAPS, never clips: a poller label is read content, so no
+   max-width / overflow / ellipsis / nowrap here (snag
+   poller-badge-lab-78301564). The panel flex-wraps so the status siblings
+   drop below the label on narrow widths instead of crushing it, and the
+   quiet hover/focus expansion above caps nothing (max-height: none) so a
+   wrapped multi-line label is never cut there either. */
+.treebar-badge-label {
+    font-size: 0.8rem; color: var(--pico-muted-color, #888);
+}
+.treebar-badge-status { font-size: 0.8rem; flex: none; }
+.treebar-badge-bar { width: 6rem; margin: 0; flex: none; }
+.treebar-badge-elapsed { font-size: 0.8rem; color: var(--pico-muted-color, #888); flex: none; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 /* Message-bearing nodes now use the same treebar-node + treebar-header structure
    as container nodes, so treebar-label/treebar-value/treebar-description classes
@@ -220,9 +279,12 @@ htmx_treebar_styles() = h.style(Raw("""
 """))
 
 # Client-side duration ticker. Anchors each running .treebar-duration on first
-# sight (and re-anchors the spans a swap delivers, since their data-elapsed-ms
+# sight (and re-anchors the spans a swap delivered, since their data-elapsed-ms
 # comes back fresh from the server) then ticks textContent every 100ms locally —
 # so the counter advances smoothly between server polls instead of stuttering.
+# Tracking is incremental: two live sets (running spans, poller wrappers)
+# seeded once and kept current by a MutationObserver, so ticks and swaps cost
+# work proportional to the active nodes / changed fragment, never the document.
 # The same script owns poller Pause/terminalization and the keyed board
 # reconciler (`htmx_render_board`).
 htmx_treebar_script() = h.script(Raw("""
@@ -293,8 +355,8 @@ htmx_treebar_script() = h.script(Raw("""
         // integer minute/hour, so those ticks are mostly no-ops.
         if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
-    function terminalizePoller(evt){ terminalize(evt && evt.detail && evt.detail.elt); }
-    function terminalize(el){
+    function terminalizePoller(evt){
+        var el = evt && evt.detail && evt.detail.elt;
         if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return;
         var p = el.parentElement;
         if (!p || !p.classList.contains('treebar-poller')) return;
@@ -302,10 +364,93 @@ htmx_treebar_script() = h.script(Raw("""
         ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped'].forEach(function(key){
             delete p.dataset[key];
         });
-        var pause = p.querySelector(':scope > .treebar-pause');
-        if (pause) pause.remove();
-        p._tbHeld = undefined;
+        var badge = p.querySelector(':scope > .treebar-badge');
+        if (badge) badge.remove();
     }
+    // Mirror the live inner into the wrapper's badge: the badge lives on the
+    // never-swapped wrapper (so the pause control keeps focus and state across
+    // polls), which means its status line would go stale without this. Reads
+    // the same nodes the tree renders — the first determinate bar, the first
+    // duration span — so the badge can never disagree with the tree it
+    // summarizes. Also re-derives the pause glyph from data-paused, so a
+    // hand-edited dataset (DevTools) shows the matching control, exactly as a
+    // click would. Exposed as window.__tbSyncBadge so the pause onclick can
+    // refresh the badge in the same frame as the toggle.
+    function syncBadge(p){
+        var badge = p.querySelector(':scope > .treebar-badge');
+        if (!badge) return;
+        var paused = p.dataset.paused === '1';
+        var btn = badge.querySelector('.treebar-pause');
+        if (btn){
+            btn.textContent = paused ? '▶' : '❚❚';
+            btn.setAttribute('aria-label', paused ? 'Resume live updates' : 'Pause live updates');
+        }
+        var st = badge.querySelector('.treebar-badge-status');
+        if (st){
+            var s = paused ? 'Paused' : 'Polling';
+            if (st._tbLast !== s){ st.textContent = s; st._tbLast = s; }
+        }
+        var inner = p.querySelector(':scope > .treebar-poller-inner');
+        var bar = badge.querySelector('.treebar-badge-bar');
+        if (bar){
+            var src = inner ? inner.querySelector('progress.treebar-progress') : null;
+            if (src && src.hasAttribute('value') && src.hasAttribute('max')){
+                bar.setAttribute('value', src.getAttribute('value'));
+                bar.setAttribute('max', src.getAttribute('max'));
+            } else {
+                bar.removeAttribute('value');
+                bar.removeAttribute('max');
+            }
+        }
+        var el = badge.querySelector('.treebar-badge-elapsed');
+        if (el){
+            var d = inner ? inner.querySelector('.treebar-duration') : null;
+            var t = d ? d.textContent : '';
+            if (el._tbLast !== t){ el.textContent = t; el._tbLast = t; }
+        }
+    }
+    // Incremental active-progress tracking: the ticker NEVER scans the
+    // document. Two live sets — running duration spans and poller wrappers —
+    // are seeded once at startup and kept current by a MutationObserver
+    // below, so each tick costs work proportional to the active progress
+    // nodes and each swap costs work proportional to the changed fragment;
+    // settled hidden trees cost nothing. (Was: document-wide
+    // querySelectorAll on every 100ms tick and every swap — ~0.3 CPU-s per
+    // 30s on a 16k-node page. Snag browser-progress-573fb052.)
+    var liveRunning = new Set();
+    var livePollers = new Set();
+    var RUNNING_SEL = '.treebar-duration[data-treebar-status="running"]';
+    var POLLER_SEL = '.treebar-poller';
+    function trackRunning(el){
+        if (el._tbAnchor === undefined) anchor(el);
+        liveRunning.add(el);
+    }
+    function collectRunning(root){
+        if (root.nodeType === 1 && root.matches(RUNNING_SEL)) trackRunning(root);
+        if (root.nodeType !== 1 && root.nodeType !== 9) return;
+        var q = root.querySelectorAll(RUNNING_SEL);
+        for (var i = 0; i < q.length; i++) trackRunning(q[i]);
+    }
+    function collectPollers(root){
+        if (root.nodeType === 1 && root.matches(POLLER_SEL)) livePollers.add(root);
+        if (root.nodeType !== 1 && root.nodeType !== 9) return;
+        var q = root.querySelectorAll(POLLER_SEL);
+        for (var j = 0; j < q.length; j++) livePollers.add(q[j]);
+    }
+    function collect(root){ collectRunning(root); collectPollers(root); }
+    // Lazy prune: removals and terminalizations drop out on the next tick.
+    function runningAlive(el){
+        if (!el.isConnected || el.dataset.treebarStatus !== 'running'){ liveRunning.delete(el); return false; }
+        return true;
+    }
+    function syncBadgeLive(p){
+        if (!p.isConnected || !p.classList.contains('treebar-poller')){ livePollers.delete(p); return; }
+        syncBadge(p);
+    }
+    function syncAllBadges(){
+        livePollers.forEach(syncBadgeLive);
+    }
+    window.__tbSyncBadge = syncBadge;
     // Re-anchor only spans whose server value changed (or that are new). A swap
     // replaces the spans it delivers, so fresh ones anchor from their own
     // data-elapsed-ms; a span the swap did NOT touch keeps its anchor. Blindly
@@ -313,25 +458,54 @@ htmx_treebar_script() = h.script(Raw("""
     // board item between its 1s polls, a sibling poller) back to the
     // server value it was rendered with, so it would jump backwards.
     function reanchorAll(){
-        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(function(el){
-            if (el._tbAnchor === undefined || el._tbAnchoredFrom !== el.dataset.elapsedMs) anchor(el);
+        liveRunning.forEach(function(el){
+            if (runningAlive(el) && (el._tbAnchoredFrom === undefined || el._tbAnchoredFrom !== el.dataset.elapsedMs)) anchor(el);
         });
     }
     function tickAll(){
-        document.querySelectorAll('.treebar-duration[data-treebar-status="running"]').forEach(tick);
+        liveRunning.forEach(function(el){ if (runningAlive(el)) tick(el); });
+        syncAllBadges();
     }
-    function reanchorAndTick(evt){ terminalizePoller(evt); reanchorAll(); tickAll(); }
+    function reanchorAndTick(evt){
+        terminalizePoller(evt);
+        // Scope the synchronous refresh to the swapped target; the observer
+        // below backstops every other insertion path (OOB inserts outside
+        // the target, ws frames, in-place morphs), so this never needs a
+        // document-wide scan.
+        var t = evt && evt.detail && (evt.detail.target || evt.detail.elt);
+        if (t && (t.nodeType === 1 || t.nodeType === 9)) collect(t);
+        reanchorAll();
+        tickAll();
+    }
+    // Backstop: every DOM insertion and every status/estimate edit lands
+    // here, so nodes the swap handler cannot see still join or leave the
+    // live sets. Each callback costs work proportional to the changed nodes
+    // only. Poller wrappers are born by insertion (childList) and die by
+    // terminalization or removal (lazy prune in syncBadgeLive) — never by a
+    // class flip a filter would need to watch, so `class` stays unobserved.
+    var tbObserver = new MutationObserver(function(records){
+        for (var i = 0; i < records.length; i++){
+            var r = records[i];
+            if (r.type === 'childList'){
+                for (var j = 0; j < r.addedNodes.length; j++) collect(r.addedNodes[j]);
+            } else if (r.type === 'attributes' && r.target.nodeType === 1){
+                var el = r.target;
+                if (!el.classList.contains('treebar-duration')) continue;
+                if (r.attributeName === 'data-treebar-status'){
+                    if (el.dataset.treebarStatus === 'running') trackRunning(el);
+                    else liveRunning.delete(el);
+                } else if ((r.attributeName === 'data-elapsed-ms' || r.attributeName === 'data-eta-ms') &&
+                           el.dataset.treebarStatus === 'running'){
+                    // A morph refreshed the server estimate in place:
+                    // re-anchor so the ticker counts from the fresh value.
+                    anchor(el);
+                    liveRunning.add(el);
+                }
+            }
+        }
+    });
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
-    // A WebSocket frame keeps the inner's id, and htmx "settles" an element
-    // whose id survives a swap: until the swap's settle tasks run — after
-    // htmx:oobAfterSwap — the new element still wears the old element's
-    // attributes, class included, so the check above cannot recognise a
-    // terminal frame yet. htmx:wsAfterMessage fires once they have run.
-    document.addEventListener('htmx:wsAfterMessage', function(evt){
-        var id = frameId(evt.detail && evt.detail.message);
-        if (id) terminalize(document.getElementById(id));
-    });
 
     // --- Keyed board (htmx_render_board) -----------------------------------
     // Every update — a poll response, a WebSocket frame, treebarUpdateBoard —
@@ -430,6 +604,10 @@ htmx_treebar_script() = h.script(Raw("""
         var ncount = incoming.querySelector(':scope > .treebar-board-header > .treebar-board-count');
         if (count && ncount) count.replaceWith(document.importNode(ncount, true));
         boardEmpty(board);
+        // The reconciler inserts spans through DOM APIs, not an htmx swap, so
+        // track them synchronously (scoped to the board); the observer below
+        // backstops the same insertions idempotently.
+        collect(board);
         reanchorAll(); tickAll();
     }
     function parseBoards(html){
@@ -499,51 +677,15 @@ htmx_treebar_script() = h.script(Raw("""
             if (b && b.dataset.paused === '1') evt.preventDefault();
         }
     });
-    // Pause for push transports (WebSocket / SSE): there is no request to
-    // cancel, so hold back running frames while the wrapper is data-paused.
-    // The newest held frame is applied on Resume: the server sends a frame only
-    // when the tree changes, so without it a resumed view could stay stale
-    // until the next change. The terminal frame is never held back.
-    function isTerminalFrame(html){
-        return /^\\s*<[^>]*\\btreebar-terminal-content\\b/.test(html);
-    }
-    // The id on a frame's top-level element (WebSocket frames swap by id).
-    function frameId(html){
-        var m = typeof html === 'string' && /^\\s*<[^>]*\\sid="([^"]+)"/.exec(html);
-        return m ? m[1] : null;
-    }
-    function holdIfPaused(evt, p, html){
-        if (!p || !p.classList.contains('treebar-poller') || p.dataset.paused !== '1') return;
-        evt.preventDefault();
-        p._tbHeld = html;
-    }
-    document.addEventListener('htmx:wsBeforeMessage', function(evt){
-        var d = evt.detail || {}, html = d.message;
-        if (typeof html !== 'string' || isTerminalFrame(html)) return;
-        // Frames swap by id, so the poller is the parent of the element with
-        // the frame's id; without an id, fall back to the socket's element.
-        var id = frameId(html), p;
-        if (id){ var t = document.getElementById(id); p = t && t.parentElement; }
-        else p = d.elt && d.elt.closest && d.elt.closest('.treebar-poller');
-        holdIfPaused(evt, p, html);
-    });
-    document.addEventListener('htmx:sseBeforeMessage', function(evt){
-        // detail is the MessageEvent: type is the SSE event name.
-        var d = evt.detail || {}, html = d.data;
-        if (d.type === 'done' || typeof html !== 'string' || isTerminalFrame(html)) return;
-        holdIfPaused(evt, d.elt && d.elt.closest && d.elt.closest('.treebar-poller'), html);
-    });
-    // Resume. A document listener runs after the button's own onclick, so
-    // data-paused has already flipped back to '0' here.
-    document.addEventListener('click', function(evt){
-        var b = evt.target && evt.target.closest && evt.target.closest('.treebar-pause');
-        var p = b && b.parentElement;
-        if (!p || p.dataset.paused === '1' || !p._tbHeld) return;
-        var html = p._tbHeld, inner = p.querySelector(':scope > .treebar-poller-inner');
-        p._tbHeld = undefined;
-        if (inner && window.htmx && htmx.swap) htmx.swap(inner, html, {swapStyle: 'outerHTML'});
-    });
     function start(){
+        // The ONE full-document pass: seeds both live sets. Everything
+        // after this is incremental (scoped swap refresh + observer).
+        collect(document);
+        if (!window.__tbObserverStarted){
+            window.__tbObserverStarted = true;
+            tbObserver.observe(document.documentElement, {childList: true, subtree: true,
+                attributes: true, attributeFilter: ['data-treebar-status', 'data-elapsed-ms', 'data-eta-ms']});
+        }
         reanchorAndTick();
         if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 100); }
     }
@@ -575,12 +717,13 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
-    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen)
+    children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen, max_finished)
     lock(sp.lock) do
         duration_node = _duration_span(sp)
+        interrupt_node = _interrupt_span(node)
         pending = is_pending(sp)
         node_class = pending      ? "treebar-node treebar-pending" :
                      is_skipped(sp) ? "treebar-node treebar-skipped" :
@@ -593,6 +736,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
                     !isempty(sp.message) ? h.span(class="treebar-message")(sp.message) : "",
                     duration_node,
+                    interrupt_node,
                 ),
                 h.progress(value=string(sp.i), max=string(sp.N), class="treebar-progress")(),
                 children_node,
@@ -601,20 +745,20 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
             header_text = isempty(sp.description) ? sp.message : "$(sp.description) $(sp.message)"
             h.div(class=node_class)(
                 h.div(class="treebar-header")(header_text,
-                    get(node.meta, :annotation, false) ? "" : duration_node),
+                    get(node.meta, :annotation, false) ? "" : duration_node, interrupt_node),
                 children_node,
             )
         else
             if article
                 # Nested container node
                 h.article(class=node_class)(
-                    !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, duration_node) : "",
+                    !isempty(sp.description) ? h.header(class="treebar-header")(sp.description, duration_node, interrupt_node) : "",
                     children_node,
                 )
             else
                 # Nested container node
                 h.div(class=node_class)(
-                    !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, duration_node) : "",
+                    !isempty(sp.description) ? h.div(class="treebar-header")(sp.description, duration_node, interrupt_node) : "",
                     children_node,
                 )
             end
@@ -630,7 +774,7 @@ end
 function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
     children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
     children_html = [htmx_render(child; scoped, seen, kwargs...) for child in children]
-    h.div(class="treebar-root")(children_html...)
+    h.div(class="treebar-root")(children_html)
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
@@ -656,8 +800,40 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 # counts/grouping, so a node already rendered earlier in this same pass (a
 # different parent reached it first) is dropped from this level entirely —
 # no stray pill count, no duplicate render.
+# `max_finished`: an OPT-IN cap on how many FINISHED children — and,
+# separately, how many SKIPPED ones — a `.treebar-children` container renders
+# individually. The default is `nothing`, which renders every child: the user
+# does not want capped output by default (feedback on decision `1vsha8b`).
+# A caller that knowingly trades fidelity for poll cost can pass a number:
+# rendering every hidden finished child cost ~14 ms / 220 KB per poll at 1k
+# finished children and ~280 ms / 2.2 MB at 10k. Pending, running and failed
+# children are never elided, and pills always count everything.
+
+# Which children render individually: of the finished ones only the newest
+# `max_finished` (last in `children` order, i.e. most recently attached), and
+# likewise of the skipped ones. Returns a keep mask plus, keyed by the position
+# of each group's first elided child, the one-line note standing in for the
+# elided ones. The note carries that group's `treebar-child-*` class, so it
+# shows and hides with the group's pill. `nothing` keeps everything.
+function _elide_finished(children, max_finished)
+    keep = trues(length(children))
+    notes = Dict{Int,Node}()
+    isnothing(max_finished) && return keep, notes
+    for (pred, word) in ((is_finished, "finished"), (is_skipped, "skipped"))
+        idx = findall(pred, children)
+        n = length(idx) - max_finished
+        n > 0 || continue
+        keep[idx[1:n]] .= false
+        notes[first(idx)] = h.div(class="treebar-child-$word treebar-elided")(
+            "$n earlier $word not shown")
+    end
+    keep, notes
+end
+
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}())
+function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
+    isnothing(max_finished) || max_finished >= 0 ||
+        throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl
     # Flatten transparent children: each undisplayed child contributes
     # its own children at this level instead of itself. Grouping/pills/
@@ -674,6 +850,13 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
     # render via the caller (`htmx_render`) — only this children section is
     # suppressed.
     isempty(children) && !isempty(raw) && return ""
+    # A terminal node cannot still be starting or busy. This is reachable when
+    # raw children exist but every one flattens away (for example, hidden leaf
+    # nodes); the caller sees a non-empty `node.children` and therefore asks us
+    # to render a children section even though there is nothing visible in it.
+    if isempty(children) && (is_finished(sp) || is_failed(sp) || is_skipped(sp))
+        return ""
+    end
     if isempty(children) && !isempty(sp.message)
         return h.div(
             h.span(sp.message; class="u-text-muted"),
@@ -717,10 +900,14 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
         is_finished(c) ? "treebar-child-finished" :
         is_failed(c)   ? "treebar-child-failed"   :
                          ""
-    rendered = map(children) do child
+    keep, notes = _elide_finished(children, max_finished)
+    rendered = Any[]
+    for (i, child) in enumerate(children)
+        haskey(notes, i) && push!(rendered, notes[i])
+        keep[i] || continue
         cls = _child_class(child)
-        inner = htmx_render(child; scoped, seen)
-        isempty(cls) ? inner : h.div(class=cls)(inner)
+        inner = htmx_render(child; scoped, seen, max_finished)
+        push!(rendered, isempty(cls) ? inner : h.div(class=cls)(inner))
     end
 
     # Static one-shot renders (no .treebar-poller wrapper in scope) need the
@@ -728,6 +915,13 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
     # this scope. Inside a poller we leave them off so only the wrapper's
     # descendant CSS rule applies — otherwise the inner direct-child rule
     # would keep hiding finished children even after the wrapper toggle flips.
+    #
+    # `rendered` is passed as ONE Vector child, never splatted: HTMX flattens an
+    # `AbstractVector` child one level (documented on `Node`/`h`), so the HTML is
+    # byte-identical, without a call carrying thousands of arguments. HTMX
+    # before `8a113ed` also handled varargs quadratically (measured 10k children:
+    # 36 ms / 403 MB splatted vs 9 µs as a Vector), so this matters on older pins
+    # too. The same holds for every other potentially long child list here.
     if scoped
         h.div(class="treebar-children",
             data_show_finished="0",
@@ -738,12 +932,12 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, 
             # they exist, so a completed request shows only what actually ran.
             data_show_skipped="0")(
             isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
-            rendered...,
+            rendered,
         )
     else
         h.div(class="treebar-children")(
             isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
-            rendered...,
+            rendered,
         )
     end
 end
@@ -751,7 +945,7 @@ end
 """
     htmx_ws_render(node; id="treebar-progress")
 
-A `render` function for `ws_progress` when HTMXObjects is loaded.
+Default `render` function for `ws_progress` when HTMXObjects is loaded.
 Returns an HTML string with a stable `id` so the HTMX ws extension swaps by element id.
 
 Client-side:
@@ -760,11 +954,128 @@ Client-side:
     <div id="treebar-progress"></div>
 </div>
 ```
-
-Each frame replaces the whole tree (pill toggles reset). The WebSocket method
-of `polling_fetchindex` with `htmx_ws_container` keeps them.
 """
-htmx_ws_render(node; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+htmx_ws_render(node::ProgressNode; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+
+function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
+        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false)
+    isempty(id) && throw(ArgumentError("htmx_ws_progress requires a nonempty unique id"))
+    node = isnothing(progress) ?
+        initialize_progress!(:state; description, N, pending=true) : progress
+    h.div(; hx_ext="ws", ws_connect=url)(
+        content,
+        h.details(; id=id * "-disclosure", open=(collapsed ? nothing : true))(
+            h.summary("Progress"),
+            h.div(; id=id * "-progress")(htmx_render(node))),
+        h.div(; id=id * "-updates")(),
+    )
+end
+
+_ws_progress_root(::Nothing, N; description) = initialize_progress!(:state; description, N)
+_ws_progress_root(parent::ProgressNode, ::Nothing; description) =
+    initialize_progress!(parent; description, transient=false)
+_ws_progress_root(parent::ProgressNode, N::Integer; description) =
+    initialize_progress!(parent, N; description, transient=false)
+
+function _validate_ws_progress(id, interval, buffer)
+    isempty(id) && throw(ArgumentError("ws_progress requires a nonempty unique id"))
+    interval > 0 || throw(ArgumentError("ws_progress interval must be positive"))
+    buffer > 0 || throw(ArgumentError("ws_progress buffer must be positive"))
+end
+
+# A published fragment carrying `hx-swap-oob` targets an element OUTSIDE the
+# stream sink. The htmx ws extension runs oobSwap over TOP-LEVEL message
+# children only, so such a node must be delivered as a top-level sibling —
+# nested inside the `<id>-updates` wrapper it lands verbatim in the sink
+# (snag ws-progress-publ-d1b74c9b). HTMX hyphenates builder kwargs, so
+# `hx_swap_oob=...` is stored as `Symbol("hx-swap-oob")`; the `data-` prefixed
+# spelling is htmx-equivalent and honored too. Raw/String fragments always sink.
+_is_oob_fragment(f) = f isa Node &&
+    (haskey(f.attrs, Symbol("hx-swap-oob")) || haskey(f.attrs, Symbol("data-hx-swap-oob")))
+
+function _ws_progress_frame(id, progress, fragments)
+    payload = htmx_ws_render(progress; id=id * "-progress")
+    isempty(fragments) && return payload
+    plain = Any[]
+    oob = Any[]
+    for f in fragments
+        if _is_oob_fragment(f)
+            push!(oob, f)
+        else
+            push!(plain, f)
+        end
+    end
+    isempty(plain) || (payload *= node_to_html(h.div(; id=id * "-updates")(plain)))
+    for f in oob
+        payload *= node_to_html(f)
+    end
+    payload
+end
+
+function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
+        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64)
+    _validate_ws_progress(id, interval, buffer)
+    node = _ws_progress_root(parent, N; description)
+    ws_progress(produce, ws, node; id, interval, buffer)
+end
+
+function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:StateProgress};
+        id::AbstractString, interval=0.1, buffer::Integer=64)
+    _validate_ws_progress(id, interval, buffer)
+    (is_pending(node) || is_running(node)) ||
+        throw(ArgumentError("ws_progress producer requires a pending or running node"))
+    start_progress!(node)
+    queue = Channel{Any}(buffer)
+    connected = Threads.Atomic{Bool}(true)
+    publish = fragment -> begin
+        connected[] || return nothing
+        try
+            put!(queue, fragment)
+        catch err
+            # Closing the queue releases a blocked publisher on disconnect.
+            connected[] && rethrow()
+            err isa InvalidStateException || rethrow()
+        end
+        nothing
+    end
+    # Render outside the send catch: serialization errors are not disconnects.
+    initial = htmx_ws_render(node; id=id * "-progress")
+    try
+        send(ws, initial)
+    catch err
+        connected[] = false
+        close(queue)
+        @debug "ws_progress client disconnected before production" exception=(err, catch_backtrace())
+    end
+    producer = Threads.@spawn begin
+        try
+            produce(publish, node)
+        catch err
+            fail_progress!(node, err)
+            rethrow()
+        finally
+            finalize_progress!(node)
+        end
+    end
+    render_live = progress -> begin
+        fragments = Any[]
+        for _ in 1:buffer
+            isready(queue) || break
+            push!(fragments, take!(queue))
+        end
+        _ws_progress_frame(id, progress, fragments)
+    end
+    result = nothing
+    try
+        connected[] && ws_progress(ws, node; interval, render=render_live)
+    finally
+        connected[] = false
+        isopen(queue) && close(queue)
+        # Observe producer failures even when delivery or rendering failed.
+        result = fetch(producer)
+    end
+    result
+end
 
 # --- Keyed board ---------------------------------------------------------------
 #
@@ -905,7 +1216,7 @@ function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
             _board_count(unique_entries),
             live ? _board_pause_button() : "",
         ),
-        h.div(class="treebar-board-list")(items...),
+        h.div(class="treebar-board-list")(items),
         empty_node,
         poller,
     )
@@ -930,27 +1241,49 @@ function ws_board(ws::WebSocket, entries; interval=1.0, until=() -> false, kwarg
 end
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", keep_progress=true, error_obj=nothing, req=nothing, track_job=true, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
-element that carries the polling attributes (`hx-trigger="every Xs"
-hx-target="this" hx-swap="outerHTML"`). On each poll the inner self-swaps;
-once the task is done, the response replaces the inner with
-`.treebar-terminal-content`, which naturally stops the loop. The client then
-renames the stable wrapper to `.treebar-terminal`, removes its polling UX
-state and Pause control, and leaves the rendered result (plus optional frozen
-progress record) as an unambiguous terminal fragment. While polling, the
-wrapper itself is untouched, so UX state on it (`data-show-finished` /
-`-failed` / `-pending`, set by pill clicks) persists across polls.
+element that carries the polling attributes (`hx-trigger="every Xs [!document.hidden]"
+hx-target="this" hx-swap="outerHTML"` — the filter stops a hidden document
+from polling for nobody; a returning tab is at most one interval stale). The wrapper also carries one
+`.treebar-badge`: a hairline strip plus a panel (pause/play control, poll
+label, status word, progress bar, elapsed) above the live tree. The panel
+and tree render expanded by default, so a first-load region shows progress
+immediately; pass `chrome=:quiet` to collapse a poller to the hairline
+strip that expands on hover/focus (emitted as `data-chrome="quiet"`),
+and a poller diverted into HTMXObjects' live-refresh reporter is quiet
+automatically. On each poll the inner self-swaps; once the task is done,
+the response replaces the inner with `.treebar-terminal-content`, which
+naturally stops the loop. The client then renames the stable wrapper to
+`.treebar-terminal`, removes its polling UX state and badge, and leaves
+the rendered result (plus optional frozen progress record) as an
+unambiguous terminal fragment. While polling, the wrapper itself is
+untouched, so UX state on it (`data-show-finished` / `-failed` /
+`-pending`, set by pill clicks, and `data-chrome`) persists across polls.
+
+The inner's `hx-select` is top-level-only: each branch excludes matches
+nested inside another match, so a poll response containing a nested poller
+(an explicit `polling_fetchindex` under an `:auto` root, or a finished nested
+fragment inside a still-running outer poll) swaps exactly the outermost
+region instead of duplicating the nested one into a live sibling.
 
 The host page must include [`htmx_treebar_styles`](@ref) and
 [`htmx_treebar_script`](@ref) once, normally through `htmx(...;
 extra_head=(htmx_treebar_styles(), htmx_treebar_script()))`. The fragment can
 still poll without those page assets, but client-owned behavior is then absent:
-the duration ticker and Pause handler are not installed, and a completed inner
-swap leaves the persistent wrapper identified as `.treebar-poller` instead of
-terminalizing it in place.
+the badge renders statically above the fully visible tree (no collapse, no
+live status mirror), the duration ticker and pause handler are not installed,
+and a completed inner swap leaves the persistent wrapper identified as
+`.treebar-poller` instead of terminalizing it in place. The badge's pause
+control is inert once its poller stops polling, so even an un-terminalized
+badge cannot flip its glyph on a finished poller.
+
+Poll requests deliberately inherit ancestor `hx-vals`/form values (no
+`hx-params` isolation): HTMXObjects heals a drifted poll by re-executing with
+the poll request's current arguments, which requires those arguments to reach
+the server.
 
 Failure path (`keep_progress=true`, default): the compute error — re-thrown by
 `fetchindex` before this callback runs (compute-at-most-once) — is caught in
@@ -969,7 +1302,10 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   via `query_url(poll_context; force=false)` and `force` from `poll_context.force`.
   Overrides explicit `poll_url` and `force` kwargs.
 - `poll_url`: URL to poll while running (use `query_url`). Ignored when `poll_context` is set.
-- `label`: display label (e.g. "Pathfinder (my-model)")
+- `label`: display label (e.g. "Pathfinder (my-model)"). When it equals the
+  status root's description, the badge-label and interim-header copies are
+  omitted — the root header already carries the string — and the badge
+  elapsed is omitted whenever the root row renders its own duration span.
 - `force`: force re-computation (default `false`). Ignored when `poll_context` is set.
 - `poll_interval`: HTMX polling interval (default "200ms")
 - `cancel_url`: optional URL for a "Stop" button shown while running (default `""` = no button).
@@ -985,6 +1321,26 @@ naturally — no custom OOB / HX-Retarget gymnastics.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
   (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
   Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
+- `parent`: `Treebars.ProgressNode`, `nothing`, or `:auto` (default). When
+  a node, the IP compute's live substatus tree hangs under this caller-owned
+  node (mirroring DO's `fetchindex!(parent, ip, …)` attachment), so an outer
+  `dispatch` or `@progress` job tree shows the embed's real compute as
+  children instead of the poller running detached on the IP's own
+  `__status__` root. `:auto` resolves the dispatch caller automatically —
+  the request's dispatch node first (`HTMXObjects.dispatch_parent(req)`,
+  when `req` is passed or derived from `poll_context`), else the ambient
+  node `dispatch` bound (`Treebars.current_dispatch_parent`), else detached.
+  An explicit `parent=` always wins; pass `nothing` to force detached (the
+  historical default behavior). Ignored when the compute was already cached
+  (no live substatus to attach); the subtree still detaches from the caller
+  on transient finalize, exactly as DO's own `fetchindex!` attachment does.
+- `chrome`: `:auto` (default) or `:quiet`. `:auto` renders the badge panel
+  and live tree expanded — a first-load region shows progress immediately.
+  `:quiet` emits `data-chrome="quiet"` on the wrapper, collapsing the
+  poller to the hairline strip (hover/focus expands it); use it for a
+  poller beside already-visible content. A poller diverted into
+  HTMXObjects' live-refresh reporter is quiet by stylesheet rule either
+  way. Anything else throws `ArgumentError`.
 - `track_job`: when a poller is emitted for in-flight work, report the compute
   to HTMXObjects' job ledger through `HTMXObjects.track_job!` (with `label`,
   the progress tree and `req`), so hand-rolled pollers appear on the runtime
@@ -993,7 +1349,25 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   own operation transport passes `false` — it records its jobs itself.
 - `kwargs...`: passed through to `fetchindex`
 """
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, track_job=true, kwargs...)
+# Resolve the `parent=:auto` default: the request's dispatch node first (the
+# explicitly-passed `req` is the most local statement of dispatch context,
+# and it survives the spawned-task boundary that task-local storage does not
+# cross on Julia 1.10), else the ambient node `dispatch` bound, else
+# detached. The `applicable` guard keeps this inert on HTMXObjects
+# generations predating the public `dispatch_parent` accessor (and on
+# non-request `req` values): no resolve, no throw — the poller just stays
+# detached, exactly as before. The `parent isa ProgressNode` filter at the
+# attach site stays the single type gate for whatever this returns.
+function _polling_default_parent(req)
+    if req !== nothing && isdefined(HTMXObjects, :dispatch_parent) &&
+            applicable(HTMXObjects.dispatch_parent, req)
+        node = HTMXObjects.dispatch_parent(req)
+        node !== nothing && return node
+    end
+    current_dispatch_parent()
+end
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, kwargs...)
+    chrome in (:auto, :quiet) || throw(ArgumentError("polling_fetchindex: chrome must be :auto or :quiet, got $(repr(chrome))"))
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -1003,6 +1377,11 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
         isnothing(error_obj) && (error_obj = poll_context)
         isnothing(req) && hasproperty(poll_context, :__req__) && (req = poll_context.__req__)
     end
+    # Default-parent resolution (snag make-htmxobjects-7960c091): an absent
+    # `parent` follows the dispatch caller; an explicit node — or an explicit
+    # `nothing` to force detached — always wins. Resolved here, after the
+    # poll_context block, so a derived `req` feeds the request leg.
+    parent === :auto && (parent = _polling_default_parent(req))
     # keep_progress: a failed compute is re-thrown by fetchindex BEFORE the
     # callback runs (compute-at-most-once), so wrap the call to catch it, pull
     # the (failed) tree via getstatus, and render the recorded error + tree
@@ -1010,12 +1389,19 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
     # would discard the tree). keep_progress=false (or sync) re-throws as before.
     try
         fetchindex(ip, keys...; force, kwargs...) do rv, status
+            # Parent passthrough (snag hang-pdf-embed-c-d79aad34): hang the
+            # live substatus under the caller's node so the embed's compute
+            # tree renders in the caller's tree. `add_child!` is idempotent on
+            # the ThreadsafeSet; `nothing` status = cached/no-live-substatus
+            # (a no-op). The subtree still detaches on transient finalize, so
+            # this gives the caller the LIVE view, not a post-hoc history.
+            (parent isa ProgressNode && !isnothing(status)) && add_child!(parent, status)
             # About to emit a poller for in-flight work: report it to
             # HTMXObjects' job ledger (runtime dashboard / job boards).
             track_job && !sync && _is_unresolved_handle(rv) &&
                 _track_job(rv, status, ip; label, req)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
-                             ip_ctx=_ip_ctx(ip, keys, kwargs))
+                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome)
         end
     catch err
         (keep_progress && !sync) || rethrow()
@@ -1051,10 +1437,10 @@ _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 # incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="") =
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto) =
     istaskfailed(rv) ? throw(rv.result) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
-        _polling_running(status; label, poll_url, poll_interval, cancel_url)
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
+        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
 
 # Report a hand-rolled poller's in-flight compute to HTMXObjects' job ledger
 # (`HTMXObjects.track_job!`), so it shows on the runtime dashboard and job
@@ -1104,11 +1490,11 @@ end
 # the client terminalizes the stable wrapper in place. With keep_progress
 # (default, but not on the sync loopback), the frozen tree is appended below
 # the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="")
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto)
     if _is_unresolved_handle(rv)
         return sync ?
-            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx) :
-            _polling_running(status; label, poll_url, poll_interval, cancel_url)
+            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
+            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
     end
     # A READY handle must never reach render_result raw — resolve it here. This is
     # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
@@ -1116,7 +1502,7 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     # ready handle). A compatible ready handle is a legal completion race, so it
     # is normalized silently rather than diagnosed as package skew.
     if _is_handle(rv)
-        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx)
+        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome)
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
@@ -1145,25 +1531,74 @@ end
 # before our callback, so polling_fetchindex catches it and hands the exception
 # here; we re-raise inside safely to reuse its record+render. error_obj/req carry
 # route context (both may be nothing → default article, no hooks/req-meta). The
-# returned article is aria-invalid and sits INSIDE the poller inner — the
-# poller's hx-select excludes nested matches (see `_polling_inner_running`) so
-# htmx does not double-insert it.
+# returned article is aria-invalid and sits INSIDE the terminal content — the
+# poller's top-level-only hx-select excludes nested matches (see
+# `_polling_inner_running`) so htmx does not double-insert it.
 _caught_error_ex(err, error_obj, req) =
     HTMXObjects.safely(; obj=error_obj, req=req) do
         throw(err)
     end
 
-_polling_running(status; label, poll_url, poll_interval, cancel_url) =
-    _polling_wrap(_polling_inner_running(poll_url, poll_interval, _running_body(status; label, cancel_url)); pausable=true)
+# Poller running-face dedup (snag expanded-first-l-360630fb). The badge and
+# the tree are co-visible in the expanded default chrome, so a string the
+# tree already renders must not be restated above it: when the poller `label`
+# equals the status root's description, the badge label, the interim
+# "<label> — running..." header, and the root header render one string three
+# times — and the badge elapsed always restates the root's duration span.
+# The running face omits the redundant copies server-side, so the dedup
+# holds with or without the page assets; the tree keeps the single
+# surviving copy of each.
 
-# What a running inner shows, for every transport: the live tree rendered
-# scoped=false (the persistent wrapper owns the data-show-* toggles), under an
-# optional labelled header.
-function _running_body(status; label=nothing, cancel_url="")
+# The description the poller tree renders for its own root, or `nothing`
+# when the root renders no description row (a status that is nothing,
+# non-state, or undisplayed, or a root with an empty description). Mirrors
+# `htmx_render`'s header rules — keep in lockstep.
+function _status_root_description(status)
+    status isa ProgressNode || return nothing
+    is_displayed(status) || return nothing
+    sp = status.impl
+    sp isa StateProgress || return nothing
+    return lock(sp.lock) do
+        isempty(sp.description) ? nothing : sp.description
+    end
+end
+
+# True when `htmx_render(status)` emits a `.treebar-duration` span for the
+# root itself: a counter, a non-annotation message node, or a described
+# container. Mirrors `htmx_render`'s header rules above — keep in lockstep.
+function _root_renders_duration(status)
+    status isa ProgressNode || return false
+    is_displayed(status) || return false
+    sp = status.impl
+    sp isa StateProgress || return false
+    return lock(sp.lock) do
+        !isnothing(sp.N) && return true
+        !isempty(sp.message) && return !get(status.meta, :annotation, false)
+        !isempty(sp.description)
+    end
+end
+
+# True when the poller `label` restates the status root's description: the
+# badge-label and interim-header copies are redundant with the root header.
+_label_restates_root(label, status) =
+    !isnothing(label) && _status_root_description(status) == string(label)
+
+function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
-    isnothing(label) ? htmx_render(status; article=true, scoped=false) :
+    inner_body = if isnothing(label)
+        htmx_render(status; article=true, scoped=false)
+    elseif _label_restates_root(label, status)
+        # The badge and the root header already carry this string — an
+        # interim "<label> — running..." header would restate it a third
+        # time. Only the redundant header line goes: the article wrapper
+        # stays, and a configured Stop control stays inside it.
+        h.article(stop_btn, htmx_render(status; scoped=false))
+    else
         h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
+    end
+    _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
+                  pausable=true, badge=_poll_badge(label, status), chrome=chrome)
 end
 
 # Persistent wrapper. UX state baked in via data-show-*; descendant CSS rules
@@ -1172,26 +1607,85 @@ end
 # this wrapper into the DOM — subsequent polls only swap the inner, leaving
 # the original wrapper element (and its possibly-toggled data-show-* attrs)
 # untouched.
-# A small, unobtrusive pause/resume control. onclick toggles `data-paused`
-# on the closest .treebar-poller — the persistent wrapper, so the paused
-# state survives polls exactly like the data-show-* pills. The
-# htmx:beforeRequest listener (htmx_treebar_script) reads that attr to cancel
-# this poller's poll requests, and the duration ticker freezes on it. Keyed
-# on closest('.treebar-poller') so nested pollers each pause independently.
-# The button persists across polls (it lives on the never-swapped wrapper),
-# so its JS-toggled label stays consistent.
+# Polling badge, one per live `.treebar-poller` wrapper: hairline strip plus
+# panel (pause/play button, label, status word, determinate bar, elapsed)
+# above the live tree. Expanded by default; `chrome=:quiet` collapses it to
+# the strip (hover/focus re-expands). The badge lives on the never-swapped
+# wrapper, so the pause control keeps focus and state across polls;
+# `syncBadge` (htmx_treebar_script) mirrors the fresh inner into it after
+# every swap and tick. Without the page assets there is no collapse and no
+# mirror: the badge renders statically above the fully visible tree, and the
+# pause button still toggles `data-paused` (but nothing cancels the poll
+# requests — the documented asset-less degradation).
+#
+# The pause onclick toggles `data-paused` on the closest `.treebar-poller` —
+# the persistent wrapper, so the paused state survives polls exactly like the
+# data-show-* pills. The htmx:beforeRequest listener reads that attr to cancel
+# this poller's poll requests, and the duration ticker freezes on it. Keyed on
+# closest('.treebar-poller') so nested pollers each pause independently.
+# The onclick is INERT once its poller stops polling: it no-ops unless the
+# wrapper still holds a direct-child polling inner (`.treebar-poller-inner`
+# with `hx-trigger`). A terminal swap replaces that inner with
+# `.treebar-terminal-content` (or a bare error article), so a badge left in the
+# DOM — a page without `htmx_treebar_script` never runs the afterSwap
+# finalizer that removes it — stops responding instead of flipping its glyph
+# on a finished poller. A paused poller keeps its inner (and its `hx-trigger`),
+# so resume still passes the guard. (Same guard as sibling snag
+# treebars-pause-l-19b2227a: this badge subsumes that fix's onclick hunk.)
 _pause_button() = h.button(class="treebar-pause", type="button",
-    onclick="var p=this.closest('.treebar-poller'); if(!p) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; this.textContent=v==='1'?'Resume':'Pause';")("Pause")
+    aria_label="Pause live updates",
+    title="Pause live updates (the work keeps running in the background)",
+    onclick="var p=this.closest('.treebar-poller'); if(!p) return; if(!p.querySelector(':scope > .treebar-poller-inner[hx-trigger]')) return; var v=p.dataset.paused==='1'?'0':'1'; p.dataset.paused=v; var play=v==='1'; this.textContent=play?'▶':'❚❚'; this.setAttribute('aria-label',play?'Resume live updates':'Pause live updates'); if(window.__tbSyncBadge) window.__tbSyncBadge(p);")("❚❚")
 
-_polling_wrap(inner; pausable=false, terminal=false) =
+# First-paint badge content. The status word and elapsed are server-rendered
+# once; the client mirror owns them afterwards. The bar starts indeterminate
+# (no value/max) and the mirror sets the determinate fraction from the first
+# `.treebar-progress` in the inner — the bar's shape is a client derivation,
+# not a second server render rule. The label never changes across polls, so
+# the server owns it outright and the mirror never touches it.
+_badge_elapsed(::Nothing) = "Starting…"
+_badge_elapsed(node::ProgressNode) =
+    node.impl isa StateProgress ? _initial_duration_text(node.impl) : ""
+
+function _poll_badge(label, status)
+    h.span(class="treebar-badge")(
+        h.span(class="treebar-badge-strip", aria_hidden="true")(),
+        h.span(class="treebar-badge-panel")(
+            _pause_button(),
+            # No badge label when there is none to show, or when it would
+            # restate the root header one line below (dedup, see above).
+            (isnothing(label) || _label_restates_root(label, status)) ? "" :
+                h.span(class="treebar-badge-label")(string(label)),
+            h.span(class="treebar-badge-status")("Polling"),
+            h.progress(class="treebar-badge-bar")(),
+            # No badge elapsed when the root row renders its own duration
+            # span (dedup, see above). The client mirror tolerates the
+            # absent span — it re-checks `querySelector` every tick.
+            _root_renders_duration(status) ? "" :
+                h.span(class="treebar-badge-elapsed")(_badge_elapsed(status)),
+        ),
+    )
+end
+
+# `chrome` selects the live wrapper's badge presentation: `:auto` (default)
+# emits no `data-chrome` attr, so the stylesheet's expanded default applies
+# (panel + tree visible — a first-load region shows progress immediately);
+# `:quiet` emits `data-chrome="quiet"`, collapsing to the hairline strip
+# that expands on hover/focus. A poller diverted into HTMXObjects'
+# live-refresh reporter (`.htmxo-live-reporter`) is quiet by stylesheet
+# rule regardless of the attr — settled content is already on screen, so
+# the poller is background progress. Terminal wrappers carry no badge and
+# take no attr. Validated at the public `polling_fetchindex` boundary.
+_polling_wrap(inner; pausable=false, terminal=false, badge="", chrome=:auto) =
     terminal ?
         h.div(class="treebar-terminal")(inner) :
         h.div(class="treebar-poller",
+            data_chrome=(chrome === :quiet ? "quiet" : nothing),
             data_paused="0",
             data_show_finished="0",
             data_show_pending="1",
             data_show_failed="1",
-            data_show_skipped="0")(pausable ? _pause_button() : "", inner)
+            data_show_skipped="0")(pausable ? badge : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server
@@ -1202,19 +1696,40 @@ _polling_wrap(inner; pausable=false, terminal=false) =
 # HTMXObjects' bare error article (`article[aria-invalid="true"]`) so a
 # `keep_progress=false` propagated failure — a 200 carrying just that article —
 # still lands in the wrapper, replaces this polling element (no `hx-trigger` →
-# polling stops), and shows. The `:not(.treebar-poller-inner article)` is
-# load-bearing: with keep_progress the failure response IS a `.treebar-poller-inner`
-# that CONTAINS an aria-invalid article (the opaque one from `safely`, see
-# `_caught_error_ex`); without the exclusion, hx-select's querySelectorAll matches
-# BOTH the inner and that nested article and htmx inserts the article twice.
-# Excluding nested matches leaves only the inner selected. No request-sniffing,
-# no OOB, no JS state hacks needed.
+# polling stops), and shows.
+#
+# `hx-select` is TOP-LEVEL-ONLY: every branch excludes matches nested inside
+# another match. htmx inserts EVERY querySelectorAll match, so without the
+# exclusions a response whose selected region CONTAINS a nested poller (an
+# explicit `polling_fetchindex` under an `:auto` root, or a finished nested
+# poller's terminal fragment inside a still-running outer poll) matches twice
+# and the nested region is duplicated into a live sibling on every outer poll
+# — linear DOM growth, each duplicate polling. The six `:not()` clauses leave
+# exactly the outermost region selected; nested content rides along inside it.
+# (The article branch's second clause is sibling snag treebars-pause-l-19b2227a's
+# case — a keep_progress failure response whose terminal content contains the
+# opaque `safely` article — folded into the same rule; this selector subsumes
+# that fix's hx-select hunk.)
+#
+# Deliberately NO `hx-params` isolation here: poll requests inherit ancestor
+# `hx-vals`/form values, and that inheritance is load-bearing. HTMXObjects
+# heals a drifted/unknown-token poll by re-executing with the CURRENT request
+# args (current-args-wins), which only works because the current args reach
+# the server. Stripping them client-side would starve that heal path.
+# The trigger filter `[!document.hidden]` stops a backgrounded document (a
+# hidden tab or minimized window) from issuing poll requests for nobody and
+# resumes on visibility — a returning tab is at most one interval stale. The
+# `every` timer keeps rescheduling while filtered, so resume needs no
+# re-arming (same shape as the KB's own production poll guard). It lives on
+# the trigger (not in the beforeRequest pause hook) so it also covers host
+# pages that omit `htmx_treebar_script`, and the value still starts with
+# `every` (consumers key running-poller detection on that prefix).
 _polling_inner_running(poll_url, interval, body) = h.div(class="treebar-poller-inner",
         hx_get=string(poll_url),
-        hx_trigger="every $interval",
+        hx_trigger="every $interval [!document.hidden]",
         hx_target="this",
         hx_swap="outerHTML",
-        hx_select=".treebar-poller-inner, .treebar-terminal-content, article[aria-invalid='true']:not(.treebar-poller-inner article)")(body)
+        hx_select=".treebar-poller-inner:not(.treebar-poller-inner .treebar-poller-inner):not(.treebar-terminal-content .treebar-poller-inner), .treebar-terminal-content:not(.treebar-poller-inner .treebar-terminal-content):not(.treebar-terminal-content .treebar-terminal-content), article[aria-invalid='true']:not(.treebar-poller-inner article):not(.treebar-terminal-content article)")(body)
 
 _polling_inner_done(body...) = h.div(class="treebar-terminal-content")(body...)
 
@@ -1222,217 +1737,66 @@ _polling_inner_done(body...) = h.div(class="treebar-terminal-content")(body...)
 polling_fetchindex(ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(identity, ip, keys...; kwargs...)
 
-# --- Push transports ---------------------------------------------------------
-#
-# WebSocket and SSE streams reuse the polling design: a persistent
-# `.treebar-poller` wrapper that frames never replace (so its pill toggles,
-# Pause state and the connection it carries survive), holding one
-# `.treebar-poller-inner` child that each running frame replaces, until the
-# terminal frame replaces it with `.treebar-terminal-content`. The frame BODIES
-# are the polling ones; a transport only decides how a frame names its target
-# and how it is sent.
-
-# htmx's ws extension swaps each top-level element of a message out-of-band by
-# id (outerHTML), so every WebSocket frame carries the inner's id.
-struct _WSFrames
-    ws::WebSocket
-    id::String
-end
-_running_frame(t::_WSFrames, body) =
-    node_to_html(h.div(; id=t.id, class="treebar-poller-inner")(body))
-_terminal_frame(t::_WSFrames, body...) =
-    node_to_html(h.div(; id=t.id, class="treebar-terminal-content")(body...))
-_send_progress(t::_WSFrames, frame) = _ws_emit(t.ws, frame)
-_send_done(t::_WSFrames, frame) = _ws_emit(t.ws, frame)
-
-# The persistent wrapper of a push stream: the polling wrapper's UX state plus
-# the attributes that open the connection. htmx closes a connection when its
-# element leaves the DOM, which is why frames target the inner, never this.
-_live_wrap(inner; transport...) = h.div(; class="treebar-poller", transport...,
-        data_paused="0",
-        data_show_finished="0",
-        data_show_pending="1",
-        data_show_failed="1",
-        data_show_skipped="0")(_pause_button(), inner)
-
-# Unique per process (the counter) and across restarts (the clock), and
-# independent of the global RNG, which a compute may have seeded.
-const _ID_COUNTER = Threads.Atomic{UInt}(0)
-_fresh_id() = "treebar-" * string(hash(time_ns(), Threads.atomic_add!(_ID_COUNTER, UInt(1))); base=36)
-_connecting() = h.p("Connecting…"; class="u-text-muted", aria_busy="true")
-
-_container_url(url::Function, id) = string(url(id))
-_container_url(url, id) = string(url)
-
-function htmx_ws_container(url; id=_fresh_id(), placeholder=_connecting())
-    id = string(id)
-    _live_wrap(h.div(; id, class="treebar-poller-inner")(placeholder);
-        hx_ext="ws", ws_connect=_container_url(url, id))
-end
-
-# The value behind a handle. A failed compute rethrows its own exception; a
-# `Task` wraps it in a TaskFailedException, unwrapped as the polling path does.
-function _fetch_value(rv::Task)
-    try
-        fetch(rv)
-    catch err
-        err isa TaskFailedException ? throw(err.task.result) : rethrow()
-    end
-end
-_fetch_value(rv) = fetch(rv)
-
-# fetchindex + a push stream. Streams running frames while the compute is in
-# flight, then returns the terminal frame to send — or `nothing` when the
-# client went away mid-stream (the compute is left running; its value lands in
-# the cache for the next visitor). Mirrors the polling failure path: a failed
-# compute is re-thrown by `fetchindex` before the callback runs (or by the
-# fetch inside it), so the WHOLE call is wrapped, and the failure is recorded
-# and rendered through `safely` next to the kept tree. A failed send is not a
-# failure: `_send_*` report it as `false` and never throw.
-function _stream_fetchindex(t, render_result, ip, keys...; interval=0.1, force=false, label=nothing,
-        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
-    frame = try
-        fetchindex(ip, keys...; force, kwargs...) do rv, status
-            _stream_resolve(t, rv, status; interval, label, keep_progress, render_result)
-        end
-    catch err
-        _terminal_frame(t, _caught_error_ex(err, error_obj, req),
-            keep_progress ? _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true) : "")
-    end
-    isnothing(frame) || _send_done(t, frame)
-    nothing
-end
-
-function _stream_resolve(t, rv, status; interval, label, keep_progress, render_result)
-    if _is_unresolved_handle(rv)
-        # No status tree → no progress frames: just wait for the value.
-        if !isnothing(status)
-            live = _stream_frames(frame -> _send_progress(t, frame), status; interval, done=rv,
-                render = node -> _running_frame(t, _running_body(node; label)))
-            live || return nothing
-        end
-        rv = _fetch_value(rv)
-    elseif _is_handle(rv)
-        # A handle that became ready between DynamicObjects' snapshot and this
-        # callback (see `_polling_resolve`): resolve it, never render it raw.
-        rv = _fetch_value(rv)
-    end
-    body = render_result(rv)
-    keep_progress ? _terminal_frame(t, body, _kept_progress(status; open=false)) : _terminal_frame(t, body)
-end
-
 """
-    polling_fetchindex(ws::WebSocket, render_result, ip, keys...; id="treebar-progress", interval=0.1, force=false, label=nothing, keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
+    polling_fetchindex(ws::WebSocket, render_result, ip, keys...; id="treebar-progress", interval=0.1, force=false, kwargs...)
 
-WebSocket sibling of [`polling_fetchindex`](@ref): the same
-`fetchindex(ip, keys...) do rv, status` dispatch and the same frame shapes, but
-pushed over `ws` instead of polled. Pair it with
-[`htmx_ws_container`](@ref), which renders the client side with a matching
-`id`.
+WebSocket sibling of [`polling_fetchindex`](@ref). Same `fetchindex(ip, keys...) do rv, status`
+dispatch — but instead of returning a polling HTMX fragment, streams progress
+over `ws` via [`ws_progress`](@ref) and pushes the final rendered result as
+one last frame on completion.
 
-While the compute runs, each changed state of the tree is sent as
-
-    <div id=ID class="treebar-poller-inner">…tree, rendered scoped=false…</div>
-
-which htmx's ws extension swaps in place of the inner by id. The persistent
-`.treebar-poller` wrapper around it is never replaced, so pill toggles and
-Pause survive. A pending status node is streamed like a running one. Frames are
-sent only when the tree changed; a running node's elapsed time and ETA tick on
-the client (see [`htmx_treebar_script`](@ref)).
-
-When the compute finishes (as soon as the handle settles, not on the next
-tick) the terminal frame replaces the inner, exactly like the polling terminal
-content:
-
-    <div id=ID class="treebar-terminal-content">result [+ frozen tree]</div>
-
-It holds `render_result(value)` and, with `keep_progress=true` (the default),
-the frozen tree in a collapsed `<details class="treebar-frozen">`. The page
-script then turns the wrapper into `.treebar-terminal` and drops its Pause
-button. A failed compute (re-thrown by `fetchindex`, or by the fetch while
-streaming) or a throwing `render_result` is recorded and rendered through
-HTMXObjects' `safely` (`error_obj` / `req` as in the polling path) and sent as
-the terminal frame, beside the tree in an open `<details>`; with
-`keep_progress=false` the error is sent alone.
-
-If the client disconnects, the stream stops quietly (logged at `@debug`) and
-the compute is left running; its value lands in the IP cache for the next
-visitor.
+Producer task is NOT cancelled on client disconnect — `ws_progress` exits
+its send loop on WS error and leaves the compute alone; the in-flight compute
+runs to completion and its value lands in the IP cache, so the next visitor
+reuses it.
 
 Use inside an `@ws` route body, passing `__ws__` as the first argument:
 
-    @ws fit(; model, id) = polling_fetchindex(__ws__, sc.fit, model; id) do rv
+    @ws fit(; model, method, ...) = polling_fetchindex(__ws__, sc.fit, model, method; force, ...) do rv
         render_fit(rv)
     end
 
+Both progress frames and the final frame are wrapped in `<div id=\$id>…</div>`
+so the htmx ws-extension swaps by element id on the client.
+
 - `ws`: the WebSocket handle (from `__ws__`)
-- `render_result(rv)`: renders the final result (supports `do` syntax)
-- `ip`, `keys...`: the IndexableProperty and its cache key(s)
-- `id`: the inner element's id — the same id [`htmx_ws_container`](@ref) gave
-  the client (default `"treebar-progress"`)
-- `interval`: seconds between progress checks (default `0.1`)
+- `render_result(rv)`: function rendering the final result Node (supports `do` syntax)
+- `ip`: IndexableProperty
+- `keys...`: cache key(s)
+- `id`: stable wrapper element id for ws-extension swap-by-id (default `"treebar-progress"`)
+- `interval`: progress push interval in seconds (default `0.1`)
 - `force`: force re-computation (default `false`)
-- `label`: optional header over the running tree, as in the polling path
-- `keep_progress`: keep the frozen tree in the terminal frame (default `true`)
-- `error_obj` / `req`: route context for `safely` on the failure path
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
-        id="treebar-progress", interval=0.1, force=false, label=nothing,
-        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
-    _stream_fetchindex(_WSFrames(ws, string(id)), render_result, ip, keys...;
-        interval, force, label, keep_progress, error_obj, req, kwargs...)
+        id="treebar-progress", interval=0.1, force=false, kwargs...)
+    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
+    final_html(content)   = node_to_html(h.div(; id)(content))
+    fetchindex(ip, keys...; force, kwargs...) do rv, status
+        if rv isa Task
+            ws_progress(ws, status; render=progress_render, interval)
+            istaskfailed(rv) ||
+                try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+        elseif _is_unresolved_handle(rv)
+            ws_progress(ws, status; render=progress_render, interval)
+            # Block for the finished value and push the final frame. A failed
+            # compute makes `fetch` re-throw (caught here → no final frame sent).
+            try; send(ws, final_html(render_result(fetch(rv)))); catch; end
+        else
+            # A resolved VALUE, or a compatible READY handle from the legal
+            # completion race described above. Resolve the handle BEFORE the
+            # swallow-catch so its serialization can never reach the client raw.
+            val = rv
+            if _is_handle(rv)
+                val = fetch(rv)
+            end
+            try; send(ws, final_html(render_result(val))); catch; end
+        end
+    end
 end
 
 # Convenience: WS form with no render_result defaults to identity.
 polling_fetchindex(ws::WebSocket, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(ws, identity, ip, keys...; kwargs...)
-
-# `do` syntax passes the block FIRST: `polling_fetchindex(ws, ip, key) do rv … end`
-# arrives as `(render_result, ws, ip, key)`. Without this method that call fell
-# through to the HTTP polling method, with the WebSocket taken for the IP.
-polling_fetchindex(render_result, ws::WebSocket, ip, keys...; kwargs...) =
-    polling_fetchindex(ws, render_result, ip, keys...; kwargs...)
-# Tie-breakers for argument orders nobody means. Each is exactly the overlap of
-# two methods above, which keeps the method table free of ambiguities.
-polling_fetchindex(::WebSocket, ::WebSocket, ip, keys...; kwargs...) = _misordered_ws()
-polling_fetchindex(::HTMXObjects.DynamicObjects.IndexableProperty, ::WebSocket, ip, keys...; kwargs...) = _misordered_ws()
-_misordered_ws() = throw(ArgumentError(
-    "polling_fetchindex: pass the WebSocket, then render_result (or use `do` syntax), the IndexableProperty and its keys"))
-
-# --- Server-sent events ------------------------------------------------------
-#
-# The same frames as the WebSocket transport, without swap-by-id: htmx's sse
-# extension swaps an element on the events named in its `sse-swap`, so every
-# running inner carries that (and its own target, so an inherited `hx-target`
-# further up the page cannot redirect the swap), while the terminal content
-# carries none and so stops listening — as the polling terminal content drops
-# `hx-trigger`.
-struct _SSEFrames
-    io::IO
-end
-_sse_inner(content...) = h.div(class="treebar-poller-inner",
-    sse_swap="progress,done", hx_swap="outerHTML", hx_target="this")(content...)
-_running_frame(::_SSEFrames, body) = node_to_html(_sse_inner(body))
-_terminal_frame(::_SSEFrames, body...) = node_to_html(_polling_inner_done(body...))
-_send_progress(t::_SSEFrames, frame) = _sse_emit(t.io, "progress", frame)
-_send_done(t::_SSEFrames, frame) = _sse_emit(t.io, "done", frame)
-
-htmx_sse_container(url; placeholder=_connecting()) =
-    _live_wrap(_sse_inner(placeholder); hx_ext="sse", sse_connect=string(url), sse_close="done")
-
-function sse_fetchindex(io::IO, render_result, ip, keys...; interval=0.1, force=false, label=nothing,
-        keep_progress=true, error_obj=nothing, req=nothing, kwargs...)
-    _stream_fetchindex(_SSEFrames(io), render_result, ip, keys...;
-        interval, force, label, keep_progress, error_obj, req, kwargs...)
-end
-sse_fetchindex(io::IO, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
-    sse_fetchindex(io, identity, ip, keys...; kwargs...)
-# `do` syntax passes the block first.
-sse_fetchindex(render_result, io::IO, ip, keys...; kwargs...) =
-    sse_fetchindex(io, render_result, ip, keys...; kwargs...)
-# Tie-breaker for the overlap of the two methods above.
-sse_fetchindex(::IO, ::IO, ip, keys...; kwargs...) = throw(ArgumentError(
-    "sse_fetchindex: pass the stream, then render_result (or use `do` syntax), the IndexableProperty and its keys"))
 
 end

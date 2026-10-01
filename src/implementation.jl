@@ -7,7 +7,8 @@ end
 
 Tree node of a Treebars progress tree. Wraps a backend-specific `impl`
 (`StateProgress`, Term.jl `ProgressBar` / `ProgressJob`, …) plus metadata,
-a (possibly `nothing`) parent, and a thread-safe set of children.
+a (possibly `nothing`) parent, a thread-safe set of children, and an atomic
+interrupt flag (see [`request_interrupt!`](@ref)).
 
 All progress operations (`update_progress!`, `finalize_progress!`,
 `fail_progress!`, `add_child!`, …) dispatch through `ProgressNode` to the
@@ -16,14 +17,26 @@ Prefer the convenience entry points ([`@progress`](@ref),
 [`with_progress`](@ref), [`with_prepared_phases`](@ref)) over building
 `ProgressNode`s by hand.
 """
-struct ProgressNode{I,M,C}
-    impl::I
-    meta::M
-    parent::Union{ProgressNode,Nothing}
-    children::C
+# `mutable` with all-`const` fields: the node is never reassigned, but a node's
+# IDENTITY is what every container keys on — `children` sets (`push!`/`pop!` on
+# attach/detach), the renderers' per-pass `IdSet` dedup, DO's repeat
+# `add_child!`. For an immutable struct `objectid`/`hash` are structural and
+# recurse through the boxed `parent` field, i.e. cost O(depth) (~70 ns per
+# ancestor, measured) on every one of those operations; a mutable node hashes
+# by address in O(1). Two distinct nodes are never structurally equal (each owns
+# a fresh `interrupt` Atomic), so `===` means the same thing either way.
+mutable struct ProgressNode{I,M,C}
+    const impl::I
+    const meta::M
+    const parent::Union{ProgressNode,Nothing}
+    const children::C
+    # Backend-agnostic, and atomic rather than lock-guarded so a runner can
+    # poll `interrupt_requested` in a hot loop while a controller on another
+    # thread flips it.
+    const interrupt::Threads.Atomic{Bool}
     function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}())
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
-            impl, meta, parent, children
+            impl, meta, parent, children, Threads.Atomic{Bool}(false)
         )
         isnothing(parent) || push!(parent.children, rv)
         rv
@@ -45,6 +58,44 @@ which makes it safe to use with optional/disabled progress trees.
 add_child!(parent::ProgressNode, child::ProgressNode) = push!(parent.children, child)
 add_child!(::Nothing, ::Any) = nothing
 add_child!(::Any, ::Nothing) = nothing
+
+request_interrupt!(node::ProgressNode) = (node.interrupt[] = true; node)
+# Walks `parent` (the creating parent), not `.children` reachability: a node DO
+# also attaches under other trees via `add_child!` is interrupted by its own
+# lineage only, so a request on one caller's tree cannot stop shared work.
+interrupt_requested(node::ProgressNode) = node.interrupt[] || interrupt_requested(node.parent)
+
+"""
+    ProgressInterrupted(node)
+
+Thrown by [`throw_if_interrupted`](@ref) when an interrupt was requested on
+`node` or one of its ancestors. `node` is the node that was checked.
+"""
+struct ProgressInterrupted <: Exception
+    node::ProgressNode
+end
+Base.showerror(io::IO, e::ProgressInterrupted) =
+    print(io, "ProgressInterrupted: interrupt requested for ", e.node)
+
+"""
+    throw_if_interrupted(node) -> nothing
+
+Throw [`ProgressInterrupted`](@ref) if [`interrupt_requested`](@ref)`(node)`,
+else return `nothing` — the one-line opt-in for work that simply aborts. Under
+`@progress` / `with_progress` the exception fails the node like any other
+error. A runner that should instead stop *cleanly* (finish its node, keep a
+partial result) checks [`interrupt_requested`](@ref) and returns. No-op for
+`nothing`.
+"""
+throw_if_interrupted(node) = interrupt_requested(node) ? throw(ProgressInterrupted(node)) : nothing
+
+# Render-side, shared by `render_text` and `htmx_render`: the node a request was
+# made ON shows it until that node terminates, so whoever clicked Stop sees it
+# registered while the runner winds down. Own flag only — repeating one request
+# on every descendant would bury the tree in markers. A terminal node drops it:
+# by then the runner has answered (or ignored) the request.
+_shows_interrupt_request(node::ProgressNode) = node.interrupt[] && (isrunning(node) || is_pending(node))
+
 istransient(node::ProgressNode) = get(node.meta, :transient, false)
 propagates_finalization(node::ProgressNode) = get(node.meta, :propagates, false)
 labels(node::ProgressNode) = get(node.meta, :labels, nothing)
@@ -223,8 +274,6 @@ Lifecycle fields:
 - `finalized_at` — `nothing` while the node is running, set to `now()` by
   [`finalize_progress!`](@ref) or [`fail_progress!`](@ref).
 - `failed` — `true` after [`fail_progress!`](@ref).
-- `version` — bumped by every Treebars mutator (under `lock`), so a push
-  transport can tell an unchanged node from a changed one without rendering it.
 
 Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
 [`is_finished`](@ref), [`is_failed`](@ref), [`is_skipped`](@ref),
@@ -236,7 +285,6 @@ mutable struct StateProgress
     N::Union{Int,Nothing}
     i::Int
     message::String
-    labels::Dict{Symbol,Any}
     running::Bool
     failed::Bool
     # The two timestamps encode all five lifecycle states; there is no separate
@@ -258,13 +306,9 @@ mutable struct StateProgress
     # pre-enumerated and then bypassed.
     started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
     finalized_at::Union{DateTime,Nothing}
-    # Change counter: every mutator below bumps it while holding `lock`, and
-    # readers take `lock` too. A plain field, not `@atomic` — the lock is
-    # already held, so the bump is free, where an atomic store measurably is not.
-    version::Int
     StateProgress(; description="Running...", N=nothing, pending=false) = new(
-        ReentrantLock(), description, N, 0, "", Dict{Symbol,Any}(),
-        !pending, false, pending ? nothing : now(), nothing, 0
+        ReentrantLock(), description, N, 0, "",
+        !pending, false, pending ? nothing : now(), nothing
     )
 end
 
@@ -348,6 +392,9 @@ is_pending(s::StateProgress) = isnothing(s.started_at) && isnothing(s.finalized_
 
 `true` when a progress node has been started (via [`start_progress!`](@ref) or
 an eager `initialize_progress!`) and not yet finalized or failed.
+
+For backends without lifecycle timestamps (e.g. Term.jl jobs), answers from
+the backend's own running flag instead — see `isrunning`.
 """
 is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized_at)
 
@@ -357,6 +404,9 @@ is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized
 `true` when a progress node **ran** and was finalized successfully (via
 [`finalize_progress!`](@ref)). A node that never started is
 [`is_skipped`](@ref), not finished.
+
+For backends without lifecycle timestamps, `true` when the node is neither
+running nor failed — see `isrunning`.
 """
 is_finished(s::StateProgress) =
     !isnothing(s.finalized_at) && !isnothing(s.started_at) && !s.failed
@@ -366,6 +416,10 @@ is_finished(s::StateProgress) =
 
 `true` when a progress node has been finalized as a failure (via
 [`fail_progress!`](@ref)).
+
+`false` for backends without a failure concept (e.g. Term.jl, which neither
+records nor displays failure): a failed Term node reads finished, so check
+for the propagated exception instead.
 """
 is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
 
@@ -432,8 +486,14 @@ eta(node::ProgressNode{<:StateProgress}) = eta(node.impl)
 # with_prepared_phases' cleanup handler skips it.
 is_pending(::Any) = false
 is_pending(::Nothing) = false
+# Running/finished answer from the backend's own flag (`isrunning`), so they
+# agree with the finalize/fail walks on every backend; failure has no generic
+# flag, so backends without the concept (Term.jl) answer `false`.
+is_running(node::ProgressNode) = isrunning(node)
 is_running(::Nothing) = false
+is_finished(node::ProgressNode) = !isrunning(node) && !is_failed(node)
 is_finished(::Nothing) = false
+is_failed(::Any) = false
 is_failed(::Nothing) = false
 # Mirrors is_pending's defaults: a backend with no pending concept can have
 # nothing to skip, so every render/cleanup site sees `false` and behaves
@@ -471,7 +531,6 @@ function start_progress!(sp::StateProgress)
         if isnothing(sp.started_at)
             sp.started_at = now()
             sp.running = true
-            sp.version += 1
         end
     end
 end
@@ -483,19 +542,16 @@ function update_progress!(sp::StateProgress, i::Integer)
         else
             sp.i = clamp(i, 0, sp.N)
         end
-        sp.version += 1
     end
 end
 function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
     lock(sp.lock) do
         sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
-        sp.version += 1
     end
 end
 function update_progress!(sp::StateProgress, msg::AbstractString)
     lock(sp.lock) do
         sp.message = msg
-        sp.version += 1
     end
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
@@ -507,7 +563,6 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
-        sp.version += 1
     end
 end
 function finalize_progress!(sp::StateProgress)
@@ -516,7 +571,6 @@ function finalize_progress!(sp::StateProgress)
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
-        sp.version += 1
     end
 end
 # Terminate a pending node WITHOUT backfilling `started_at` — the one thing
@@ -528,7 +582,6 @@ function skip_progress!(sp::StateProgress)
         if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.running = false
             sp.finalized_at = now()
-            sp.version += 1
         end
     end
 end

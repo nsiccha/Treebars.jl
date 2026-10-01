@@ -234,31 +234,57 @@ function progress_map(f, parent, itrs...; description="Running...", transient=fa
     end
 end
 
-struct IterableProgress{P,W}
-    progress::P
+# The iterator a `@progress for` loop runs over. Its type depends ONLY on the
+# wrapped iterable: the counter node sits in an untyped field, so the loop stays
+# type-stable (inferred loop variable, no per-iteration boxing) even when the
+# parent node's type is unknown at the call site — the `BACKEND[]` default, an
+# untyped struct field, a `Ref{Any}`. With the node as a type parameter, every
+# such loop dispatched `iterate` dynamically and allocated twice per iteration,
+# even with progress disabled. The `:state` impl is additionally kept in a
+# small-`Union` field so the per-iteration tick is a static call; other backends
+# take one dynamic call per iteration. The `iterate` methods are `@inline`:
+# without it the `:state` tick measured ~3 ns/iteration slower than the old
+# node-typed iterator.
+struct IterableProgress{W}
+    progress::Any
+    counter::Union{Nothing,StateProgress}
     wrapped::W
+    IterableProgress(progress, wrapped::W) where {W} = new{W}(progress, _counter(progress), wrapped)
+end
+_counter(node::ProgressNode{<:StateProgress}) = node.impl
+_counter(_) = nothing
+@inline function _advance!(p::IterableProgress, i)
+    c = p.counter
+    if c !== nothing
+        update_progress!(c, i)
+    elseif p.progress !== nothing
+        update_progress!(p.progress, i)
+    end
+    nothing
 end
 _iter_has_length(::Union{Base.HasLength, Base.HasShape}) = true
 _iter_has_length(_) = false
 _has_length(it) = _iter_has_length(Base.IteratorSize(typeof(it)))
-function initialize_iterable_progress!(progress, it; kwargs...)
-    IterableProgress(
-        _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
-                          initialize_progress!(progress; kwargs...),
-        it
-    )
-end
-function Base.iterate(p::IterableProgress)
-    update_progress!(p.progress, 0)
+# The counter node for iterating `it` under `progress`: determinate when `it`
+# has a length. Kept separate from the iterator so the `@progress` lowering can
+# bind the node to a local whose type is inferred whenever `progress`'s is
+# (`__progress__` in the loop body), while the iterator itself is always stable.
+_iterable_node(progress, it; kwargs...) =
+    _has_length(it) ? initialize_progress!(progress, length(it); kwargs...) :
+                      initialize_progress!(progress; kwargs...)
+initialize_iterable_progress!(progress, it; kwargs...) =
+    IterableProgress(_iterable_node(progress, it; kwargs...), it)
+@inline function Base.iterate(p::IterableProgress)
+    _advance!(p, 0)
     iterate(p.wrapped)
 end
-function Base.iterate(p::IterableProgress, state)
-    update_progress!(p.progress, IncrementBy(1))
+@inline function Base.iterate(p::IterableProgress, state)
+    _advance!(p, IncrementBy(1))
     iterate(p.wrapped, state)
 end
 Base.length(p::IterableProgress) = length(p.wrapped)
-Base.eltype(::Type{IterableProgress{P,W}}) where {P,W} = eltype(W)
-Base.IteratorSize(::Type{IterableProgress{P,W}}) where {P,W} = Base.IteratorSize(W)
+Base.eltype(::Type{IterableProgress{W}}) where {W} = eltype(W)
+Base.IteratorSize(::Type{IterableProgress{W}}) where {W} = Base.IteratorSize(W)
 Base.size(p::IterableProgress) = size(p.wrapped)
 Base.axes(p::IterableProgress) = axes(p.wrapped)
 finalize_progress!(p::IterableProgress) = finalize_progress!(p.progress)
@@ -351,15 +377,31 @@ _phases_user_args(x) = x.args[3:end]
 # the source level.
 _is_string_literal(x) = x isa AbstractString || Meta.isexpr(x, :string)
 
+# Index of a block's TAIL statement (last non-LineNumberNode arg), if any. A
+# bare string literal there is the block's VALUE, not a phase marker: the
+# parser folds a mid-block `"s"; stmt` into `Core.@doc` (so a user-written
+# bare marker never reaches the walker there), but the trailing string has no
+# following statement and arrives intact — where the bare-string arm below
+# used to consume it, opening an empty phase and returning its node instead
+# of the string (snag `trailing-string-f02f8729`). The `@progress "label"`
+# macro form keeps its marker meaning in tail position (as a statement it has
+# no other reading), and `@phases`-injected markers are unaffected (each is
+# immediately followed by its statement, so none is ever the tail).
+_tail_index(block::Expr) = findlast(a -> !(a isa LineNumberNode), block.args)
+
 # Phase-marker recognition. The structural shape is a `:macrocall` to
 # `@progress` with exactly one user argument; the *kind* of that argument
 # (string literal — plain or interpolated — vs anything else) determines
-# whether it acts as a marker. Returns either `nothing` or the raw label
-# expression (which downstream code splices into `description=$label`).
-function _phase_marker_label(x)
-    _is_string_literal(x) && return x
+# whether it acts as a marker. A bare string literal ALSO acts as a marker
+# (the `@phases` injection path, plus for-bodies, where the parser leaves
+# bare strings intact) — EXCEPT in tail position (`is_tail`, from
+# `_tail_index`), where it is the block's value. Returns either `nothing` or
+# the raw label expression (which downstream code splices into
+# `description=$label`).
+function _phase_marker_label(x, is_tail::Bool=false)
+    _is_string_literal(x) && return is_tail ? nothing : x
     if x isa Expr && _is_progress_macrocall(x) && length(x.args) == 3
-        return _phase_marker_label(x.args[3])
+        return _phase_marker_label(x.args[3], false)
     end
     return nothing
 end
@@ -381,6 +423,25 @@ function _is_threads_for(x)
         name === Symbol("@threads")
     )
     is_threads && Meta.isexpr(x.args[end], :for)
+end
+
+# Single-line source text of an AST fragment: line numbers stripped, all
+# whitespace/newlines collapsed. Shared by `_short_label` (@phases phase
+# labels) and `_auto_for_label` (bare-for counter labels).
+function _flat_source(x)
+    clean = x isa Expr ? Base.remove_linenums!(deepcopy(x)) : x
+    strip(replace(string(clean), r"\s+" => " "))
+end
+
+# Default label for an auto-instrumented bare `for` / `Threads.@threads for`:
+# the iteration variables plus the collection source IN FULL when it fits in
+# `_PHASE_LABEL_MAXLEN`, else just the variables — the collection is omitted
+# WHOLE, never clipped (snag `phase-block-auto-211abcde`: the old hardcoded
+# `for $lhs in ...` ellipsised even a 4-letter collection).
+function _auto_for_label(lhs, rhs)
+    vars = _flat_source(lhs)
+    full = "for $vars in $(_flat_source(rhs))"
+    length(full) <= _PHASE_LABEL_MAXLEN ? full : "for $vars"
 end
 
 # Threads.@threads for — determinate counter with a thread-safe per-iteration
@@ -414,7 +475,7 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
     itr = gensym(:itr)
     child_ctx = (progress=sub, transient=true)
     wrapped_body = _wrap_for_body(body, child_ctx)
-    desc = description === nothing ? "for $lhs in ..." : description
+    desc = description === nothing ? _auto_for_label(lhs, rhs) : description
     newfor = Expr(:for, Expr(:(=), lhs, itr),
         quote
             try
@@ -554,7 +615,7 @@ function _build_body(body, label, ctx)
 end
 
 # init → run → fail/finalize sandwich shared by the iterable @progress forms.
-# `subsym` is bound to `init_expr` (an IterableProgress or a ProgressNode), then
+# `subsym` is bound to `init_expr` (a counter ProgressNode), then
 # `run_expr` runs inside the lifecycle try/catch; its value is the block's value.
 function _iterprogress_sandwich(subsym, init_expr, run_expr)
     quote
@@ -572,9 +633,16 @@ end
 
 # True iff the block has any bare `@progress "label"` phase markers as direct
 # statements (plain or interpolated string literals — `_phase_marker_label`
-# recognises both).
-_has_phase_marker(block::Expr) =
-    block.head === :block && any(a -> _phase_marker_label(a) !== nothing, block.args)
+# recognises both). A bare string in TAIL position is the block's value, not
+# a marker (`_tail_index`), so a body carrying only that stays a bare body
+# with no per-iteration wrapper.
+function _has_phase_marker(block::Expr)
+    block.head === :block || return false
+    tail = _tail_index(block)
+    any(enumerate(block.args)) do (i, a)
+        _phase_marker_label(a, i == tail) !== nothing
+    end
+end
 
 # Route a for-loop body. A block carrying bare phase markers gets a per-iteration,
 # transient, LABEL-LESS wrapper node running the existing `_emit_phases` phase
@@ -610,15 +678,28 @@ function _for_progress_expr(x::Expr, ctx; description)
         return _for_progress_expr(_nest_multifor(head, body), ctx; description)
     @assert Meta.isexpr(head, :(=))
     lhs, rhs = head.args
-    desc = description === nothing ? "for $lhs in ..." : description
-    subprogress = gensym(:iterprogress)
-    child_ctx = (progress=:($subprogress.progress), transient=true)
+    desc = description === nothing ? _auto_for_label(lhs, rhs) : description
+    node = gensym(:iterprogress)
+    itr = gensym(:itr)
+    child_ctx = (progress=node, transient=true)
     wrapped_body = _wrap_for_body(body, child_ctx)
-    init_expr = :($initialize_iterable_progress!(
-        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
-    ))
-    run_expr = :(for $lhs in $subprogress; $wrapped_body; end)
-    _iterprogress_sandwich(subprogress, init_expr, run_expr)
+    run_expr = :(for $lhs in $IterableProgress($node, $itr); $wrapped_body; end)
+    _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
+end
+
+# Shared init for the serial `for` and comprehension forms: evaluate the parent,
+# then the iterable (once), then bind the counter NODE itself to `node` — not an
+# `IterableProgress` wrapper — so `__progress__` in the body is a local whose
+# type is inferred whenever the parent's is. `run_expr` iterates
+# `IterableProgress(node, itr)`, which is type-stable either way.
+function _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
+    par = gensym(:parent)
+    init_expr = :($_iterable_node($par, $itr; description=$desc, transient=$(ctx.transient)))
+    quote
+        $par = $(ctx.progress)
+        $itr = $rhs
+        $(_iterprogress_sandwich(node, init_expr, run_expr))
+    end
 end
 
 # comprehension wrap — per-element counter (eager). Single, unfiltered iterable
@@ -634,14 +715,13 @@ function _comprehension_progress_expr(x::Expr, ctx; description)
     elem_body = gen.args[1]
     lhs, rhs = gen.args[2].args
     desc = description === nothing ? "comprehension over $lhs" : description
-    sub = gensym(:iterprogress)
-    child_ctx = (progress=:($sub.progress), transient=true)
+    node = gensym(:iterprogress)
+    itr = gensym(:itr)
+    child_ctx = (progress=node, transient=true)
     wrapped_elem = progress_expr(elem_body, child_ctx)
-    new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem, Expr(:(=), lhs, sub)))
-    init_expr = :($initialize_iterable_progress!(
-        $(ctx.progress), $rhs; description=$desc, transient=$(ctx.transient),
-    ))
-    _iterprogress_sandwich(sub, init_expr, new_comp)
+    new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem,
+        Expr(:(=), lhs, :($IterableProgress($node, $itr)))))
+    _iterable_progress_expr(node, itr, rhs, ctx, desc, new_comp)
 end
 
 # Recognise a `map(...)` call — plain `map(f, itrs...)` or do-block form
@@ -757,8 +837,9 @@ function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
     phases = Vector{Tuple{Any,Vector{Any}}}()
     cur_label = nothing
     cur_stmts = Any[]
-    for a in block.args
-        cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a))
+    tail = _tail_index(block)
+    for (i, a) in enumerate(block.args)
+        cur_label, cur_stmts = _absorb_block_arg!(phases, cur_label, cur_stmts, a, _phase_marker_label(a, i == tail))
     end
     push!(phases, (cur_label, cur_stmts))
 
@@ -918,6 +999,15 @@ Wrap `body` with automatic progress tracking. Supports:
   end
   ```
 
+  Plain `for` / `Threads.@threads for` loops *inside* the block — at any depth,
+  including nested in `if` / `while` / another `for` — automatically become
+  determinate counter children of their enclosing node (a counter nested in a
+  loop body is transient: visible while running, detached when finished). Name
+  one with `@progress "label" for`, leave one plain with `@progress nothing
+  for`. Comprehensions, `map`, and `while` loops stay plain unless wrapped
+  explicitly. The default counter label is `for <vars> in <collection>` in full
+  (or `for <vars>` when that exceeds 60 characters) — never clipped.
+
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 
 The `backend` argument is only accepted at the outermost call (defaults to
@@ -966,8 +1056,7 @@ end
 # stripped), collapse all whitespace/newlines to single spaces, truncate.
 const _PHASE_LABEL_MAXLEN = 60
 function _short_label(stmt)
-    clean = stmt isa Expr ? Base.remove_linenums!(deepcopy(stmt)) : stmt
-    s = strip(replace(string(clean), r"\s+" => " "))
+    s = _flat_source(stmt)
     length(s) > _PHASE_LABEL_MAXLEN ? first(s, _PHASE_LABEL_MAXLEN - 1) * "…" : String(s)
 end
 

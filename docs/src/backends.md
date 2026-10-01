@@ -70,9 +70,7 @@ htmx(...; extra_head=(htmx_treebar_styles(), htmx_treebar_script(), ...))
   `treebar-*` CSS classes.
 - [`htmx_treebar_script`](@ref) returns a `<script>` node with a client-side
   duration ticker that advances running nodes locally between server polls
-  (so the elapsed-time counter doesn't stutter). It also owns Pause (for
-  polling, WebSocket and SSE streams alike) and turns a finished stream's
-  wrapper into `.treebar-terminal`.
+  (so the elapsed-time counter doesn't stutter).
 
 ### Polling with cancel — `polling_fetchindex`
 
@@ -95,7 +93,13 @@ end
 Three states are handled automatically:
 
 - **Running** — renders the progress tree inside a `.treebar-poller` wrapper;
-  each poll only swaps the inner fragment.
+  each poll only swaps the inner fragment. The wrapper carries one
+  `.treebar-badge` — a hairline strip plus a panel (pause/play control,
+  progress bar and status) above the live tree, expanded by default so a
+  first-load region shows progress immediately. Pass `chrome=:quiet` to
+  collapse a poller beside already-visible content to the strip (hover/focus
+  re-expands it); a poller diverted into HTMXObjects' live-refresh reporter
+  is quiet automatically.
 - **Failed** — renders the exception as an `<article>` with the error message;
   polling stops naturally because the error article has no `hx-trigger`.
 - **Completed** — calls the `render_result` callback and terminalizes the stable
@@ -105,96 +109,6 @@ While it polls in-flight work, `polling_fetchindex` also reports the compute to
 HTMXObjects' job ledger (`HTMXObjects.track_job!`), so hand-rolled pollers show
 on HTMXObjects' runtime dashboard and job boards. Pass `track_job=false` to opt
 out.
-
-### WebSocket push — `polling_fetchindex(ws, …)`
-
-The WebSocket method of [`polling_fetchindex`](@ref) streams the same frames
-over a socket instead of being polled: the server sends a frame when the tree
-changes and the result as soon as the compute finishes. Pair it with
-[`htmx_ws_container`](@ref), which renders the client side. The page needs
-htmx's ws extension (`htmx-ext-ws`) in addition to the Treebars assets.
-
-```julia
-@htmx struct Routes
-    # The container: persistent wrapper + an inner with a fresh id. The id is
-    # generated here and travels to the socket route in its URL, so several
-    # streams on one page never collide.
-    @get start(; key) = htmx_ws_container(id -> query_url(__self__ / "run"; key, id))
-
-    @ws run(; key, id) = polling_fetchindex(__ws__, app.results, key; id,
-                                            label="Computing '$key'") do rv
-        render_result(rv)
-    end
-end
-```
-
-The frames follow the polling design:
-
-- The `.treebar-poller` wrapper carries `hx-ext="ws" ws-connect=…`, the
-  `data-show-*` pill state, `data-paused` and the Pause button. Frames never
-  replace it, so toggles and Pause survive and the socket stays open.
-- Each running frame is `<div id=ID class="treebar-poller-inner">…</div>`, the
-  tree rendered with `scoped=false`. htmx's ws extension swaps it in place of
-  the inner by id. Pending nodes stream like running ones.
-- A frame is sent only when the tree changed. A running node's elapsed time
-  and ETA are ticked on the client, so they do not count as a change.
-- The terminal frame is `<div id=ID class="treebar-terminal-content">`: the
-  rendered result plus, with `keep_progress=true` (the default), the frozen
-  tree in a collapsed `<details class="treebar-frozen">`. The page script then
-  turns the wrapper into `.treebar-terminal` and removes Pause.
-- A failed compute (or a throwing `render_result`) is recorded through
-  HTMXObjects' `safely` (pass `error_obj` / `req` for the route context) and
-  sent as the terminal frame, beside the tree in an open `<details>`.
-- If the client disconnects, the stream stops quietly and the compute runs on;
-  its value lands in the cache for the next visitor.
-- Pause holds back running frames on the client (the newest one is applied on
-  Resume); the terminal frame is never held back.
-
-### Server-sent events — `sse_fetchindex`
-
-[`sse_fetchindex`](@ref) streams the same fragments as a `text/event-stream`
-on any `IO`, and [`htmx_sse_container`](@ref) renders the client side. The
-page needs htmx's sse extension (`htmx-ext-sse`).
-
-```julia
-@htmx struct Routes
-    @get start(; key) = htmx_sse_container(query_url(__self__ / "run"; key))
-
-    # `__sse__` is the open event stream: headers already written.
-    @sse run(; key) = sse_fetchindex(__sse__, app.results, key;
-                                     label="Computing '$key'") do rv
-        render_result(rv)
-    end
-end
-```
-
-The contract with the caller, who owns the response:
-
-- `io` is an open event stream whose headers the caller has already written.
-  Treebars never writes headers, never closes or `closewrite`s `io`, and never
-  sends keep-alive comments.
-- Each frame is exactly one `write(io, frame::String)`: `event: <name>`, one
-  `data:` line per line of HTML, then a blank line. A caller that serialises
-  writes (e.g. against its own heartbeat) therefore never sees a frame split.
-- Running frames are `event: progress`; the single terminal frame, success or
-  failure, is `event: done`. Nothing is written after it.
-- A write that throws means the client disconnected: the stream stops quietly
-  and the compute runs on. `sse_fetchindex` returns `nothing` either way.
-
-The markup is the WebSocket markup without swap-by-id. The wrapper carries
-`hx-ext="sse" sse-connect=URL sse-close="done"`; every running inner carries
-`sse-swap="progress,done" hx-swap="outerHTML" hx-target="this"` (the explicit
-target keeps an `hx-target` inherited from further up the page from
-redirecting the swap); the terminal `.treebar-terminal-content` carries none of
-them, so it stops listening, and `sse-close="done"` closes the EventSource so
-the browser does not reconnect and run the stream again. htmx's sse extension
-closes the EventSource when its `sse-connect` element leaves the DOM, so frames
-never replace the wrapper. Pause holds back `progress` frames, never `done`.
-
-For a progress node you manage yourself, [`sse_progress`](@ref)`(io, node;
-render, event="progress")` is the loop underneath: it needs no extension at
-all, streams `render(node)` (which may span lines) until the node is terminal
-or the optional `done` handle settles, and sends the terminal state last.
 
 ### Live boards — `htmx_render_board`
 
@@ -232,25 +146,21 @@ reconciler); other transports can call `window.treebarUpdateBoard(html)`.
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides
-[`ws_progress`](@ref): the push loop underneath the WebSocket method above,
-for a progress node you manage yourself. It streams `render(node)` until the
-node is terminal
-(finished, failed or skipped — a pending node keeps it going), sends only
-changed frames, and ends early when the optional `done` handle settles. It
-returns `false` if the client disconnected.
+[`ws_progress`](@ref): a push loop that sends rendered progress over a
+WebSocket until the node finalises.
 
 ```julia
-@ws feed = begin
+@ws ws = begin
     p = initialize_progress!(:state; description="Running")
     task = Threads.@spawn expensive_computation(p)
-    ws_progress(__ws__, p; render=htmx_ws_render, done=task) &&
-        send(__ws__, render_result(fetch(task)))
+    ws_progress(__ws__, p; render=htmx_ws_render)
+    send(__ws__, render_result(fetch(task)))
 end
 ```
 
 The default `render` is `repr`; load `HTMXObjects` to use
 [`htmx_ws_render`](@ref) which wraps `htmx_render` in a stable-id `<div>` for
-HTMX swap-by-id (each frame replaces the whole tree, so pill toggles reset).
+HTMX swap-by-id.
 
 ## Custom backends
 

@@ -1,14 +1,48 @@
-using TestModules
-# Explicit, so it wins over `Test.@testset` that busy_retry.jl's `using Test`
-# brings in: two `using`-exported `@testset`s are ambiguous and fail to resolve.
-using TestModules: @testset
-using Treebars
-using Dates
+using TestItemRunner
 
-include("busy_retry.jl")
-include("board.jl")
+# Converted 2026-09-25 from web/src/test/{runtests,busy_retry}.jl (TestModules
+# era) to one @testitem per former top-level @testset. Item bodies are
+# byte-verbatim ex-testset bodies (deliberately NOT re-indented) except for
+# the fixes noted in the migration commit. Tags: every item carries :unit
+# plus one area tag:
+#   :macro        @progress / @phases / @threads lowering + phase semantics
+#   :lifecycle    node init / finalize / fail / skip + state helpers
+#   :render       render_text / htmx_render / dedup / ETA / durations
+#   :format       short_string / Fraction / round2 / truncation display
+#   :polling      progress_state snapshot + web polling simulation
+#   :concurrency  threaded stress (handshake-gated first poll; see item)
+#   :do           DynamicObjects substatus fixtures (needs DO in test env)
+#   :retry        busy-resource retry lifecycle (busy_retry.jl)
+#   :interrupt    opt-in interrupt flag (request_interrupt! / interrupt_requested)
+#   :term         Term backend lifecycle (items_term.jl; needs Term in test env)
+#
+# Every body runs inside a bare `let`: @testset scope was function-hard,
+# item top level is module-soft, and @progress-for loops mutating an outer
+# counter need the hard scope. Bodies are otherwise byte-verbatim ex-testset
+# bodies; this file is maintained by hand now (the one-shot converter is
+# gone with the TestModules-era sources). Content fixes applied at
+# conversion: 3x `counter.impl.description` "for i in ..." ->
+# "for i in 1:3" (approved readable labels, ecb68fa/0mkpm59) +1 same-shaped
+# comment; 3x dropped `; cache_type=:parallel` ctor kwarg (removed from DO
+# 2026-07-07, decision 2canrl — "drop this kwarg") +2 dropped
+# __cache_type__ inheritance lines (field removed with it); 3x multifor
+# elided labels ("for oi/di/a/b/c in ...") -> full-range labels, same
+# approved contract; 3x `app.results[k]` -> `app.results(k)` (bracket IP
+# access removed from DO — feedback_call_not_bracket); 1x `children[1]` ->
+# `only(children)` (children is now a ThreadsafeSet); 1x inline-child
+# description "InlineSub[]" -> "" (undocumented properties get no label —
+# DO's displayed=!isnothing(doc) rule).
 
-# Defined at module scope (required for @dynamicstruct type definitions)
+@testsnippet TreebarsTestImports begin
+    using Dates, Random, Test, Treebars
+    using DynamicObjects, HTMXObjects, HTTP
+end
+
+@testmodule TreebarsTestFixtures begin
+using DynamicObjects, Treebars
+
+export _InlineSubTest, _AutoCleanupTest, _FailedSubstatusTest
+
 @dynamicstruct struct _InlineSubTest
     __status__ = initialize_progress!(:state; description="InlineParent")
     struct InlineSub
@@ -34,16 +68,231 @@ end
     end
 end
 
-@testset "nothing backend (no-ops)" begin
+end # @testmodule TreebarsTestFixtures
+
+@testitem "BusyRetryPolicy bounds and validation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    @test_throws ArgumentError BusyRetryPolicy()
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=-1)
+    @test_throws ArgumentError BusyRetryPolicy(max_elapsed=1, initial_delay=0, max_delay=1)
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=1, jitter=1.1)
+    @test_throws ArgumentError BusyRetryPolicy(max_retries=1, multiplier=0.9)
+
+    policy = BusyRetryPolicy(max_retries=6)
+    @test policy.max_retries == 6
+    @test policy.initial_delay == 0.5
+    @test policy.max_delay == 8.0
+    end # let (restores @testset hard scope)
+end
+
+@testitem "busy retry acquires immediately and forwards the value" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    child = Ref{Any}()
+    result = with_busy_retry(root,
+            () -> begin
+                child[] = only(root.children)
+                ResourceAcquired(42)
+            end;
+            policy=BusyRetryPolicy(max_retries=3),
+            sleeper=_ -> error("must not sleep")) do value
+        value + 1
+    end
+
+    @test result == 43
+    @test is_finished(child[])
+    @test child[].impl.message == ""
+    @test isempty(root.children) # successful transient wait nodes disappear
+    end # let (restores @testset hard scope)
+end
+
+@testitem "busy retry uses capped lower-range jitter deterministically" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    child = Ref{Any}()
+    attempts = Ref(0)
+    now = Ref(0.0)
+    sleeps = Float64[]
+    messages = String[]
+    samples = Iterators.Stateful((0.0, 0.5))
+
+    result = with_busy_retry(root,
+            () -> begin
+                attempts[] += 1
+                child[] = only(root.children)
+                attempts[] <= 2 ? ResourceBusy("Evaluator capacity busy") : ResourceAcquired(:lease)
+            end;
+            policy=BusyRetryPolicy(
+                initial_delay=0.5, multiplier=2, max_delay=0.75,
+                jitter=0.5, max_retries=2),
+            clock=() -> now[],
+            random=() -> popfirst!(samples),
+            sleeper=delay -> begin
+                push!(sleeps, delay)
+                push!(messages, child[].impl.message)
+                now[] += delay
+            end) do value
+        value
+    end
+
+    @test result === :lease
+    @test attempts[] == 3 # initial call plus two retries
+    @test sleeps == [0.5, 0.5625]
+    @test occursin("retry 1/2", messages[1])
+    @test occursin("retry 2/2", messages[2])
+    @test child[].impl.message == ""
+    @test is_finished(child[])
+    end # let (restores @testset hard scope)
+end
+
+@testitem "retry count exhaustion is typed and stays visible" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    now = Ref(0.0)
+    sleeps = Float64[]
+    err = try
+        with_busy_retry(root, () -> ResourceBusy("Evaluator capacity busy");
+                policy=BusyRetryPolicy(
+                    initial_delay=0.5, multiplier=2, max_delay=8,
+                    jitter=0, max_retries=2),
+                clock=() -> now[], random=() -> 0.0,
+                sleeper=delay -> (push!(sleeps, delay); now[] += delay)) do _
+            error("unreachable")
+        end
+        nothing
+    catch caught
+        caught
+    end
+
+    @test err isa BusyRetryExhausted
+    @test err.attempts == 3
+    @test err.elapsed == 1.5
+    @test err.last_message == "Evaluator capacity busy"
+    @test sleeps == [0.5, 1.0]
+    child = only(root.children)
+    @test is_failed(child)
+    @test occursin("exhausted after 3 attempts", child.impl.message)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "elapsed bound does not start a retry that cannot fit" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    now = Ref(0.0)
+    sleeps = Float64[]
+    attempts = Ref(0)
+    err = try
+        with_busy_retry(root,
+                () -> (attempts[] += 1; ResourceBusy("queue busy"));
+                policy=BusyRetryPolicy(
+                    initial_delay=0.75, multiplier=2, max_delay=2,
+                    jitter=0, max_elapsed=1.0),
+                clock=() -> now[], random=() -> 0.0,
+                sleeper=delay -> (push!(sleeps, delay); now[] += delay)) do _
+            error("unreachable")
+        end
+        nothing
+    catch caught
+        caught
+    end
+
+    @test err isa BusyRetryExhausted
+    @test err.attempts == 2
+    @test attempts[] == 2
+    @test sleeps == [0.75]
+    end # let (restores @testset hard scope)
+end
+
+@testitem "non-retryable acquisition and body failures propagate unchanged" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    acquisition_error = ErrorException("acquire failed")
+    root = initialize_progress!(:state; description="root")
+    caught = try
+        with_busy_retry(root, () -> throw(acquisition_error);
+                policy=BusyRetryPolicy(max_retries=2)) do _
+            error("unreachable")
+        end
+        nothing
+    catch err
+        err
+    end
+    @test caught === acquisition_error
+    failed_wait = only(root.children)
+    @test is_failed(failed_wait)
+    @test failed_wait.impl.message == ""
+
+    body_error = ErrorException("body failed")
+    released = Ref(false)
+    root2 = initialize_progress!(:state; description="root")
+    caught = try
+        with_busy_retry(root2, () -> ResourceAcquired(nothing);
+                policy=BusyRetryPolicy(max_retries=2)) do _
+            try
+                throw(body_error)
+            finally
+                released[] = true
+            end
+        end
+        nothing
+    catch err
+        err
+    end
+    @test caught === body_error
+    @test released[]
+    @test isempty(root2.children) # acquisition already succeeded
+    end # let (restores @testset hard scope)
+end
+
+@testitem "invalid acquisition results fail without retrying" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    root = initialize_progress!(:state; description="root")
+    attempts = Ref(0)
+    @test_throws ArgumentError with_busy_retry(root,
+            () -> (attempts[] += 1; :busy);
+            policy=BusyRetryPolicy(max_retries=2)) do _
+        error("unreachable")
+    end
+    @test attempts[] == 1
+    @test is_failed(only(root.children))
+    end # let (restores @testset hard scope)
+end
+
+@testitem "a fresh acquisition resets the backoff" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :retry] begin
+    let
+    sleeps = Float64[]
+    for _ in 1:2
+        root = initialize_progress!(:state; description="root")
+        attempts = Ref(0)
+        with_busy_retry(root,
+                () -> begin
+                    attempts[] += 1
+                    attempts[] == 1 ? ResourceBusy("busy") : ResourceAcquired(nothing)
+                end;
+                policy=BusyRetryPolicy(
+                    initial_delay=0.5, multiplier=2, max_delay=8,
+                    jitter=0, max_retries=1),
+                random=() -> error("zero jitter must not sample randomness"),
+                sleeper=delay -> push!(sleeps, delay)) do _
+            nothing
+        end
+    end
+    @test sleeps == [0.5, 0.5]
+    end # let (restores @testset hard scope)
+end
+
+@testitem "nothing backend (no-ops)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     @test initialize_progress!(nothing) === nothing
     @test update_progress!(nothing, 1) === nothing
     @test update_progress!(nothing, "msg") === nothing
     @test fail_progress!(nothing) === nothing
     @test finalize_progress!(nothing) === nothing
     @test update_progress!(Returns((;a=1)), nothing) === nothing
+    end # let (restores @testset hard scope)
 end
 
-@testset "init root" begin
+@testitem "init root" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     @test root isa ProgressNode
     @test root.impl isa StateProgress
@@ -52,9 +301,11 @@ end
     @test isnothing(root.parent)
     finalize_progress!(root)
     @test root.impl.running == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "init child with N" begin
+@testitem "init child with N" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Step")
     @test child isa ProgressNode
@@ -63,9 +314,11 @@ end
     @test child.parent === root
     @test child in root.children
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "update counter" begin
+@testitem "update counter" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 100; description="Loop")
     update_progress!(child, 50)
@@ -73,9 +326,11 @@ end
     update_progress!(child, 200)
     @test child.impl.i == 100
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "increment" begin
+@testitem "increment" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")
     update_progress!(child)
@@ -83,17 +338,21 @@ end
     update_progress!(child)
     @test child.impl.i == 2
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "string message" begin
+@testitem "string message" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root; description="Info")
     update_progress!(child, "hello")
     @test child.impl.message == "hello"
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail" begin
+@testitem "fail" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     fail_progress!(root)
     @test root.impl.failed == true
@@ -101,9 +360,11 @@ end
     @test !isnothing(root.impl.finalized_at)
     @test is_failed(root)
     @test !is_running(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "timestamps and status helpers" begin
+@testitem "timestamps and status helpers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     @test root.impl.started_at isa Dates.DateTime
     @test isnothing(root.impl.finalized_at)
@@ -118,9 +379,11 @@ end
     @test !is_failed(root)
     @test root.impl.finalized_at isa Dates.DateTime
     @test root.impl.finalized_at >= root.impl.started_at
+    end # let (restores @testset hard scope)
 end
 
-@testset "short_duration" begin
+@testitem "short_duration" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     @test short_duration(Dates.Second(4)) == "4s"
     @test short_duration(Dates.Minute(1) + Dates.Second(23)) == "1m 23s"
     @test short_duration(Dates.Hour(2) + Dates.Minute(5) + Dates.Second(30)) == "2h 5m"
@@ -143,9 +406,14 @@ end
     # ≥ 1 min keeps the two-most-significant join.
     @test short_duration(Dates.Minute(1) + Dates.Second(30)) == "1m 30s"
     @test short_duration(Dates.Hour(1) + Dates.Minute(1)) == "1h 1m"
+    end # let (restores @testset hard scope)
 end
 
-@testset "eta eligibility and formula" begin
+"""
+The parent has a determinate total, but i == 0 gives no rate yet.
+"""
+@testitem "eta eligibility and formula" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # The parent has a determinate total, but i == 0 gives no rate yet.
     parent = initialize_progress!(:state; description="parent", N=4)
     @test eta(parent) === nothing
@@ -157,10 +425,16 @@ end
     update_progress!(eligible, 2)
     remaining = eta(eligible)
     @test remaining isa Dates.Millisecond
+    # Loose tolerance is load-bearing: `eta` and `duration` each read the
+    # wall clock, so the two elapsed values differ by the inter-statement
+    # gap — amplified ×4 by the (N-i)/i factor. A loaded CI runner (macOS
+    # 1.13 job: 14ms gap → 56ms, just over the old atol=50) trips a tight
+    # bound. 500ms is still a real formula check: a wrong factor would be
+    # off by seconds against the ~8s magnitude.
     @test isapprox(
         Dates.value(remaining),
         4 * Dates.value(duration(eligible));
-        atol=50,
+        atol=500,
     )
 
     # Automatic ETA is omitted when there is no meaningful estimate.
@@ -188,9 +462,15 @@ end
     @test count("ETA ~", text) == 1
 
     finalize_progress!(parent)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render automatic ETA eligibility" begin
+"""
+Render the real extension over one eligible child plus the important
+omission cases. Exactly one node may carry ETA markup/text.
+"""
+@testitem "htmx_render automatic ETA eligibility" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Render the real extension over one eligible child plus the important
     # omission cases. Exactly one node may carry ETA markup/text.
     parent = initialize_progress!(:state; description="parent", N=4)
@@ -213,9 +493,15 @@ end
     @test count("ETA ~", html) == 1
 
     finalize_progress!(parent)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render duration suffix: work-leaf yes, annotation no" begin
+"""
+A message-bearing work-leaf (disk-load style: message, no counter, not an
+annotation) shows the duration suffix.
+"""
+@testitem "htmx_render duration suffix: work-leaf yes, annotation no" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # A message-bearing work-leaf (disk-load style: message, no counter, not an
     # annotation) shows the duration suffix.
     root = initialize_progress!(:state; description="Root")
@@ -238,9 +524,15 @@ end
 
     finalize_progress!(root)
     finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "_first_seen! render dedup helper (pure, no renderer/DO)" begin
+"""
+Unit-tests Treebars._first_seen! directly on hand-built ProgressNodes —
+no htmx_render, no HTMXObjects, no DynamicObjects involved.
+"""
+@testitem "_first_seen! render dedup helper (pure, no renderer/DO)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Unit-tests Treebars._first_seen! directly on hand-built ProgressNodes —
     # no htmx_render, no HTMXObjects, no DynamicObjects involved.
     root = initialize_progress!(:state; description="Root")
@@ -258,9 +550,15 @@ end
     @test Treebars._first_seen!(seen2, a) == true
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: same-tree duplicate renders once" begin
+"""
+(a) A node add_child!'d under TWO parents in the SAME tree: the doubled
+node's content must appear exactly once in the rendered HTML.
+"""
+@testitem "htmx_render dedup: same-tree duplicate renders once" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (a) A node add_child!'d under TWO parents in the SAME tree: the doubled
     # node's content must appear exactly once in the rendered HTML.
     root = initialize_progress!(:state; description="Root")
@@ -274,9 +572,17 @@ end
     @test count("DupNode", html) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: cross-tree same node renders in EACH (regression guard)" begin
+"""
+(b) THE critical case: the SAME node add_child!'d under two SEPARATE
+roots must still render once in EACH root's own render pass — proving
+per-tree (not global) dedup, which is what preserves DynamicObjects'
+intentional cross-tree substatus sharing.
+"""
+@testitem "htmx_render dedup: cross-tree same node renders in EACH (regression guard)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (b) THE critical case: the SAME node add_child!'d under two SEPARATE
     # roots must still render once in EACH root's own render pass — proving
     # per-tree (not global) dedup, which is what preserves DynamicObjects'
@@ -294,9 +600,15 @@ end
     finalize_progress!(shared)
     finalize_progress!(root1)
     finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: normal single-parent tree unchanged" begin
+"""
+(c) No regression: an ordinary tree with no shared nodes renders each
+child exactly once, same as before this feature.
+"""
+@testitem "htmx_render dedup: normal single-parent tree unchanged" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # (c) No regression: an ordinary tree with no shared nodes renders each
     # child exactly once, same as before this feature.
     root = initialize_progress!(:state; description="Root")
@@ -310,9 +622,18 @@ end
     @test count("ChildB", html) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "htmx_render dedup: children fully deduped away -> header-only, no placeholder" begin
+"""
+Edge case folded in at plan-gate review: if a host node's entire child
+list dedupes away (every child already rendered elsewhere in this pass),
+the host's OWN header/duration must still render, but its children
+section must emit nothing rather than the misleading "Starting..." /
+message spinner fallback.
+"""
+@testitem "htmx_render dedup: children fully deduped away -> header-only, no placeholder" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Edge case folded in at plan-gate review: if a host node's entire child
     # list dedupes away (every child already rendered elsewhere in this pass),
     # the host's OWN header/duration must still render, but its children
@@ -334,17 +655,113 @@ end
     @test count("Shared2", html) == 1      # shared renders exactly once (under HostA, visited first)
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "labels create sub-nodes" begin
+@testitem "htmx_render: terminal nodes with only hidden children are not busy" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+
+    finished = initialize_progress!(root; description="FinishedParent")
+    initialize_progress!(finished; description="HiddenFinished", displayed=false)
+    finalize_progress!(finished)
+
+    failed = initialize_progress!(root; description="FailedParent")
+    initialize_progress!(failed; description="HiddenFailed", displayed=false)
+    fail_progress!(failed)
+
+    skipped = prepare_progress!(root; description="SkippedParent")
+    prepare_progress!(skipped; description="HiddenSkipped", displayed=false)
+    skip_progress!(skipped)
+
+    for node in (finished, failed, skipped)
+        html = sprint(io -> show(io, MIME"text/html"(), htmx_render(node)))
+        @test isempty(Treebars._flatten_displayed_children(node))
+        @test !occursin("Starting...", html)
+        @test !occursin("aria-busy=\"true\"", html)
+    end
+
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "htmx_render renders every child by default; max_finished elision is opt-in" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    html(x) = sprint(io -> show(io, MIME"text/html"(), x))
+    root = initialize_progress!(:state; description="Root")
+    loop = initialize_progress!(root, 200; description="Loop")
+    for k in 1:60
+        c = initialize_progress!(loop; description="fin-$k-")
+        finalize_progress!(c)
+    end
+    for k in 1:55
+        c = prepare_progress!(loop; description="skip-$k-")
+        skip_progress!(c)
+    end
+    for k in 1:60
+        c = initialize_progress!(loop; description="fail-$k-")
+        fail_progress!(c)
+    end
+    initialize_progress!(loop; description="still-running-")
+
+    # Default: no cap — every child renders, no elision note.
+    full = html(htmx_render(root))
+    @test count(k -> occursin("fin-$k-", full), 1:60) == 60
+    @test count(k -> occursin("skip-$k-", full), 1:55) == 55
+    @test !occursin("treebar-elided", full)
+    explicit = html(htmx_render(root; max_finished=nothing))
+    @test count(k -> occursin("fin-$k-", explicit), 1:60) == 60 && !occursin("treebar-elided", explicit)
+
+    out = html(htmx_render(root; max_finished=50))
+    # Pills count EVERY child, elided or not.
+    @test occursin("60 finished", out)
+    @test occursin("55 skipped", out)
+    @test occursin("60 failed", out)
+    # Only the newest 50 of each terminal group render; the oldest are replaced
+    # by one note carrying that group's class (so it toggles with the pill).
+    @test count(k -> occursin("fin-$k-", out), 1:60) == 50
+    @test !occursin("fin-1-", out) && !occursin("fin-10-", out) && occursin("fin-11-", out) && occursin("fin-60-", out)
+    @test count(k -> occursin("skip-$k-", out), 1:55) == 50
+    @test occursin("10 earlier finished not shown", out)
+    @test occursin("5 earlier skipped not shown", out)
+    @test occursin("treebar-child-finished treebar-elided", out)
+    @test occursin("treebar-child-skipped treebar-elided", out)
+    # Failed and running children are never elided.
+    @test count(k -> occursin("fail-$k-", out), 1:60) == 60
+    @test occursin("still-running-", out)
+
+    # A smaller cap applies the same way.
+    small = html(htmx_render_children(loop; max_finished=3))
+    @test count(k -> occursin("fin-$k-", small), 1:60) == 3
+    @test occursin("57 earlier finished not shown", small)
+    @test_throws ArgumentError htmx_render_children(loop; max_finished=-1)
+
+    # render_text is a debugging dump and keeps every node.
+    txt = render_text(root)
+    @test count(k -> occursin("fin-$k-", txt), 1:60) == 60
+
+    # Exactly at the cap nothing is elided.
+    r2 = initialize_progress!(:state; description="R2")
+    for k in 1:50
+        finalize_progress!(initialize_progress!(r2; description="x$k-"))
+    end
+    @test !occursin("treebar-elided", html(htmx_render(r2; max_finished=50)))
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "labels create sub-nodes" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Loop")
     update_progress!(child, 1; speed="fast", temp="hot")
     @test length(child.children) == 2
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize keeps non-transient node in parent" begin
+@testitem "finalize keeps non-transient node in parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child")
     @test length(root.children) == 1
@@ -352,9 +769,11 @@ end
     @test length(root.children) == 1
     @test child.impl.running == false
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize detaches transient node from parent" begin
+@testitem "finalize detaches transient node from parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child", transient=true)
     @test length(root.children) == 1
@@ -366,9 +785,14 @@ end
     finalize_progress!(child)
     @test length(root.children) == 0
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail does NOT detach transient node" begin
+"""
+Intentional asymmetry: failed transients stay pinned so htmx pills can show them
+"""
+@testitem "fail does NOT detach transient node" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     # Intentional asymmetry: failed transients stay pinned so htmx pills can show them
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Child", transient=true)
@@ -377,9 +801,11 @@ end
     @test child in root.children
     @test is_failed(child)
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "fail recurses into children" begin
+@testitem "fail recurses into children" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child1 = initialize_progress!(root, 10; description="Child1")
     child2 = initialize_progress!(root, 10; description="Child2")
@@ -387,17 +813,21 @@ end
     @test is_failed(root)
     @test is_failed(child1)
     @test is_failed(child2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "propagating finalization" begin
+@testitem "propagating finalization" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
     combo = initialize_progress!(:state, 10; description="Auto")
     parent_node = combo.parent
     @test parent_node.impl.running == true
     finalize_progress!(combo)
     @test parent_node.impl.running == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "with_progress" begin
+@testitem "with_progress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     result = with_progress(:state; description="Test") do p
         update_progress!(p, "working")
         42
@@ -407,9 +837,11 @@ end
     @test_throws ErrorException with_progress(:state; description="Fail") do p
         error("boom")
     end
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress macro" begin
+@testitem "@progress macro" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     root = initialize_progress!(:state; description="Root")
     count = 0
     @progress root for i in 1:5
@@ -417,9 +849,16 @@ end
     end
     @test count == 5
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress for with bare phase markers" begin
+"""
+Bare `@progress "label"` markers in a for body get an implicit per-iteration
+label-less wrapper node; phases enumerate per iteration and clean up (no
+accumulation), and the label-less wrapper auto-inlines at render.
+"""
+@testitem "@progress for with bare phase markers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Bare `@progress "label"` markers in a for body get an implicit per-iteration
     # label-less wrapper node; phases enumerate per iteration and clean up (no
     # accumulation), and the label-less wrapper auto-inlines at render.
@@ -445,7 +884,7 @@ end
 
     # The label-less wrapper is a bare wrapper that does not render itself.
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     # Phases do not accumulate: each iteration's transient wrapper is detached.
     @test length(counter.children) == 0
 
@@ -470,9 +909,17 @@ end
     iwrap = isnap[]["children"][1]["children"][1]
     @test [c["description"] for c in iwrap["children"]] == ["phase 2"]
     @test length(only(root3.children).children) == 0
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress compact multi-generator for (a bar at every level)" begin
+"""
+`for a in X, b in Y` — Julia's Cartesian sugar, whose header parses as an
+`Expr(:block, …)` — desugars to nested single-var loops so EVERY level
+gets its own progress bar (user decision 8fmgjl). Was a hard
+AssertionError on valid syntax.
+"""
+@testitem "@progress compact multi-generator for (a bar at every level)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # `for a in X, b in Y` — Julia's Cartesian sugar, whose header parses as an
     # `Expr(:block, …)` — desugars to nested single-var loops so EVERY level
     # gets its own progress bar (user decision 8fmgjl). Was a hard
@@ -488,10 +935,10 @@ end
     @test n == 6                                        # full Cartesian product ran
 
     outer = snap[]["children"][1]
-    @test outer["description"] == "for oi in ..."       # outer bar
+    @test outer["description"] == "for oi in 1:2"       # outer bar
     @test outer["N"] == 2
     inner = outer["children"][1]
-    @test inner["description"] == "for di in ..."        # inner bar, nested under outer
+    @test inner["description"] == "for di in 1:3"        # inner bar, nested under outer
     @test inner["N"] == 3
     # Inner bars are transient ⇒ detached each outer iteration, no accumulation.
     @test length(only(root.children).children) == 0
@@ -507,7 +954,7 @@ end
     l2 = l1["children"][1]
     l3 = l2["children"][1]
     @test [l1["description"], l2["description"], l3["description"]] ==
-          ["for a in ...", "for b in ...", "for c in ..."]
+          ["for a in 1:2", "for b in 1:2", "for c in 1:2"]
 
     # Reporter's exact case: compact for inside `@progress "label" begin…end`.
     root3 = initialize_progress!(:state; description="Root3")
@@ -520,9 +967,17 @@ end
     end
     finalize_progress!(root3)
     @test hit == 4
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress @threads compact multi-generator → @threads' own error" begin
+"""
+Per user decision 8fmgjl, don't support under @threads what @threads
+itself rejects. The guardrail passes the compact `@threads for` macrocall
+through untouched, so @threads surfaces its own native error rather than a
+Treebars assert or silently-broken code.
+"""
+@testitem "@progress @threads compact multi-generator → @threads' own error" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Per user decision 8fmgjl, don't support under @threads what @threads
     # itself rejects. The guardrail passes the compact `@threads for` macrocall
     # through untouched, so @threads surfaces its own native error rather than a
@@ -550,9 +1005,19 @@ end
     @test err !== nothing
     @test occursin("nested outer loops are not currently supported by @threads",
                    sprint(showerror, err))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress @threads for with bare phase markers" begin
+"""
+Mirror of the serial "@progress for with bare phase markers" testset, for the
+Threads.@threads form. Each concurrent iteration gets its own per-iteration,
+transient, label-less wrapper hosting the pre-enumerated phases; the wrapper
+finalizes + detaches per iteration so phases don't accumulate. Valid at any
+thread count (the lowering + no-accumulation hold under -t1); real concurrency
+is exercised when run with `julia -t2`.
+"""
+@testitem "@progress @threads for with bare phase markers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Mirror of the serial "@progress for with bare phase markers" testset, for the
     # Threads.@threads form. Each concurrent iteration gets its own per-iteration,
     # transient, label-less wrapper hosting the pre-enumerated phases; the wrapper
@@ -573,19 +1038,32 @@ end
 
     # The counter node is determinate (length 3) and labeled by the iteration var.
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     # Phases do not accumulate: each iteration's transient wrapper is detached.
     @test length(counter.children) == 0
 
-    # Mid-run: at least one label-less wrapper sits under the counter, each carrying
-    # the two pre-enumerated phases. (Under concurrency >1 wrapper may coexist; the
-    # finished-pill filter hides completed ones at render — that's expected.)
+    # Mid-run: at least one label-less wrapper sits under the counter (the
+    # snapshotting iteration's own is always present). A sibling wrapper shows
+    # only the phases it has not finished yet — transient phases detach at
+    # finalize, so a sibling caught inside "fit" shows ["fit"], one between
+    # the two prepares shows ["load"], and one past both shows []. Asserting
+    # every wrapper shows both phases was the Windows-LTS CI failure
+    # (evaluated `["fit"] == ["load", "fit"]`): scheduling luck, not a
+    # product bug. The timing-independent facts: every wrapper's children
+    # are a subsequence of the pre-enumerated ["load", "fit"], and at least
+    # one wrapper — our own, since the snapshot precedes its finalize(load)
+    # in program order — shows both.
     counter_snap = snap[]["children"][1]
-    @test length(counter_snap["children"]) >= 1
-    for wrap_snap in counter_snap["children"]
-        @test wrap_snap["description"] == ""                    # label-less ⇒ auto-inlines
-        @test [c["description"] for c in wrap_snap["children"]] == ["load", "fit"]
+    wrappers = counter_snap["children"]
+    @test length(wrappers) >= 1
+    @test all(w -> w["description"] == "", wrappers)            # label-less ⇒ auto-inlines
+    # NB: progress_state omits "children" for a childless node, so a wrapper
+    # past both phases (both detached, wrapper not yet) has no such key.
+    descs = [[c["description"] for c in get(w, "children", [])] for w in wrappers]
+    @test all(descs) do d
+        d == ["load", "fit"] || d == ["fit"] || d == ["load"] || isempty(d)
     end
+    @test ["load", "fit"] in descs
 
     # Bare @threads for WITHOUT markers (and no nested @progress) is unchanged: the
     # body attaches straight to the counter, no wrapper, no phase children.
@@ -595,9 +1073,18 @@ end
     end
     finalize_progress!(root2)
     @test length(only(root2.children).children) == 0
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — leading stmts sort above labeled phases" begin
+"""
+Implicit leading-phase node: statements BEFORE the first phase marker run
+under an auto LABEL-LESS node created FIRST, so a progress child a leading
+statement creates (via __progress__) sorts ABOVE the labeled phases in the
+OrderedSet `children`. Without the fix the leading-created child was
+add_child!'d after the pending phase nodes and rendered below them.
+"""
+@testitem "@progress block — leading stmts sort above labeled phases" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Implicit leading-phase node: statements BEFORE the first phase marker run
     # under an auto LABEL-LESS node created FIRST, so a progress child a leading
     # statement creates (via __progress__) sorts ABOVE the labeled phases in the
@@ -650,9 +1137,86 @@ end
     snap3 = Treebars.progress_state(root3)
     finalize_progress!(root3)
     @test [c["description"] for c in snap3["children"]] == ["First", "Second"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases explicit node — block" begin
+"""
+Regression guard for snag `trailing-string-f02f8729`: the parser folds a
+mid-block `"s"; stmt` into `Core.@doc`, but the TAIL string has no
+following statement and reaches the walker intact — where it used to be
+consumed as a phase marker (spurious phase + the block returned its node
+instead of the string, violating the §1 value-preserving contract).
+"""
+@testitem "@progress block — a trailing bare string is the VALUE, not a marker" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # Regression guard for snag `trailing-string-f02f8729`: the parser folds a
+    # mid-block `"s"; stmt` into `Core.@doc`, but the TAIL string has no
+    # following statement and reaches the walker intact — where it used to be
+    # consumed as a phase marker (spurious phase + the block returned its node
+    # instead of the string, violating the §1 value-preserving contract).
+    root = initialize_progress!(:state; description="Root")
+    ret = @progress root begin
+        @progress "phase a"
+        1 + 1
+        @progress "phase b"
+        "tail value"
+    end
+    @test ret === "tail value"
+    # Exactly the two declared phases — no third "tail value" phase.
+    @test sort!([c.impl.description for c in root.children]) == ["phase a", "phase b"]
+    finalize_progress!(root)
+
+    # An interpolated tail string is a value too.
+    root2 = initialize_progress!(:state; description="Root2")
+    tag = "v2"
+    ret2 = @progress root2 begin
+        @progress "phase a"
+        "done $tag"
+    end
+    @test ret2 === "done v2"
+    @test [c.impl.description for c in root2.children] == ["phase a"]
+    finalize_progress!(root2)
+
+    # The `@progress "label"` macro form KEEPS its marker meaning in tail
+    # position — as a statement it has no other reading.
+    root3 = initialize_progress!(:state; description="Root3")
+    @progress root3 begin
+        @progress "phase a"
+        @progress "tail marker"
+    end
+    @test sort!([c.impl.description for c in root3.children]) == ["phase a", "tail marker"]
+    finalize_progress!(root3)
+
+    # A for-body whose only marker is a tail string stays a bare body: no
+    # per-iteration wrapper, no phase.
+    root4 = initialize_progress!(:state; description="Root4")
+    n = 0
+    @progress root4 for i in 1:3
+        n += 1
+        "v"
+    end
+    finalize_progress!(root4)
+    @test n == 3
+    @test length(only(root4.children).children) == 0
+
+    # `@phases` inherits the fix: a trailing string stays the block's value.
+    root5 = initialize_progress!(:state; description="Root5")
+    ret5 = @phases root5 begin
+        x = 1 + 1
+        "phased $x"
+    end
+    @test ret5 === "phased 2"
+    finalize_progress!(root5)
+    end # let (restores @testset hard scope)
+end
+
+"""
+Each top-level statement of the block becomes its own pre-enumerated,
+timed phase (label = shortened source). All statements share one try-scope
+so assignments stay visible across phases, and the block is value-preserving.
+"""
+@testitem "@phases explicit node — block" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Each top-level statement of the block becomes its own pre-enumerated,
     # timed phase (label = shortened source). All statements share one try-scope
     # so assignments stay visible across phases, and the block is value-preserving.
@@ -674,9 +1238,16 @@ end
     @test [c["description"] for c in phases] == ["x = 1 + 1", "y = x * 10"]
     # Each phase was started AND finalized ⇒ it carries a per-statement duration.
     @test all(c -> c["running"] == false && c["finalized_at"] !== nothing, phases)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases explicit node — for body (per-iteration phases)" begin
+"""
+In a for body, each statement becomes a per-iteration phase under the
+iteration counter; the per-iteration wrapper finalizes + detaches each
+iteration, so phases never accumulate. The loop-profiling use case.
+"""
+@testitem "@phases explicit node — for body (per-iteration phases)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # In a for body, each statement becomes a per-iteration phase under the
     # iteration counter; the per-iteration wrapper finalizes + detaches each
     # iteration, so phases never accumulate. The loop-profiling use case.
@@ -692,9 +1263,9 @@ end
     end
     finalize_progress!(root)
 
-    # root → counter("for i in ...") → per-iteration label-less wrapper → phases
+    # root → counter("for i in 1:3") → per-iteration label-less wrapper → phases
     counter = only(root.children)
-    @test counter.impl.description == "for i in ..."
+    @test counter.impl.description == "for i in 1:3"
     @test counter.impl.i == 3                # counter advanced once per iteration
     @test length(counter.children) == 0      # per-iteration wrappers detached ⇒ no accumulation
 
@@ -706,9 +1277,17 @@ end
     @test wrap["description"] == ""
     @test length(wrap["children"]) == 3
     @test [c["description"] for c in wrap["children"]][2:3] == ["a = i + 1", "b = a * 2"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "@phases bare (active node) inside @progress" begin
+"""
+The ergonomic bare form: `@phases body` with no node, eager-expanded by the
+@progress walker against the active node. Here the transparent
+`@progress root begin … end` makes root the active node, so the @phases
+wrapper attaches directly under root.
+"""
+@testitem "@phases bare (active node) inside @progress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The ergonomic bare form: `@phases body` with no node, eager-expanded by the
     # @progress walker against the active node. Here the transparent
     # `@progress root begin … end` makes root the active node, so the @phases
@@ -727,9 +1306,17 @@ end
     wrap = snap["children"][1]
     @test wrap["description"] == ""
     @test [c["description"] for c in wrap["children"]] == ["p = 3", "q = p + 4"]
+    end # let (restores @testset hard scope)
 end
 
-@testset "skip_progress! — the never-ran terminal state" begin
+"""
+The lifecycle is encoded in two timestamps plus `failed`; `skipped` is the
+combination that was previously unreachable (finalized, never started).
+These assert it stays MUTUALLY EXCLUSIVE with the other four — the whole
+point of not backfilling `started_at`.
+"""
+@testitem "skip_progress! — the never-ran terminal state" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The lifecycle is encoded in two timestamps plus `failed`; `skipped` is the
     # combination that was previously unreachable (finalized, never started).
     # These assert it stays MUTUALLY EXCLUSIVE with the other four — the whole
@@ -762,9 +1349,16 @@ end
     # No-ops on the disabled backend, like every other lifecycle function.
     @test skip_progress!(nothing) === nothing
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "finalize_progress! terminates pending children as skipped" begin
+"""
+Covers every hand-rolled prepare_progress! caller, not just the two phase
+macros: once the parent is done, a child still waiting to start never will,
+so it must not stay `·` pending under a ✓ parent.
+"""
+@testitem "finalize_progress! terminates pending children as skipped" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Covers every hand-rolled prepare_progress! caller, not just the two phase
     # macros: once the parent is done, a child still waiting to start never will,
     # so it must not stay `·` pending under a ✓ parent.
@@ -780,9 +1374,15 @@ end
     @test is_skipped(left)
     @test is_skipped(nested)                   # recurses
     @test is_finished(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — an early return skips the phases it bypassed" begin
+"""
+The reported case: a `return` past later phase markers left them PENDING
+forever under a FINISHED parent. The macro's `finally` now terminates them.
+"""
+@testitem "@progress block — an early return skips the phases it bypassed" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The reported case: a `return` past later phase markers left them PENDING
     # forever under a FINISHED parent. The macro's `finally` now terminates them.
     root = initialize_progress!(:state; description="Root")
@@ -817,9 +1417,16 @@ end
     # terminated by the parent's `finalize_progress!` on the normal path too.
     # Asserted so a future change to that contract shows up here deliberately.
     @test phases[2]["running"] == true && phases[2]["skipped"] == false
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress block — an exception fails only the RUNNING phase" begin
+"""
+The corollary, and the one behaviour-visible change: unvisited phases used
+to be marked FAILED with a backfilled started_at (✗, 0s, an error they
+never saw). Only the phase that actually threw is failed now.
+"""
+@testitem "@progress block — an exception fails only the RUNNING phase" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The corollary, and the one behaviour-visible change: unvisited phases used
     # to be marked FAILED with a backfilled started_at (✗, 0s, an error they
     # never saw). Only the phase that actually threw is failed now.
@@ -846,9 +1453,15 @@ end
     @test [c["skipped"] for c in phases] == [false, false, true, true]
     # The failed phase DID run, so it keeps a real start; the bypassed two do not.
     @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
+    end # let (restores @testset hard scope)
 end
 
-@testset "with_prepared_phases — same skip semantics as the macro" begin
+"""
+The HOF twin goes through _run_prepared_phases; it must not diverge from
+the macro form, which is emitted separately.
+"""
+@testitem "with_prepared_phases — same skip semantics as the macro" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The HOF twin goes through _run_prepared_phases; it must not diverge from
     # the macro form, which is emitted separately.
     root = initialize_progress!(:state; description="Root")
@@ -873,9 +1486,11 @@ end
     @test is_failed(kids2[2])
     @test is_skipped(kids2[3])
     finalize_progress!(root); finalize_progress!(root2)
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text + htmx_render classify skipped distinctly" begin
+@testitem "render_text + htmx_render classify skipped distinctly" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="Root")
     done = prepare_progress!(root; description="ranphase")
     start_progress!(done); finalize_progress!(done)
@@ -899,9 +1514,11 @@ end
     # so a skipped child rendered in the failed group.
     @test !occursin("treebar-child-failed", html)
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "IterableProgress" begin
+@testitem "IterableProgress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     root = initialize_progress!(:state; description="Root")
     ip = Treebars.initialize_iterable_progress!(root, 1:3; description="Iter")
     collected = []
@@ -910,9 +1527,34 @@ end
     end
     @test collected == [1, 2, 3]
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "Treebars.progress_state (JSON snapshot)" begin
+@testitem "@progress for stays allocation-free per iteration under an uninferred parent" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro, :perf] begin
+    let
+    # `ref[]` is `Any` at the call site — the shape of `BACKEND[]` and of an
+    # untyped struct field. The loop must not box per iteration: when the node
+    # was a type parameter of the iterator, every iteration dispatched
+    # `iterate` dynamically and allocated (~48 bytes), even for `nothing`.
+    loop_sum(ref, n) = begin
+        s = 0
+        @progress ref[] "loop" for i in 1:n
+            s += i
+        end
+        s
+    end
+    for parent in (nothing, initialize_progress!(:state; description="root"))
+        ref = Ref{Any}(parent)
+        @test loop_sum(ref, 100) == 5050
+        small = @allocated loop_sum(ref, 1_000)
+        large = @allocated loop_sum(ref, 100_000)
+        @test large - small < 1_000
+    end
+    end # let (restores @testset hard scope)
+end
+
+@testitem "Treebars.progress_state (JSON snapshot)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
     root = initialize_progress!(:state; description="Root")
     child = initialize_progress!(root, 10; description="Step")
     update_progress!(child, 5)
@@ -934,9 +1576,11 @@ end
     @test state2["running"] == false
 
     @test Treebars.progress_state(nothing) === nothing
+    end # let (restores @testset hard scope)
 end
 
-@testset "Web polling simulation" begin
+@testitem "Web polling simulation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
     root = initialize_progress!(:state; description="Sampling")
     mcmc = initialize_progress!(root, 1000; description="MCMC")
 
@@ -973,18 +1617,22 @@ end
     end
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "round2" begin
+@testitem "round2" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     @test round2(3.14159) == 3.1
     @test round2(100) == 100
     @test round2(0.00123) == 0.0012
     @test round2((1.23, 4.56)) == (1.2, 4.6)
     @test round2(missing) === missing
     @test round2("hello") == "hello"
+    end # let (restores @testset hard scope)
 end
 
-@testset "short_string" begin
+@testitem "short_string" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     @test short_string(3.14159) == "3.1"
     @test short_string(1000) == "1.0k"
     @test short_string(1_500_000) == "1.5M"
@@ -1026,24 +1674,36 @@ end
     @test short_string([1, 2, 3]) == "[1, 2, 3]"
     @test short_string(:a => 1) == "a => 1"
     @test short_string((; x=1, y=2)) == "(;x=1, y=2)"
+    end # let (restores @testset hard scope)
 end
 
-@testset "Fraction" begin
+@testitem "Fraction" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     f = Fraction(0.5)
     @test short_string(f) == "50%"
     @test Fraction(0.3) < Fraction(0.7)
     @test isequal(Fraction(0.5), Fraction(0.5))
+    end # let (restores @testset hard scope)
 end
 
-@testset "long vector truncation" begin
+@testitem "long vector truncation" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    let
     v = collect(1:10)
     s = short_string(v)
     @test occursin("...", s)
     @test startswith(s, "[1, 2, 3,")
     @test endswith(s, "8, 9, 10]")
+    end # let (restores @testset hard scope)
 end
 
-@testset "DO ThreadsafeDict leaves failed substatus visible" begin
+"""
+Asymmetric with the success path: on failure, _fail_substatus! calls
+Treebars.fail_progress! (which does NOT detach transient nodes) so the
+failed substatus stays pinned to the tree for inspection until the user
+retries the key (which triggers DO's retry_failed cleanup).
+"""
+@testitem "DO ThreadsafeDict leaves failed substatus visible" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
     # Asymmetric with the success path: on failure, _fail_substatus! calls
     # Treebars.fail_progress! (which does NOT detach transient nodes) so the
     # failed substatus stays pinned to the tree for inspection until the user
@@ -1055,12 +1715,21 @@ end
 
     children = app.__status__.children
     @test length(children) == 1
-    @test is_failed(first(children))
+    @test is_failed(only(children))
 
     finalize_progress!(app.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "DO ThreadsafeDict auto-cleans substatus tree" begin
+"""
+The bruno SimState scenario: many cache-miss keys should not accumulate
+children in app.__status__ after their tasks finish. The TreebarsExt
+`_default_substatus` now passes transient=true, so finalize_progress!
+(called by the auto-generated @progress wrapper around the property body)
+detaches each substatus from the root tree on success.
+"""
+@testitem "DO ThreadsafeDict auto-cleans substatus tree" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
     # The bruno SimState scenario: many cache-miss keys should not accumulate
     # children in app.__status__ after their tasks finish. The TreebarsExt
     # `_default_substatus` now passes transient=true, so finalize_progress!
@@ -1079,29 +1748,56 @@ end
     @test all(app.results(k) == 2k for k in 1:n_keys)
 
     finalize_progress!(app.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@dynamicstruct inline child substatus" begin
-    # DynamicObjects dropped `cache_type` (its cache is always threadsafe), so
-    # there is no cache flavour left for the child to inherit.
+@testitem "@dynamicstruct inline child substatus" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
+    let
     p = _InlineSubTest()
     # Accessing p.InlineSub triggers construction with __status__ = substatus scoped to :InlineSub
     child_status = p.InlineSub.__status__
     @test child_status isa Treebars.ProgressNode
     # Child's status is a child of the parent's root status
     @test child_status.parent === p.__status__
-    # DynamicObjects labels only documented properties; an undocumented inline
-    # child's substatus is a bare wrapper (empty description) the renderer inlines.
-    @test child_status.impl.description == ""
+    @test child_status.impl.description == ""  # undocumented -> bare wrapper per DO doc-gating rule
     finalize_progress!(p.__status__)
+    end # let (restores @testset hard scope)
 end
 
-@testset "Concurrency stress test" begin
+@testitem "Concurrency stress test" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :concurrency] begin
+    let
     root = initialize_progress!(:state; description="Stress")
 
     n_workers = max(4, Threads.nthreads())
     n_iterations = 100
     errors = Threads.Atomic{Int}(0)
+
+    # Concurrent poller that reads the tree while it's being mutated. It
+    # starts FIRST and handshakes one snapshot through `first_snap` before
+    # the main task spawns the workers, so `poll_count >= 1` holds
+    # deterministically: without the handshake the assertion races poller
+    # startup against worker completion, and a fast scheduler can finish all
+    # workers before the poller polls once (observed: `0 > 0` on Julia 1.13
+    # CI). The stop flag (not `istaskdone`) ends the poll loop, since the
+    # poller is alive before `workers` exists.
+    poll_count = Threads.Atomic{Int}(0)
+    stop_poller = Threads.Atomic{Bool}(false)
+    snapshot!() = try
+        Treebars.progress_state(root)
+        Threads.atomic_add!(poll_count, 1)
+    catch e
+        Threads.atomic_add!(errors, 1)
+    end
+    first_snap = Channel{Nothing}(1)
+    poller = Threads.@spawn begin
+        snapshot!()
+        put!(first_snap, nothing)
+        while !stop_poller[]
+            snapshot!()
+            yield()
+        end
+    end
+    take!(first_snap)   # block until the first snapshot is banked
 
     # Spawn workers that rapidly create, update, and finalize children
     workers = map(1:n_workers) do w
@@ -1116,32 +1812,18 @@ end
         end
     end
 
-    # Concurrent poller that reads the tree while it's being mutated
-    poll_count = Threads.Atomic{Int}(0)
-    # Reads at least once: on a fast machine every worker can finish before
-    # the poller is first scheduled, which made `poll_count > 0` flaky.
-    poller = Threads.@spawn begin
-        while true
-            try
-                Treebars.progress_state(root)
-                Threads.atomic_add!(poll_count, 1)
-            catch e
-                Threads.atomic_add!(errors, 1)
-            end
-            any(!istaskdone, workers) || break
-            yield()
-        end
-    end
-
     for w in workers; wait(w); end
+    stop_poller[] = true
     wait(poller)
 
     @test errors[] == 0
     @test poll_count[] > 0
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text: labels, nesting, counters, state, duration" begin
+@testitem "render_text: labels, nesting, counters, state, duration" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     root = initialize_progress!(:state; description="probe")
     done = initialize_progress!(root; description="load data")
     finalize_progress!(done)
@@ -1180,9 +1862,16 @@ end
     @test sprint(show, MIME"text/plain"(), frozen) == render_text(frozen)
     # Compact 2-arg show stays a single line.
     @test !occursin("\n", sprint(show, frozen))
+    end # let (restores @testset hard scope)
 end
 
-@testset "render_text display semantics match the HTML renderer" begin
+"""
+Both renderers go through `_flatten_displayed_children` + `_first_seen!`,
+so a text dump can be trusted to predict what the browser shows. These
+are the three behaviors that would silently diverge if they ever forked.
+"""
+@testitem "render_text display semantics match the HTML renderer" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
     # Both renderers go through `_flatten_displayed_children` + `_first_seen!`,
     # so a text dump can be trusted to predict what the browser shows. These
     # are the three behaviors that would silently diverge if they ever forked.
@@ -1211,9 +1900,17 @@ end
     @test count("DupNode", render_text(root)) == 1
 
     finalize_progress!(root)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress warns on a docstring-swallowed phase marker" begin
+"""
+A bare `"label"` before a statement inside a `begin…end` is rewritten by
+the PARSER into `Core.@doc`, so it never reaches the macro as a marker and
+renders nothing — parse-clean and precompile-clean, the one @progress
+failure mode no offline check catches. Expansion must warn.
+"""
+@testitem "@progress warns on a docstring-swallowed phase marker" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # A bare `"label"` before a statement inside a `begin…end` is rewritten by
     # the PARSER into `Core.@doc`, so it never reaches the macro as a marker and
     # renders nothing — parse-clean and precompile-clean, the one @progress
@@ -1241,9 +1938,23 @@ end
     @test !Treebars._is_doc_macrocall(:(x = 1))
     @test Treebars._is_doc_macrocall(
         Expr(:macrocall, GlobalRef(Core, Symbol("@doc")), nothing, "d", :(f() = 1)))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress / @phases accept a module-qualified head" begin
+"""
+The walker only ever sees SOURCE, so `Treebars.@progress` is a different
+macro head from `@progress`. Matching only the bare Symbol made every
+qualified spelling invisible to it, and the three failure modes differed:
+a 1-arg marker died with an ARITY error describing a different mistake,
+while the 2-arg wrap and `@phases` silently built against `BACKEND[]`
+(nothing in a web app) and produced NO node at all. Snag
+`used-an-inline-p-baab62f1` — the qualified spelling is what a
+`using DynamicObjects` consumer reaches for, since DO's `@progress` is
+only its LHS parse-marker and no bare `@progress` is in scope.
+(a) Qualified phase MARKERS split the block, exactly like bare ones.
+"""
+@testitem "@progress / @phases accept a module-qualified head" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # The walker only ever sees SOURCE, so `Treebars.@progress` is a different
     # macro head from `@progress`. Matching only the bare Symbol made every
     # qualified spelling invisible to it, and the three failure modes differed:
@@ -1336,9 +2047,16 @@ end
     msg = sprint(showerror, err)
     @test occursin("PHASE MARKER", msg)
     @test occursin("using Treebars: @progress", msg)
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress nested node argument" begin
+"""
+`@progress node body` in nested position targets that node. Previously
+only reachable by writing the head qualified (which the walker could not
+see, so it expanded standalone); now both spellings agree.
+"""
+@testitem "@progress nested node argument" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # `@progress node body` in nested position targets that node. Previously
     # only reachable by writing the head qualified (which the walker could not
     # see, so it expanded standalone); now both spellings agree.
@@ -1380,9 +2098,20 @@ end
     end
     @test err !== nothing
     @test occursin("detached tree", sprint(showerror, err))
+    end # let (restores @testset hard scope)
 end
 
-@testset "@progress recognises an EMITTED GlobalRef head (the DO wrap)" begin
+"""
+Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
+EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
+head shape. DynamicObjects emits exactly this for its property-body wrap at
+three sites (DynamicObjects.jl:5708/:5725/:5760 @ 9f9c8a5: the @progress-,
+@PROGRESS- and UNMARKED paths), and since it wraps EVERY unmarked property
+body the GlobalRef is the dominant emitted head in the ecosystem.
+Reported by DynamicObjects:sbpmx-reflect — not visible from this side.
+"""
+@testitem "@progress recognises an EMITTED GlobalRef head (the DO wrap)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
     # Source-level `Treebars.@progress` parses to a dotted Expr, but a macro that
     # EMITS the call writes `GlobalRef(Treebars, Symbol("@progress"))` — a third
     # head shape. DynamicObjects emits exactly this for its property-body wrap at
@@ -1446,497 +2175,309 @@ end
     end
     # One line only: the root. The label-less wrap contributed no row.
     @test length(split(strip(txt2), '\n')) == 1
+    end # let (restores @testset hard scope)
 end
 
-# ── Push transports: WebSocket ───────────────────────────────────────────────
-# The frame loop (`Treebars._stream_frames`) is exercised directly, with a
-# collecting `emit`; the WebSocket paths over a real local HTTP server and an
-# HTTP.WebSockets client, which works on HTTP.jl 1.x and 2.x alike.
+"""
+Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
+default for `polling_fetchindex`'s `parent` kwarg, bound by
+HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
+core (task-local storage / ScopedValues): no extension needed.
+"""
+@testitem "dispatch-parent ambient (the dispatch default protocol)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
+    # default for `polling_fetchindex`'s `parent` kwarg, bound by
+    # HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
+    # core (task-local storage / ScopedValues): no extension needed.
+    @test Treebars.current_dispatch_parent() === nothing
 
-import HTTP
+    outer = initialize_progress!(:state; description="Outer")
+    inner = initialize_progress!(:state; description="Inner")
 
-# Each step waits for the test to release it, so a stream can be observed
-# mid-compute without timing races.
-const _STREAM_GATES = Dict{Any,Channel{Nothing}}()
-const _STREAM_GATES_LOCK = ReentrantLock()
-_stream_gate(key) = lock(() -> get!(() -> Channel{Nothing}(Inf), _STREAM_GATES, key), _STREAM_GATES_LOCK)
-_release!(key, n=1) = foreach(_ -> put!(_stream_gate(key), nothing), 1:n)
+    # The bind is visible for the dynamic extent and returns f()'s value.
+    seen = Treebars.with_dispatch_parent(outer) do
+        @test Treebars.current_dispatch_parent() === outer
+        :value
+    end
+    @test seen == :value
+    @test Treebars.current_dispatch_parent() === nothing
 
-@dynamicstruct struct _StreamFixture
-    __status__ = initialize_progress!(:state; description="StreamRoot")
-    "Streaming $key"
-    results(key) = begin
-        with_progress(__status__, 3; description="steps") do p
-            for i in 1:3
-                take!(_stream_gate(key))
-                update_progress!(p, i)
+    # Nesting shadows and restores — including a `nothing` bind, which is how
+    # a nested `dispatch` without `parent` detaches its extent from an outer
+    # dispatch's node.
+    Treebars.with_dispatch_parent(outer) do
+        Treebars.with_dispatch_parent(inner) do
+            @test Treebars.current_dispatch_parent() === inner
+        end
+        @test Treebars.current_dispatch_parent() === outer
+        Treebars.with_dispatch_parent(nothing) do
+            @test Treebars.current_dispatch_parent() === nothing
+        end
+        @test Treebars.current_dispatch_parent() === outer
+    end
+    @test Treebars.current_dispatch_parent() === nothing
+
+    # An exception unwinding through the bind still restores.
+    @test_throws ErrorException Treebars.with_dispatch_parent(outer) do
+        error("boom")
+    end
+    @test Treebars.current_dispatch_parent() === nothing
+
+    finalize_progress!(outer)
+    finalize_progress!(inner)
+    end # let (restores @testset hard scope)
+end
+
+"""
+Regression guard for snag `phase-block-auto-211abcde`: every bare `for` /
+`Threads.@threads for` at any depth under `@progress` becomes a determinate
+counter child of its enclosing node, with a default label showing the
+collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
+"""
+@testitem "@progress block — plain loops auto-instrument with readable labels" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # Regression guard for snag `phase-block-auto-211abcde`: every bare `for` /
+    # `Threads.@threads for` at any depth under `@progress` becomes a determinate
+    # counter child of its enclosing node, with a default label showing the
+    # collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
+    root = initialize_progress!(:state; description="Root")
+    acc = @progress root begin
+        @progress "Phase A"
+        s = 0
+        for (i, x) in enumerate([10, 20, 30])
+            s += x
+        end
+        @progress "Phase B"
+        s
+    end
+    @test acc == 60
+    @test [c.impl.description for c in root.children] == ["Phase A", "Phase B"]
+    phasea = only(c for c in root.children if c.impl.description == "Phase A")
+    loop = only(phasea.children)
+    @test loop.impl.description == "for (i, x) in enumerate([10, 20, 30])"
+    @test !occursin("...", loop.impl.description)
+    @test loop.impl.i == 3 && loop.impl.N == 3
+    finalize_progress!(root)
+
+    # Loops nested in `if` / `while` / another `for` instrument too. A counter
+    # nested in a loop body is transient: visible in-flight, detached when done.
+    root2 = initialize_progress!(:state; description="Root2")
+    live = Ref("")
+    @progress root2 begin
+        @progress "Phase"
+        if true
+            for j in 1:2
+                j
             end
         end
-        occursin("boom", string(key)) && error("boom: $key")
-        "value-$key"
-    end
-end
-
-_tb_ext() = Base.get_extension(Treebars, :HTMXObjectsExt)
-
-# A WebSocket server on a free port. `listen!` throws synchronously when the
-# port is taken, so random ports plus a retry need neither Sockets nor a
-# version-specific way to ask the server for its port.
-function _listen_ws(handler)
-    for _ in 1:50
-        port = rand(30000:60000)
-        server = try
-            HTTP.WebSockets.listen!(handler, "127.0.0.1", port)
-        catch
-            continue
+        k = 0
+        while k < 1
+            k += 1
+            for w in 1:2
+                w
+            end
         end
-        return server, port
-    end
-    error("no free port for the test WebSocket server")
-end
-
-# Connect, hand every message to `on_message(frame)`, and return all frames.
-# `on_message` returning `:close` disconnects the client right there.
-function _ws_frames(port; on_message=_ -> nothing)
-    frames = String[]
-    HTTP.WebSockets.open("ws://127.0.0.1:$port") do ws
-        for msg in ws
-            push!(frames, String(msg))
-            on_message(last(frames)) === :close && break
+        for a in 1:2
+            for b in 1:3
+                live[] = render_text(root2)
+                a + b
+            end
         end
     end
-    frames
-end
+    descs2 = sort!([c.impl.description for c in only(root2.children).children])
+    @test descs2 == ["for a in 1:2", "for j in 1:2", "for w in 1:2"]
+    @test occursin("for b in 1:3", live[])  # the transient inner bar, mid-run
+    finalize_progress!(root2)
 
-# Run `f` with its logging silenced, including tasks it spawns — so wrap the
-# server's creation: its connection handlers inherit that logger. The failure
-# paths record errors through HTMXObjects' `safely`, which logs at @error.
-_quietly(f) = Base.CoreLogging.with_logger(f, Base.CoreLogging.NullLogger())
-
-@testset "stream loop: a pending node is streamed until terminal" begin
-    root = initialize_progress!(:state; description="root")
-    phase = prepare_progress!(root; description="phase")
-    @test is_pending(phase) && !Treebars._is_terminal(phase)
-    label(n) = is_pending(n) ? "pending" : is_running(n) ? "running $(n.impl.message)" : "terminal"
-    frames = String[]
-    worker = Threads.@spawn begin
-        sleep(0.15)
-        start_progress!(phase)
-        for i in 1:2
-            update_progress!(phase, "step $i")
-            sleep(0.08)
+    # Comprehensions, `map`, and `while` stay plain (no counter of their own).
+    root3 = initialize_progress!(:state; description="Root3")
+    @progress root3 begin
+        @progress "Phase"
+        [x * 2 for x in 1:3]
+        map(1:3) do x
+            x + 1
         end
-        finalize_progress!(phase)
+        n = 0
+        while n < 2
+            n += 1
+        end
     end
-    alive = Treebars._stream_frames(f -> (push!(frames, f); true), phase;
-        interval=0.01, render=label, final=true)
-    wait(worker)
-    @test alive
-    # Before the fix the loop exited on `running == false`: one "pending" frame.
-    @test first(frames) == "pending"
-    @test "running step 1" in frames && "running step 2" in frames
-    @test last(frames) == "terminal"
-    # ~15 ticks while pending, but an unchanged frame is sent once.
-    @test count(==("pending"), frames) == 1
-    finalize_progress!(root)
+    @test isempty(only(root3.children).children)
+    finalize_progress!(root3)
+
+    # `@progress nothing for` runs the loop with no node at all.
+    root4 = initialize_progress!(:state; description="Root4")
+    total = Ref(0)
+    @progress root4 begin
+        @progress "Phase"
+        @progress nothing for z in 1:4
+            total[] += z
+        end
+    end
+    @test total[] == 10
+    @test isempty(only(root4.children).children)
+    finalize_progress!(root4)
+
+    # A collection whose full label would exceed 60 chars is omitted WHOLE
+    # (`for x`) — never clipped with `...`. An explicit label still wins, and
+    # plain `Threads.@threads for` gets the same full-label rule.
+    root5 = initialize_progress!(:state; description="Root5")
+    longitr = [i for i in 1:5]
+    @progress root5 begin
+        @progress "Phase"
+        for x in [longitr, longitr, longitr, longitr, longitr, longitr, longitr, longitr]
+            x
+        end
+        @progress "rows" for (i, y) in enumerate([1, 2, 3])
+            y
+        end
+        Threads.@threads for t in 1:3
+            t
+        end
+    end
+    descs5 = sort!([c.impl.description for c in only(root5.children).children])
+    @test descs5 == ["for t in 1:3", "for x", "rows"]
+    @test all(!occursin("...", d) for d in descs5)
+    finalize_progress!(root5)
+    end # let (restores @testset hard scope)
 end
 
-@testset "stream loop: unchanged frames are not re-sent" begin
-    root = initialize_progress!(:state; description="root")
+@testitem "polling ticker script tracks active progress incrementally (no document scan per tick)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
+    let
+    # Snag browser-progress-573fb052: on a 16k-node page the 100ms ticker +
+    # every htmx swap ran document-wide querySelectorAll scans (tickAll /
+    # syncAllBadges / reanchorAll ~0.3 CPU-s per 30s). The script now seeds two
+    # live sets once and maintains them with a MutationObserver, so each tick
+    # costs work proportional to the active progress nodes and each swap costs
+    # work proportional to the changed fragment.
+    ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+    @test ext !== nothing
+    js = sprint(io -> show(io, MIME"text/html"(), Treebars.htmx_treebar_script()))
+    # Incremental tracking present: live sets + observer + lazy prune.
+    @test occursin("MutationObserver", js)
+    @test occursin("liveRunning", js)
+    @test occursin("livePollers", js)
+    @test occursin("attributeFilter", js)
+    @test occursin("isConnected", js)
+    # No document-wide scan anywhere in the runtime: the seeding pass feeds
+    # `document` into scoped-root queries, never `document.querySelectorAll`.
+    @test !occursin("document.querySelectorAll", js)
+    # Preserved behavior: 100ms cadence, swap hooks, pause transport, badge mirror.
+    @test occursin("setInterval(tickAll, 100)", js)
+    @test occursin("htmx:afterSwap", js)
+    @test occursin("htmx:oobAfterSwap", js)
+    @test occursin("htmx:beforeRequest", js)
+    @test occursin("__tbSyncBadge", js)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "interrupt flag: subtree scope, later children, siblings, nothing" setup=[TreebarsTestImports] tags=[:unit, :interrupt] begin
+    let
+    root = initialize_progress!(:state; description="Job")
+    a = initialize_progress!(root, 10; description="chain a")
+    b = initialize_progress!(root, 10; description="chain b")
+    a1 = initialize_progress!(a; description="window")
+
+    @test !interrupt_requested(root) && !interrupt_requested(a) && !interrupt_requested(a1)
+
+    # Requesting on one chain reaches its whole subtree, not siblings/ancestors.
+    @test request_interrupt!(a) === a
+    @test interrupt_requested(a) && interrupt_requested(a1)
+    @test !interrupt_requested(b) && !interrupt_requested(root)
+    # Children created AFTER the request see it too.
+    a2 = initialize_progress!(a1, 3; description="later")
+    @test interrupt_requested(a2)
+
+    # Purely a request: no lifecycle change, updates keep working.
+    @test is_running(a) && is_running(a1)
+    update_progress!(a, 4)
+    @test a.impl.i == 4
+    finalize_progress!(a)
+    @test is_finished(a) && interrupt_requested(a)   # flag survives termination
+
+    # Idempotent; a root request reaches every descendant.
+    request_interrupt!(a)
+    request_interrupt!(root)
+    @test interrupt_requested(b) && interrupt_requested(root)
+
+    # Disabled trees: never interrupted, request is a no-op.
+    @test interrupt_requested(nothing) === false
+    @test request_interrupt!(nothing) === nothing
+
+    # Pending nodes and @progress-built nodes carry the flag too.
+    r2 = initialize_progress!(:state; description="Phases")
+    seen = Bool[]
+    @progress r2 for i in 1:5
+        i == 3 && request_interrupt!(r2)
+        push!(seen, interrupt_requested(__progress__))
+        interrupt_requested(__progress__) && break
+    end
+    @test seen == [false, false, true]
+    end
+end
+
+@testitem "interrupt flag: a runner on another thread stops early" setup=[TreebarsTestImports] tags=[:unit, :interrupt, :concurrency] begin
+    let
+    root = initialize_progress!(:state; description="Job")
+    started = Channel{Nothing}(1)
+    # Deadline-bounded so a broken flag fails the item instead of hanging it.
+    runner = Threads.@spawn with_progress(root, 10^9; description="spin") do p
+        put!(started, nothing)
+        deadline = time() + 60
+        while !interrupt_requested(p) && time() < deadline
+            yield()
+        end
+        interrupt_requested(p)
+    end
+    take!(started)
+    request_interrupt!(root)
+    @test fetch(runner) === true
+    @test !istaskfailed(runner)
+    @test interrupt_requested(root)
+    end
+end
+
+@testitem "interrupt flag: throw helper and render marker" setup=[TreebarsTestImports] tags=[:unit, :interrupt, :render] begin
+    let
+    root = initialize_progress!(:state; description="Job")
     chain = initialize_progress!(root, 10; description="chain")
-    update_progress!(chain, 3)
+    @test throw_if_interrupted(chain) === nothing
+    @test throw_if_interrupted(nothing) === nothing
+    html_of(n) = sprint(io -> show(io, MIME"text/html"(), htmx_render(n)))
+    @test !occursin("interrupt requested", render_text(root))
+    @test !occursin("treebar-interrupt", html_of(root))
 
-    # Every mutator bumps the change counter.
-    v = chain.impl.version
-    update_progress!(chain, 4);       @test chain.impl.version == v + 1
-    update_progress!(chain);          @test chain.impl.version == v + 2
-    update_progress!(chain, "msg");   @test chain.impl.version == v + 3
-    pending = prepare_progress!(root; description="later")
-    w = pending.impl.version
-    start_progress!(pending);  @test pending.impl.version == w + 1
-    start_progress!(pending);  @test pending.impl.version == w + 1   # idempotent: no change
-    finalize_progress!(pending); @test pending.impl.version == w + 2
+    request_interrupt!(chain)
+    err = try throw_if_interrupted(chain); nothing catch e; e end
+    @test err isa ProgressInterrupted && err.node === chain
+    @test occursin("interrupt requested", sprint(showerror, err))
 
-    # A running node's elapsed time / ETA differ between renders but are ticked
-    # on the client: frames that differ only there have equal signatures.
-    html1 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
-    sleep(0.02)
-    html2 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
-    @test html1 != html2
-    @test occursin("data-elapsed-ms", html1) && occursin("data-eta-ms", html1)
-    @test Treebars._frame_signature(html1) == Treebars._frame_signature(html2)
-    update_progress!(chain, 7)
-    html3 = _tb_ext().node_to_html(htmx_render(root; scoped=false))
-    @test Treebars._frame_signature(html3) != Treebars._frame_signature(html2)
-
-    # The loop: an idle tree is rendered once (the fingerprint does not move)
-    # and sent once; a change is rendered and sent again.
-    renders = Ref(0)
-    frames = String[]
-    render(n) = (renders[] += 1; _tb_ext().node_to_html(htmx_render(n; scoped=false)))
-    stopper = Threads.@spawn begin
-        sleep(0.2)                        # ~20 idle ticks
-        update_progress!(chain, 8)
-        sleep(0.2)
-        finalize_progress!(root)
+    # Under with_progress the exception fails the node like any other error.
+    @test_throws ProgressInterrupted with_progress(chain; description="window") do p
+        throw_if_interrupted(p)
     end
-    @test Treebars._stream_frames(f -> (push!(frames, f); true), root; interval=0.01, render)
-    wait(stopper)
-    @test length(frames) == 2
-    @test occursin("7 / 10", frames[1]) && occursin("8 / 10", frames[2])
-    @test renders[] <= 3
-end
+    window = only(filter(c -> c.impl.description == "window", collect(chain.children)))
+    @test is_failed(window)
 
-@testset "stream loop: a gone client ends the stream quietly" begin
-    root = initialize_progress!(:state; description="root")
-    chain = initialize_progress!(root, 100; description="chain")
-    renders = Ref(0)
-    sends = Ref(0)
-    ticker = Threads.@spawn for i in 1:40
-        update_progress!(chain, i); sleep(0.005)
+    # Marker on the requested node only (not repeated on descendants), in both
+    # renderers, while that node is live.
+    live = initialize_progress!(chain; description="live child")
+    txt = render_text(root)
+    @test count("interrupt requested", txt) == 1
+    @test occursin(r"chain \(0/10\)[^\n]*· interrupt requested", txt)
+    html = html_of(root)
+    @test count("treebar-interrupt", html) == 1
+    @test occursin("interrupt requested", html)
+
+    # Gone once the requested node terminates.
+    finalize_progress!(chain)
+    @test !occursin("interrupt requested", render_text(root))
+    @test !occursin("treebar-interrupt", html_of(root))
+
+    # Pending nodes show it too.
+    p = prepare_progress!(root; description="queued")
+    request_interrupt!(p)
+    @test occursin(r"· queued[^\n]*interrupt requested", render_text(root))
     end
-    # The client is gone after the first frame: `emit` reports `false`.
-    alive = Treebars._stream_frames(root; interval=0.005, render=n -> (renders[] += 1; "frame $(renders[])")) do f
-        sends[] += 1
-        sends[] == 1
-    end
-    @test alive == false
-    @test sends[] == 2 && renders[] == 2   # stopped at the failed send
-    wait(ticker)
-    finalize_progress!(root)
-end
-
-@testset "stream loop: the terminal frame follows the handle, not the tick" begin
-    root = initialize_progress!(:state; description="root")
-    handle = Threads.@spawn (sleep(0.1); :value)
-    t = @elapsed alive = Treebars._stream_frames(_ -> true, root; interval=5.0, render=repr, done=handle)
-    @test alive
-    @test t < 2.0     # would be ≥ 5 s with a fixed sleep(interval)
-    @test is_running(root)   # it ended on the handle, not on the node
-    finalize_progress!(root)
-end
-
-@testset "htmx_ws_container: wrapper owns the UX state, inner carries the id" begin
-    ext = _tb_ext()
-    html = ext.node_to_html(htmx_ws_container(id -> "/ws/run?id=$id"; id="tb-1"))
-    @test startswith(html, "<div class=\"treebar-poller\" hx-ext=\"ws\" ws-connect=\"/ws/run?id=tb-1\"")
-    for attr in ("data-paused=\"0\"", "data-show-finished=\"0\"", "data-show-pending=\"1\"",
-                 "data-show-failed=\"1\"", "data-show-skipped=\"0\"")
-        @test occursin(attr, html)
-    end
-    @test occursin("class=\"treebar-pause\"", html)
-    # The inner placeholder is a DIRECT child of the wrapper (after the Pause
-    # button), which is where every frame lands.
-    @test occursin(r"<div class=\"treebar-poller\"[^>]*><button class=\"treebar-pause\"[^>]*>Pause</button><div id=\"tb-1\" class=\"treebar-poller-inner\">", html)
-    # Fresh ids by default: two containers on one page never collide.
-    a = ext.node_to_html(htmx_ws_container("/ws"))
-    b = ext.node_to_html(htmx_ws_container("/ws"))
-    id_of(s) = match(r"<div id=\"([^\"]+)\" class=\"treebar-poller-inner\"", s).captures[1]
-    @test id_of(a) != id_of(b)
-    # A string URL is used as is; the function form receives the generated id.
-    seen = Ref("")
-    c = ext.node_to_html(htmx_ws_container(id -> (seen[] = id; "/ws?id=$id")))
-    @test id_of(c) == seen[] && occursin("ws-connect=\"/ws?id=$(seen[])\"", c)
-    # Pause shows for push-transport wrappers; the page script handles WS/SSE pause.
-    css = ext.node_to_html(htmx_treebar_styles())
-    @test occursin(".treebar-poller[ws-connect]:has(> .treebar-poller-inner) > .treebar-pause", css)
-    js = ext.node_to_html(htmx_treebar_script())
-    @test occursin("htmx:wsBeforeMessage", js) && occursin("htmx:sseBeforeMessage", js)
-    @test occursin("treebar-terminal-content", js)   # terminal frames are never held
-end
-
-@testset "ws_progress round trip: a pending node gets frames" begin
-    root = initialize_progress!(:state; description="root")
-    phase = prepare_progress!(root; description="phase")
-    label(n) = is_pending(n) ? "pending" : is_running(n) ? "running $(n.impl.message)" : "terminal"
-    returned = Ref{Any}(nothing)
-    server, port = _listen_ws(ws -> (returned[] = ws_progress(ws, phase; interval=0.01, render=label)))
-    worker = Threads.@spawn begin
-        sleep(0.2)
-        start_progress!(phase)
-        for i in 1:2
-            update_progress!(phase, "step $i"); sleep(0.05)
-        end
-        finalize_progress!(phase)
-    end
-    frames = try
-        _ws_frames(port)
-    finally
-        wait(worker); close(server)
-    end
-    @test first(frames) == "pending"
-    @test "running step 1" in frames && "running step 2" in frames
-    @test last(frames) == "terminal"
-    @test returned[] === true
-    finalize_progress!(root)
-end
-
-@testset "WebSocket polling_fetchindex: running, terminal and scope markup" begin
-    app = _StreamFixture()
-    key = "ws-ok-$(rand(UInt32))"
-    id = "tb-ws-ok"
-    server, port = _listen_ws(ws -> polling_fetchindex(ws, app.results, key; id, interval=0.01) do rv
-        h.p("result: $rv")
-    end)
-    frames = try
-        _ws_frames(port; on_message = f -> (occursin("treebar-poller-inner", f) && _release!(key); nothing))
-    finally
-        close(server)
-    end
-    running, terminal = frames[1:end-1], frames[end]
-    @test !isempty(running)
-    for f in running
-        @test startswith(f, "<div id=\"$id\" class=\"treebar-poller-inner\">")
-        @test !occursin("data-show-", f)                # scoped=false: the wrapper owns toggles
-        @test !occursin("class=\"treebar-poller\"", f)  # frames never replace the wrapper
-    end
-    @test any(f -> occursin("class=\"treebar-children\"", f), running)
-    @test any(f -> occursin("Streaming $key", f), running)
-    # Terminal frame: the polling terminal shape, carrying the inner's id so it
-    # replaces the inner and stays a direct child of the wrapper.
-    @test startswith(terminal, "<div id=\"$id\" class=\"treebar-terminal-content\">")
-    @test occursin("result: value-$key", terminal)
-    @test occursin("<details class=\"treebar-frozen\"><summary>Progress</summary>", terminal)  # collapsed
-    @test !occursin("treebar-poller-inner", terminal)
-    # Nothing but the tree changing produces a frame: 3 steps (+ the tree
-    # appearing) in far fewer frames than the ~dozens of 10 ms ticks.
-    @test length(running) <= 6
-end
-
-@testset "WebSocket polling_fetchindex: failure frame and keep_progress=false" begin
-    app = _StreamFixture()
-    key = "ws-boom-$(rand(UInt32))"
-    id = "tb-ws-boom"
-    handler(; kw...) = ws -> polling_fetchindex(ws, app.results, key; id, interval=0.01, kw...) do rv
-        h.p("result: $rv")
-    end
-    # Fails while streaming: the fetch inside the stream rethrows.
-    server, port = _quietly(() -> _listen_ws(handler()))
-    frames = try
-        _ws_frames(port; on_message = f -> (occursin("treebar-poller-inner", f) && _release!(key); nothing))
-    finally
-        close(server)
-    end
-    terminal = last(frames)
-    @test startswith(terminal, "<div id=\"$id\" class=\"treebar-terminal-content\">")
-    @test occursin("aria-invalid", terminal)                          # the recorded error
-    @test occursin("<details class=\"treebar-frozen\" open", terminal)  # the tree, open
-    @test occursin("Streaming $key", terminal)
-    @test count(f -> occursin("treebar-terminal-content", f), frames) == 1
-
-    # Already failed: fetchindex rethrows before the callback runs. Same shape,
-    # and it is the only frame.
-    server, port = _quietly(() -> _listen_ws(handler()))
-    again = try
-        _ws_frames(port)
-    finally
-        close(server)
-    end
-    @test length(again) == 1
-    @test startswith(only(again), "<div id=\"$id\" class=\"treebar-terminal-content\">")
-    @test occursin("aria-invalid", only(again)) && occursin("treebar-frozen", only(again))
-
-    # keep_progress=false: the error alone.
-    server, port = _quietly(() -> _listen_ws(handler(; keep_progress=false)))
-    bare = try
-        _ws_frames(port)
-    finally
-        close(server)
-    end
-    @test occursin("aria-invalid", only(bare)) && !occursin("treebar-frozen", only(bare))
-end
-
-@testset "WebSocket polling_fetchindex: client disconnect leaves the compute running" begin
-    app = _StreamFixture()
-    key = "ws-gone-$(rand(UInt32))"
-    outcome = Ref{Any}(:running)
-    server, port = _listen_ws(ws -> begin
-        # Closed before the stream starts, every send fails exactly as it does
-        # once the client has gone.
-        close(ws)
-        outcome[] = try
-            polling_fetchindex(ws, app.results, key; interval=0.01) do rv
-                h.p("result: $rv")
-            end
-            :returned
-        catch err
-            err
-        end
-    end)
-    try
-        @test isempty(_ws_frames(port))
-        @test timedwait(() -> outcome[] !== :running, 10.0) === :ok
-    finally
-        close(server)
-    end
-    @test outcome[] === :returned       # a gone client is not an error
-    _release!(key, 3)                   # the compute is still in flight: let it finish
-    @test fetchindex((rv, _) -> fetch(rv), app.results, key) == "value-$key"
-end
-
-# ── Push transports: server-sent events ─────────────────────────────────────
-# SSE targets a plain IO. `_RecordingIO` records every `write` call as its own
-# entry — so "one write per frame" is checked directly — and can fail from the
-# `fail_from`-th write on, like a response whose client has gone.
-
-mutable struct _RecordingIO <: IO
-    writes::Vector{String}
-    attempts::Int
-    fail_from::Int
-    on_write::Any          # called with each recorded write
-    lock::ReentrantLock
-end
-_RecordingIO(; fail_from=typemax(Int), on_write=_ -> nothing) =
-    _RecordingIO(String[], 0, fail_from, on_write, ReentrantLock())
-function _record!(io::_RecordingIO, s::String)
-    lock(io.lock) do
-        io.attempts += 1
-        io.attempts >= io.fail_from && throw(Base.IOError("client disconnected", 0))
-        push!(io.writes, s)
-    end
-    io.on_write(s)
-end
-Base.unsafe_write(io::_RecordingIO, p::Ptr{UInt8}, n::UInt) = (_record!(io, unsafe_string(p, n)); Int(n))
-Base.write(io::_RecordingIO, b::UInt8) = (_record!(io, String([b])); 1)
-Base.isopen(::_RecordingIO) = true
-
-# One write → (event, data), checking it is exactly one complete frame.
-function _parse_sse(w::AbstractString)
-    @assert endswith(w, "\n\n") && !occursin("\n\n", w[1:end-2]) "not exactly one frame: $(repr(w))"
-    lines = split(w[1:end-2], '\n')
-    @assert startswith(lines[1], "event: ") && all(startswith("data: "), lines[2:end])
-    (event = lines[1][8:end], data = join((l[7:end] for l in lines[2:end]), '\n'), nlines = length(lines) - 1)
-end
-
-@testset "SSE framing: data lines, event validation" begin
-    @test Treebars._sse_frame("progress", "<p>one</p>") == "event: progress\ndata: <p>one</p>\n\n"
-    # Every line of the payload is its own data line; \r\n and a lone \r are
-    # line breaks too (the SSE parser treats them so).
-    @test Treebars._sse_frame("done", "a\nb\r\nc\rd") == "event: done\ndata: a\ndata: b\ndata: c\ndata: d\n\n"
-    @test Treebars._sse_frame("progress", "") == "event: progress\ndata: \n\n"
-    @test _parse_sse(Treebars._sse_frame("done", "<pre>x\ny</pre>")) == (event="done", data="<pre>x\ny</pre>", nlines=2)
-    @test_throws ArgumentError Treebars._sse_frame("bad\nname", "x")
-    @test_throws ArgumentError Treebars._sse_frame("bad\rname", "x")
-    root = initialize_progress!(:state; description="root")
-    @test_throws ArgumentError sse_progress(_RecordingIO(), root; event="two\nlines")
-    finalize_progress!(root)
-end
-
-@testset "sse_progress: a pending node streams multi-line frames, one write each" begin
-    root = initialize_progress!(:state; description="root")
-    phase = prepare_progress!(root; description="phase")
-    # Multi-line (and \r\n) payloads: each frame must still be ONE write.
-    label(n) = is_pending(n) ? "state: pending\r\nwaiting" :
-               is_running(n) ? "state: running\nmessage: $(n.impl.message)" : "state: terminal\ndone"
-    worker = Threads.@spawn begin
-        sleep(0.15)
-        start_progress!(phase)
-        for i in 1:2
-            update_progress!(phase, "step $i"); sleep(0.06)
-        end
-        finalize_progress!(phase)
-    end
-    io = _RecordingIO()
-    @test sse_progress(io, phase; interval=0.01, render=label) === nothing
-    wait(worker)
-    frames = _parse_sse.(io.writes)          # asserts one complete frame per write
-    @test length(frames) == length(io.writes) == io.attempts
-    @test all(f -> f.event == "progress", frames)
-    @test all(f -> f.nlines == 2, frames)     # two data lines per frame
-    @test first(frames).data == "state: pending\nwaiting"
-    @test any(f -> f.data == "state: running\nmessage: step 2", frames)
-    @test last(frames).data == "state: terminal\ndone"
-    @test count(f -> occursin("pending", f.data), frames) == 1   # not re-sent
-    finalize_progress!(root)
-end
-
-@testset "htmx_sse_container: wrapper opens and closes the stream, inner swaps" begin
-    ext = _tb_ext()
-    html = ext.node_to_html(htmx_sse_container("/sse/run?key=a"))
-    @test startswith(html, "<div class=\"treebar-poller\" hx-ext=\"sse\" sse-connect=\"/sse/run?key=a\" sse-close=\"done\"")
-    for attr in ("data-paused=\"0\"", "data-show-finished=\"0\"", "data-show-pending=\"1\"",
-                 "data-show-failed=\"1\"", "data-show-skipped=\"0\"")
-        @test occursin(attr, html)
-    end
-    @test occursin(r"<div class=\"treebar-poller\"[^>]*><button class=\"treebar-pause\"[^>]*>Pause</button><div class=\"treebar-poller-inner\" sse-swap=\"progress,done\" hx-swap=\"outerHTML\" hx-target=\"this\">", html)
-    css = ext.node_to_html(htmx_treebar_styles())
-    @test occursin(".treebar-poller[sse-connect]:has(> .treebar-poller-inner) > .treebar-pause", css)
-end
-
-@testset "sse_fetchindex: progress frames, then exactly one done, last" begin
-    app = _StreamFixture()
-    key = "sse-ok-$(rand(UInt32))"
-    # Release one compute step per progress frame written.
-    io = _RecordingIO(on_write = w -> startswith(w, "event: progress") && _release!(key))
-    @test sse_fetchindex(io, app.results, key; interval=0.01) do rv
-        h.pre("result: $rv\nsecond line")
-    end === nothing
-    frames = _parse_sse.(io.writes)
-    @test length(frames) == length(io.writes)       # one write per frame
-    events = [f.event for f in frames]
-    @test count(==("done"), events) == 1 && last(events) == "done"
-    @test all(==("progress"), events[1:end-1]) && length(events) >= 2
-    for f in frames[1:end-1]
-        @test startswith(f.data, "<div class=\"treebar-poller-inner\" sse-swap=\"progress,done\" hx-swap=\"outerHTML\" hx-target=\"this\">")
-        @test !occursin("data-show-", f.data)                # scoped=false
-        @test !occursin("class=\"treebar-poller\"", f.data)  # never the wrapper
-    end
-    @test any(f -> occursin("Streaming $key", f.data), frames[1:end-1])
-    done = last(frames).data
-    top = match(r"^<[^>]*>", done).match
-    @test top == "<div class=\"treebar-terminal-content\">"   # neither sse-swap nor hx-swap
-    @test occursin("result: value-$key\nsecond line", done)   # a multi-line payload survives
-    @test last(frames).nlines >= 2
-    @test occursin("<details class=\"treebar-frozen\"><summary>Progress</summary>", done)
-
-    # Already computed: the one and only frame is `done`.
-    io2 = _RecordingIO()
-    sse_fetchindex(rv -> h.p("again: $rv"), io2, app.results, key)
-    @test [f.event for f in _parse_sse.(io2.writes)] == ["done"]
-    @test occursin("again: value-$key", only(io2.writes))
-end
-
-@testset "sse_fetchindex: failure frame and keep_progress=false" begin
-    app = _StreamFixture()
-    key = "sse-boom-$(rand(UInt32))"
-    io = _RecordingIO(on_write = w -> startswith(w, "event: progress") && _release!(key))
-    _quietly() do
-        sse_fetchindex(rv -> h.p("result: $rv"), io, app.results, key; interval=0.01)
-    end
-    frames = _parse_sse.(io.writes)
-    @test count(f -> f.event == "done", frames) == 1 && last(frames).event == "done"
-    done = last(frames).data
-    @test startswith(done, "<div class=\"treebar-terminal-content\">")
-    @test occursin("aria-invalid", done)
-    @test occursin("<details class=\"treebar-frozen\" open", done)
-
-    # Already failed: fetchindex rethrows before the callback; one done frame.
-    io2 = _RecordingIO()
-    _quietly(() -> sse_fetchindex(rv -> h.p("result: $rv"), io2, app.results, key))
-    @test [f.event for f in _parse_sse.(io2.writes)] == ["done"]
-    @test occursin("aria-invalid", only(io2.writes)) && occursin("treebar-frozen", only(io2.writes))
-
-    io3 = _RecordingIO()
-    _quietly(() -> sse_fetchindex(rv -> h.p("result: $rv"), io3, app.results, key; keep_progress=false))
-    @test occursin("aria-invalid", only(io3.writes)) && !occursin("treebar-frozen", only(io3.writes))
-end
-
-@testset "sse_fetchindex: a throwing write ends the stream quietly, compute runs on" begin
-    app = _StreamFixture()
-    key = "sse-gone-$(rand(UInt32))"
-    # The first frame gets through (and lets the compute take a step, so there
-    # is a change to send); the second write throws: the client has gone.
-    io = _RecordingIO(fail_from = 2, on_write = _ -> _release!(key))
-    returned = try
-        sse_fetchindex(rv -> h.p("result: $rv"), io, app.results, key; interval=0.01)
-        :returned
-    catch err
-        err
-    end
-    @test returned === :returned
-    @test io.attempts == 2 && length(io.writes) == 1
-    @test _parse_sse(only(io.writes)).event == "progress"
-    _release!(key, 2)                   # the compute is still in flight: let it finish
-    @test fetchindex((rv, _) -> fetch(rv), app.results, key) == "value-$key"
-    @test io.attempts == 2              # nothing was written after the failed write
 end

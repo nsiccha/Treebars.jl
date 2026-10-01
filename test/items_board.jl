@@ -1,9 +1,18 @@
-using Treebars
-import HTTP, Sockets
+using TestItemRunner
 
-# Keyed board (`htmx_render_board`): the server-side HTML contract the client
-# reconciler relies on, the WebSocket push loop, the job-ledger hook in
-# `polling_fetchindex`, and (opt-in, headless Chrome) the reconciler itself.
+# Ported 2026-09-30 from the keyed-board commit's web/src/test/board.jl
+# (GitHub main 8bde866) to TestItemRunner items: one @testitem per former
+# top-level @testset. Bodies are byte-verbatim ex-testset bodies (deliberately
+# NOT re-indented) inside the `let` hard scope, except the WebSocket harness:
+# a pre-bound listener (cf. StreamingFixtures.capture_stream) instead of the
+# original's listen/close/rebind port race. Tags: every item carries :unit
+# plus :board.
+
+@testmodule BoardFixtures begin
+using DynamicObjects, HTTP, Sockets, Treebars
+
+export _BOARD_GATE, _BoardTrackTest, _board_html, _board_item_html,
+    capture_board_frames
 
 _board_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
@@ -25,7 +34,37 @@ const _BOARD_GATE = Ref(Base.Event())
     gated(key) = (wait(_BOARD_GATE[]); key)
 end
 
-@testset "htmx_render_board render shape" begin
+function capture_board_frames(run)
+    # HTTP 1.x accepts a pre-bound listener; no guessed or raced test port.
+    socket = Sockets.listen(ip"127.0.0.1", 0)
+    port = last(Sockets.getsockname(socket))
+    outcome = Channel{Any}(1)
+    server = HTTP.WebSockets.listen!("127.0.0.1", port; server=socket) do ws
+        try
+            put!(outcome, (:ok, run(ws)))
+        catch err
+            put!(outcome, (:error, err))
+        end
+    end
+    frames = String[]
+    try
+        HTTP.WebSockets.open("ws://127.0.0.1:$port/feed"; proxy=nothing) do ws
+            for frame in ws
+                push!(frames, String(frame))
+            end
+        end
+        timedwait(() -> isready(outcome), 10) == :ok ||
+            error("WebSocket board server did not finish after delivery ended")
+        frames, take!(outcome)
+    finally
+        close(server)
+        isopen(socket) && close(socket)
+    end
+end
+end
+
+@testitem "htmx_render_board render shape" setup=[BoardFixtures, TreebarsTestImports] tags=[:unit, :board] begin
+    let
     root = initialize_progress!(:state; description="Fit")
     done_child = initialize_progress!(root; description="load")
     finalize_progress!(done_child)
@@ -112,9 +151,11 @@ end
     @test_throws ArgumentError htmx_render_board([(; key=1, label="x", state=:paused, elapsed_ms=0)])
 
     finalize_progress!(root)
+    end
 end
 
-@testset "htmx_render_board polling and pause contract" begin
+@testitem "htmx_render_board polling and pause contract" setup=[BoardFixtures, TreebarsTestImports] tags=[:unit, :board] begin
+    let
     entries = [(; key=1, label="one", state=:running, elapsed_ms=10)]
 
     # Polled board: a dedicated poll element (never the board or an item, so
@@ -160,9 +201,11 @@ end
     @test occursin(".treebar-board-item[data-show-finished=\"0\"]", styles)
     @test occursin(".treebar-board-item[data-treebar-state=\"queued\"]", styles)
     @test occursin(".treebar-board-empty[hidden]", styles)
+    end
 end
 
-@testset "board over WebSocket pushes full snapshots" begin
+@testitem "board over WebSocket pushes full snapshots" setup=[BoardFixtures, TreebarsTestImports] tags=[:unit, :board] begin
+    let
     frame = htmx_ws_render_board([(; key=7, label="seven", state=:running, elapsed_ms=5)];
                                  id="ws-board", poll_url="/ignored")
     @test frame isa String
@@ -173,33 +216,19 @@ end
     # ws_board: calls `entries()` each round and stops after `until()`.
     rounds = Ref(0)
     entries() = (rounds[] += 1; [(; key=rounds[], label="round $(rounds[])", state=:running, elapsed_ms=0)])
-    received = String[]
-    socket = Sockets.listen(Sockets.localhost, 0)
-    port = Int(Sockets.getsockname(socket)[2])
-    close(socket)
-    server = HTTP.WebSockets.listen!("127.0.0.1", port) do ws
+    frames, (status, _) = capture_board_frames() do ws
         ws_board(ws, entries; interval=0.01, until=() -> rounds[] >= 2, id="ws-board")
     end
-    try
-        HTTP.WebSockets.open("ws://127.0.0.1:$port") do ws
-            for msg in ws
-                push!(received, String(msg))
-                length(received) == 3 && break
-            end
-        end
-    catch err
-        # The server closes after the final frame; the client loop may see it.
-        err isa HTTP.WebSockets.WebSocketError || rethrow()
-    finally
-        close(server)
+    @test status === :ok
+    @test length(frames) == 3
+    @test all(f -> occursin("id=\"ws-board\"", f), frames)
+    @test occursin("data-treebar-key=\"1\"", frames[1])
+    @test occursin("data-treebar-key=\"3\"", frames[3])
     end
-    @test length(received) == 3
-    @test all(f -> occursin("id=\"ws-board\"", f), received)
-    @test occursin("data-treebar-key=\"1\"", received[1])
-    @test occursin("data-treebar-key=\"3\"", received[3])
 end
 
-@testset "polling_fetchindex reports in-flight work to the job ledger" begin
+@testitem "polling_fetchindex reports in-flight work to the job ledger" setup=[BoardFixtures, TreebarsTestImports] tags=[:unit, :board] begin
+    let
     ext = Base.get_extension(Treebars, :HTMXObjectsExt)
     @test ext !== nothing
 
@@ -239,14 +268,16 @@ end
     ledger && @test timedwait(() -> isempty(mine("Board job")) ||
                               only(mine("Board job")).state !== :running, 10.0) === :ok
     finalize_progress!(app.__status__)
+    end
 end
 
-# Drives the reconciler in headless Chrome, HTMXObjects-style (opt in with
-# TREEBARS_BROWSER_TESTS=1; needs google-chrome or chromium on PATH). No htmx
-# and no server: the page applies successive full snapshots through
-# `window.treebarUpdateBoard` — the entry point every transport shares — and
-# writes what it observed into #result, which `--dump-dom` returns.
-@testset "board reconciler keeps wrappers and terminalizes in a browser" begin
+@testitem "board reconciler keeps wrappers and terminalizes in a browser" setup=[BoardFixtures, TreebarsTestImports] tags=[:unit, :board] begin
+    let
+    # Drives the reconciler in headless Chrome, HTMXObjects-style (opt in with
+    # TREEBARS_BROWSER_TESTS=1; needs google-chrome or chromium on PATH). No htmx
+    # and no server: the page applies successive full snapshots through
+    # `window.treebarUpdateBoard` — the entry point every transport shares — and
+    # writes what it observed into #result, which `--dump-dom` returns.
     if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
         @test_skip true
     else
@@ -353,5 +384,6 @@ end
         @test get(r, "resumed", "") == "1"
         @test get(r, "count", "") == "2 running"
         finalize_progress!(root)
+    end
     end
 end

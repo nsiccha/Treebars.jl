@@ -54,14 +54,21 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         let e = eta(sp)
             isnothing(e) || push!(parts, "· ETA ~$(short_duration(e))")
         end
+        _shows_interrupt_request(node) && push!(parts, _INTERRUPT_TEXT)
         join(parts, " ")
     end
 end
 
-# Backends other than StateProgress (Term.jl bars, custom impls) carry no
-# introspectable state contract — name the impl type and let the tree shape
-# carry the rest.
-_text_summary(node::ProgressNode) = string(_state_marker(node), " ", nameof(typeof(node.impl)))
+const _INTERRUPT_TEXT = "· interrupt requested"
+
+# Content bits for a non-StateProgress node: the marker, interrupt flag and
+# joinery stay here (shared with the StateProgress method's format), while the
+# backend supplies its own middle. The default names the impl type; a backend
+# extension with introspectable state (Term.jl jobs) overrides this to show it.
+_impl_summary_bits(node::ProgressNode) = String[string(nameof(typeof(node.impl)))]
+_text_summary(node::ProgressNode) = join(filter(!isempty, [
+    _state_marker(node), _impl_summary_bits(node)...,
+    _shows_interrupt_request(node) ? _INTERRUPT_TEXT : ""]), " ")
 
 function _print_text_children(io::IO, node::ProgressNode, prefix::String, seen)
     children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
@@ -106,14 +113,19 @@ println(render_text(tree))
 
 Each line is `<state> <description> [(i/N)] [— message] [duration]`, where
 state is `·` pending, `▶` running, `✓` finished, `✗` failed, or `⊘` skipped.
-Pending and skipped nodes show no duration because they never started.
+Pending and skipped nodes show no duration because they never started. A
+pending or running node that [`request_interrupt!`](@ref) was called on ends in
+`· interrupt requested` until it terminates.
 
 Nodes are shown exactly as the HTML renderer would show them: bare wrappers
 (no description, message or counter) and `displayed=false` nodes inline,
 hoisting their children up a level, and a node attached under more than one
 parent renders once per tree. So an empty result means the markers really did
 not produce nodes — see [`@progress`](@ref) for why a bare `"label"` inside a
-`begin … end` block is swallowed as a docstring.
+`begin … end` block is swallowed as a docstring. (A caller that opts into
+`max_finished` on [`htmx_render_children`](@ref) gets an HTML render that
+elides older finished/skipped children; `render_text` always prints every
+node.)
 
 `show(io, MIME"text/plain"(), node)` renders the same thing, so a
 `ProgressNode` displays as its tree at the REPL and under `@show`.

@@ -2,10 +2,8 @@ module TreebarsWeb
 
 using HTMXObjects
 using Treebars
-using TestModules
+import HTTP.WebSockets: send
 using Random
-
-include("test/runtests.jl")
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
@@ -13,12 +11,11 @@ node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 # features. Kept at module level because the real compute is ambient-independent
 # (no AppData coupling) and four separate features invoke it — a shared
 # module-level function stays DRY without forcing each XData to re-host it.
-function fake_sampling(progress; n_steps=200, sleep_per_step=0.02, fail_at=nothing)
+function fake_sampling(progress; n_steps=200, sleep_per_step=0.02)
     child = initialize_progress!(progress, n_steps; description="MCMC", propagates=true)
     result = Float64[]
     x = 0.0
     for i in 1:n_steps
-        i == fail_at && error("Simulated failure at step $i")
         x += randn() * 0.1
         push!(result, x)
         update_progress!(child, i;
@@ -92,7 +89,6 @@ include("docstring.jl")
 include("autocleanup.jl")
 include("pills.jl")
 include("websockets.jl")
-include("sse.jl")
 
 @dynamicstruct struct AppData
     async       = AsyncComputationsData()
@@ -102,7 +98,6 @@ include("sse.jl")
     autocleanup = AutocleanupData()
     pills       = PillDemosData()
     websockets  = WebSocketsData()
-    sse         = SSEData()
 end
 
 const APPDATA = AppData()
@@ -122,7 +117,7 @@ const APPDATA = AppData()
         ),
     )
 
-    @include tests = TestRoutes(; __req__, test_module=@__MODULE__)
+    @include tests = TestRoutes(; project=pkgdir(Treebars))
     @include async       = AsyncComputationsRoutes()
     @include nested      = NestedRoutes()
     @include phases      = PhasesRoutes()
@@ -130,14 +125,13 @@ const APPDATA = AppData()
     @include autocleanup = AutocleanupRoutes()
     @include pills       = PillDemosRoutes()
     @include websockets  = WebSocketsRoutes()
-    @include sse         = SSERoutes()
 
     @get index() = h.div(
         h.h1("Treebars Web Demo"),
         h.p(h.a(href="/tests")("Tests"), " | ",
             h.a(href="/pills")("Pill demos"), " | ",
             h.a(href="/autocleanup")("Auto-cleanup demo"),
-            " | HTTP polling, WebSockets, server-sent events, inline child substatus, phase markers."),
+            " | HTTP polling, WebSockets, inline child substatus, phase markers."),
 
         h.hr(),
         h.h3("0. @progress phase markers + pending state"),
@@ -190,22 +184,16 @@ const APPDATA = AppData()
 
         h.hr(),
         h.h3("2. WebSocket (server push)"),
-        h.p("The server pushes a frame whenever the tree changes. Each run gets its own ",
-            h.code("htmx_ws_container"), " (a generated id travels to the socket route in its URL), ",
-            "so runs stack without colliding; pill toggles and Pause persist across frames.";
-            class="u-text-sm u-text-muted"),
-        h.form(; hx_get = __self__ / "websockets/start",
-                 hx_target = "#ws-runs", hx_swap = "afterbegin")(
-            h.fieldset(; role="group")(
-                h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
-                h.input(; type="number", name="n_steps", value="200", placeholder="Steps", class="tb-input-narrow"),
-                h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
-                h.button("Run (websocket)"; type="submit"),
+        h.p("Server pushes HTML updates over a persistent connection."; class="u-text-sm u-text-muted"),
+        h.div(; hx_ext="ws", ws_connect="/websockets/ws")(
+            h.form(; ws_send="true")(
+                h.fieldset(; role="group")(
+                    h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
+                    h.button("Run (websocket)"; type="submit"),
+                ),
             ),
-            h.label(h.input(; type="checkbox", name="fail", value="true"), " fail midway"),
-            h.label(h.input(; type="checkbox", name="force", value="true"), " force recompute"),
         ),
-        h.div(; id="ws-runs"),
+        h.div(; id="ws-result"),
 
         h.hr(),
         h.h3("3. Inline child substatus"),
@@ -243,23 +231,22 @@ const APPDATA = AppData()
         ),
 
         h.hr(),
-        h.h3("5. Server-sent events"),
-        h.p("The same frames as the WebSocket demo over an event stream: ", h.code("htmx_sse_container"),
-            " opens it, ", h.code("sse_fetchindex"), " sends ", h.code("progress"),
-            " events while computing and one ", h.code("done"), " event at the end, which also closes it.";
+        h.h3("5. WebSocket with kwargs"),
+        h.p("Kwargs from query string. Submitting swaps a fresh ", h.code("ws-connect"),
+            " element into the socket container, so htmx opens the connection reliably — ",
+            "mutating ", h.code("ws-connect"), " on an already-processed element does not reconnect.";
             class="u-text-sm u-text-muted"),
-        h.form(; hx_get = __self__ / "sse/start",
-                 hx_target = "#sse-runs", hx_swap = "afterbegin")(
+        h.form(; hx_get = __self__ / "websockets/connect",
+                 hx_target = "#param-ws-container", hx_swap = "innerHTML")(
             h.fieldset(; role="group")(
-                h.input(; type="text", name="key", value="sse-demo", placeholder="Key"),
-                h.input(; type="number", name="n_steps", value="200", placeholder="Steps", class="tb-input-narrow"),
+                h.input(; type="text", name="key", value="param-demo", placeholder="Key"),
+                h.input(; type="number", name="n_steps", value="100", placeholder="Steps", class="tb-input-narrow"),
                 h.input(; type="number", name="speed", value="20", placeholder="Speed (ms)", class="tb-input-narrow-7"),
-                h.button("Run (SSE)"; type="submit"),
+                h.button("Run"; type="submit"),
             ),
-            h.label(h.input(; type="checkbox", name="fail", value="true"), " fail midway"),
-            h.label(h.input(; type="checkbox", name="force", value="true"), " force recompute"),
         ),
-        h.div(; id="sse-runs"),
+        h.div(; id="param-ws-container", hx_ext="ws"),
+        h.div(; id="ws-param-result"),
     )
 end
 
