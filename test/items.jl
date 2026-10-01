@@ -2179,6 +2179,68 @@ Reported by DynamicObjects:sbpmx-reflect — not visible from this side.
 end
 
 """
+Todo `02kt4z4`: an iterator expression — serial `for`, comprehension,
+`Threads.@threads for`, `map` sugar — is evaluated ONCE in the enclosing
+scope, before the loop's own node exists. The walker spliced it unwalked,
+so a bare `__progress__` there escaped as an undefined global instead of
+naming the enclosing node.
+"""
+@testitem "@progress walks the iterator expression: a bare __progress__ there is the enclosing node" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    seen = Any[]
+    note(p) = (push!(seen, p); 1:3)
+
+    root = initialize_progress!(:state; description="RHS")
+    total = 0
+    @progress root for i in note(__progress__)
+        total += i
+    end
+    @test total == 6
+    @test seen[end] === root
+
+    @test (@progress root [2x for x in note(__progress__)]) == [2, 4, 6]
+    @test seen[end] === root
+
+    hits = Threads.Atomic{Int}(0)
+    @progress root Threads.@threads for i in note(__progress__)
+        Threads.atomic_add!(hits, 1)
+    end
+    @test hits[] == 3
+    @test seen[end] === root
+
+    @test (@progress root map(note(__progress__)) do x; x + 1; end) == [2, 3, 4]
+    @test seen[end] === root
+
+    # Nested: an inner loop's iterator runs inside the outer body, where
+    # `__progress__` is the outer loop's node — the same node the body sees.
+    body_nodes = Any[]
+    rhs_nodes = Any[]
+    @progress root for i in 1:2
+        push!(body_nodes, __progress__)
+        for j in (push!(rhs_nodes, __progress__); 1:1)
+        end
+    end
+    @test length(rhs_nodes) == 2
+    @test all(rhs_nodes .=== body_nodes)
+    @test all(n -> n !== root, rhs_nodes)
+    finalize_progress!(root)
+
+    # A user-qualified `M.__progress__` / `GlobalRef(M, :__progress__)` in the
+    # iterator is a real global, not the walker's placeholder: left untouched.
+    has(f, x) = f(x) || (x isa Expr && any(a -> has(f, a), x.args))
+    qualified = macroexpand(@__MODULE__, quote
+        @progress root for i in M.__progress__
+        end
+    end)
+    @test has(x -> x == QuoteNode(:__progress__), qualified)
+    gref = GlobalRef(Main, :__progress__)
+    globalref = macroexpand(@__MODULE__, Expr(:macrocall, Symbol("@progress"), LineNumberNode(1),
+        :root, Expr(:for, Expr(:(=), :i, gref), Expr(:block))))
+    @test has(x -> x === gref, globalref)
+    end # let (restores @testset hard scope)
+end
+
+"""
 Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
 default for `polling_fetchindex`'s `parent` kwarg, bound by
 HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure

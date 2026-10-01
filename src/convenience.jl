@@ -488,7 +488,7 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
     init_expr = :($initialize_progress!($(ctx.progress), length($itr);
         description=$desc, transient=$(ctx.transient)))
     quote
-        local $itr = $rhs
+        local $itr = $(progress_expr(rhs, ctx))
         $(_iterprogress_sandwich(sub, init_expr, newcall))
     end
 end
@@ -691,13 +691,15 @@ end
 # then the iterable (once), then bind the counter NODE itself to `node` — not an
 # `IterableProgress` wrapper — so `__progress__` in the body is a local whose
 # type is inferred whenever the parent's is. `run_expr` iterates
-# `IterableProgress(node, itr)`, which is type-stable either way.
+# `IterableProgress(node, itr)`, which is type-stable either way. The iterable
+# is walked against the parent: it runs before the loop's node exists, so a
+# bare `__progress__` there names the enclosing node (todo `02kt4z4`).
 function _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
     par = gensym(:parent)
     init_expr = :($_iterable_node($par, $itr; description=$desc, transient=$(ctx.transient)))
     quote
         $par = $(ctx.progress)
-        $itr = $rhs
+        $itr = $(progress_expr(rhs, (progress=par, transient=ctx.transient)))
         $(_iterprogress_sandwich(node, init_expr, run_expr))
     end
 end
@@ -758,6 +760,8 @@ function _map_progress_expr(x::Expr, label, ctx)
         g = Expr(:->, Expr(:tuple, child, Expr(:..., a)), Expr(:call, f, Expr(:..., a)))
     end
     desc = label === nothing ? "map(...)" : label
+    # The collections are evaluated in the enclosing scope: walk them there.
+    itrs = Any[progress_expr(i, ctx) for i in itrs]
     :($progress_map($g, $(ctx.progress), $(itrs...); description=$desc, transient=$(ctx.transient)))
 end
 
