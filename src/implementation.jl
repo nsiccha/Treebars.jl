@@ -385,6 +385,9 @@ is_pending(s::StateProgress) = isnothing(s.started_at) && isnothing(s.finalized_
 
 `true` when a progress node has been started (via [`start_progress!`](@ref) or
 an eager `initialize_progress!`) and not yet finalized or failed.
+
+For backends without lifecycle timestamps (e.g. Term.jl jobs), answers from
+the backend's own running flag instead — see `isrunning`.
 """
 is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized_at)
 
@@ -394,6 +397,9 @@ is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized
 `true` when a progress node **ran** and was finalized successfully (via
 [`finalize_progress!`](@ref)). A node that never started is
 [`is_skipped`](@ref), not finished.
+
+For backends without lifecycle timestamps, `true` when the node is neither
+running nor failed — see `isrunning`.
 """
 is_finished(s::StateProgress) =
     !isnothing(s.finalized_at) && !isnothing(s.started_at) && !s.failed
@@ -403,6 +409,10 @@ is_finished(s::StateProgress) =
 
 `true` when a progress node has been finalized as a failure (via
 [`fail_progress!`](@ref)).
+
+`false` for backends without a failure concept (e.g. Term.jl, which neither
+records nor displays failure): a failed Term node reads finished, so check
+for the propagated exception instead.
 """
 is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
 
@@ -469,8 +479,14 @@ eta(node::ProgressNode{<:StateProgress}) = eta(node.impl)
 # with_prepared_phases' cleanup handler skips it.
 is_pending(::Any) = false
 is_pending(::Nothing) = false
+# Running/finished answer from the backend's own flag (`isrunning`), so they
+# agree with the finalize/fail walks on every backend; failure has no generic
+# flag, so backends without the concept (Term.jl) answer `false`.
+is_running(node::ProgressNode) = isrunning(node)
 is_running(::Nothing) = false
+is_finished(node::ProgressNode) = !isrunning(node) && !is_failed(node)
 is_finished(::Nothing) = false
+is_failed(::Any) = false
 is_failed(::Nothing) = false
 # Mirrors is_pending's defaults: a backend with no pending concept can have
 # nothing to skip, so every render/cleanup site sees `false` and behaves

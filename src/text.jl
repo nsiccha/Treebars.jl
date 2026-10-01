@@ -61,11 +61,13 @@ end
 
 const _INTERRUPT_TEXT = "· interrupt requested"
 
-# Backends other than StateProgress (Term.jl bars, custom impls) carry no
-# introspectable state contract — name the impl type and let the tree shape
-# carry the rest.
+# Content bits for a non-StateProgress node: the marker, interrupt flag and
+# joinery stay here (shared with the StateProgress method's format), while the
+# backend supplies its own middle. The default names the impl type; a backend
+# extension with introspectable state (Term.jl jobs) overrides this to show it.
+_impl_summary_bits(node::ProgressNode) = String[string(nameof(typeof(node.impl)))]
 _text_summary(node::ProgressNode) = join(filter(!isempty, [
-    _state_marker(node), string(nameof(typeof(node.impl))),
+    _state_marker(node), _impl_summary_bits(node)...,
     _shows_interrupt_request(node) ? _INTERRUPT_TEXT : ""]), " ")
 
 function _print_text_children(io::IO, node::ProgressNode, prefix::String, seen)

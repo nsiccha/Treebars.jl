@@ -1,9 +1,11 @@
 module TermExt
+import Dates: Millisecond, now
 import Term
 import Term.Progress: ProgressBar, ProgressJob, AbstractColumn, DescriptionColumn, CompletedColumn, SeparatorColumn, ProgressColumn
 import Treebars
 import Treebars: initialize_progress!, finalize_progress!, update_progress!, fail_progress!,
-    IncrementBy, ProgressNode, propagates_finalization, root, labels, isrunning
+    IncrementBy, ProgressNode, propagates_finalization, root, labels, isrunning, duration,
+    short_duration, _impl_summary_bits
 
 TermProgressNode{I<:Union{ProgressBar,ProgressJob},M,C} = ProgressNode{I,M,C}
 
@@ -67,6 +69,7 @@ function initialize_progress!(node::TermProgressNode; description="Running...", 
     pjob = Base.lock(lock) do
         pjob = ProgressJob(_next_job_id(), nothing, description, pbar.columns, pbar.width, pbar.columns_kwargs, transient)
         pjob.columns = [DescriptionColumn(pjob), StringColumn(pjob, string(value))]
+        pjob.startime = Term.Progress.now()
         push!(pbar.jobs, pjob)
         pjob
     end
@@ -151,5 +154,31 @@ isrunning(node::TermProgressNode{ProgressJob}) = !node.impl.finished
 # the same way.
 fail_progress!(pbar::ProgressBar, args...; kwargs...) = finalize_progress!(pbar)
 fail_progress!(pjob::ProgressJob, args...; kwargs...) = finalize_progress!(pjob)
+
+# Elapsed wall-clock time from Term.jl's own job timestamps (`startime` is set
+# at creation, `stoptime` by `stop!`). Frozen once the job stops, like the
+# StateProgress contract; `Millisecond(0)` when no start was recorded.
+function duration(node::TermProgressNode{ProgressJob})
+    job = node.impl
+    isnothing(job.startime) && return Millisecond(0)
+    something(job.stoptime, now()) - job.startime
+end
+# The root bar carries no timestamps in Term.jl, so any value would be a lie —
+# say so rather than returning one. Query a job node instead.
+duration(::TermProgressNode{ProgressBar}) =
+    error("duration is not tracked for :term root bars (Term.jl keeps no bar timestamps); query a job node instead")
+
+# Text-dump content for a Term job: description, counter and elapsed time, in
+# the same shape as the StateProgress summary (the marker and interrupt flag
+# are added by the shared `_text_summary`). The root bar keeps the default
+# (its impl type name — it carries no description).
+function _impl_summary_bits(node::TermProgressNode{ProgressJob})
+    job = node.impl
+    bits = String[]
+    isempty(job.description) || push!(bits, job.description)
+    isnothing(job.N) || push!(bits, "($(job.i)/$(job.N))")
+    push!(bits, "[$(short_duration(duration(node)))]")
+    bits
+end
 
 end
