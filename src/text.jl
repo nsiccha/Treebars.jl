@@ -122,7 +122,10 @@ Nodes are shown exactly as the HTML renderer would show them: bare wrappers
 hoisting their children up a level, and a node attached under more than one
 parent renders once per tree. So an empty result means the markers really did
 not produce nodes — see [`@progress`](@ref) for why a bare `"label"` inside a
-`begin … end` block is swallowed as a docstring.
+`begin … end` block is swallowed as a docstring. One deliberate difference:
+the HTML renderer shows only the newest 50 finished (and 50 skipped) children
+per container behind an "N earlier … not shown" line (`max_finished` on
+[`htmx_render_children`](@ref)), whereas `render_text` prints every node.
 
 `show(io, MIME"text/plain"(), node)` renders the same thing, so a
 `ProgressNode` displays as its tree at the REPL and under `@show`.

@@ -153,7 +153,7 @@ end
 interrupt_requested(::Nothing) = false
 
 """
-    htmx_render(node; article=false, scoped=true, kwargs...)
+    htmx_render(node; article=false, scoped=true, max_finished=50, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
 lives in the HTMXObjects package extension — loading `HTMXObjects` activates
@@ -169,8 +169,8 @@ Rendering rules (for `ProgressNode{<:StateProgress}`):
 
 Each node's header includes a `.treebar-duration` span; the
 [`htmx_treebar_script`](@ref) ticker advances running nodes locally between
-polls. Skipped nodes show no duration. `scoped` is forwarded to
-`htmx_render_children` (see there).
+polls. Skipped nodes show no duration. `scoped` and `max_finished` are
+forwarded to `htmx_render_children` at every level (see there).
 """
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
@@ -202,13 +202,22 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
 
 # htmx_render_children — implemented in HTMXObjectsExt
 """
-    htmx_render_children(node; scoped=true)
+    htmx_render_children(node; scoped=true, max_finished=50)
 
 Render the children of a `ProgressNode` as an HTML fragment, classifying them
 into pending / running / finished / skipped / failed groups and emitting toggle
 pills (`"N pending"`, `"N finished"`, `"N skipped"`, `"N failed"`) at the top.
 Implementation lives in the HTMXObjects package extension — loading
 `HTMXObjects` activates it.
+
+Pills count every child, but per container only the newest `max_finished`
+finished children are rendered individually (likewise skipped). Older ones are
+replaced by one `.treebar-elided` line ("N earlier finished not shown") that
+shows and hides with that group's pill. Both groups are hidden by default, so
+this bounds each poll's HTML by the visible tree rather than by history.
+Pending, running and failed children are never elided. Pass
+`max_finished=nothing` to render every child (for example a history view).
+[`render_text`](@ref) does not elide.
 
 `scoped=true` (the default) emits `data-show-*` attributes on the wrapper so
 the pills toggle visibility scoped to this children container. Inside a
