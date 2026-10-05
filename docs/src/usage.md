@@ -132,6 +132,52 @@ If anything throws inside the `f(phases)` body, the phase that is
 rethrows. Any phase that is still `is_pending` is terminated as skipped. The
 same cleanup applies to an early return from the body.
 
+## Batched phase overview
+
+Existing pre-enumerated phase code supports a rendering opt-in. Repeated
+instances of each plan are counted by phase and lifecycle state: pending,
+running, finished, failed, and skipped. The individual trees remain available.
+
+```@example batch_overview
+using Treebars
+
+batch = initialize_progress!(:state; description="Public synthetic batch")
+@progress batch "Items" Threads.@threads for item in 1:3
+    @progress "Load"
+    values = sqrt.(1:8)
+    @progress "Fit"
+    sum(values) / length(values)
+end
+println(render_text(batch; phase_overview=true))
+```
+
+The same `phase_overview=true` keyword works with `htmx_render`,
+`htmx_render_children`, `polling_fetchindex`, `htmx_ws_render`,
+`htmx_ws_progress`, and producer-form `ws_progress`. A board uses
+`htmx_render_board(entries; phase_overview=true)`; `htmx_ws_render_board`
+and `ws_board` forward it. Defaults retain the ordinary tree view.
+
+[`phase_overview`](@ref) returns an immutable snapshot for inspection: a tuple
+of plans, each with `items` and `phases`; each phase has `key`, `label`, and
+the five lifecycle counts. Counts include completed transient phases after
+their nodes detach. Each phase's five counts sum to that plan's prepared item
+count. Items that have not instantiated their phase plan yet are not counted.
+
+Different macro phase blocks stay separate. NamedTuple plans match by their
+complete ordered key sequence; iterable plans match by their complete
+declared label sequence. Matching a phase alone never merges different
+sequences, and arbitrary tree descriptions do not determine phase identity.
+An item-specific display label falls back to the phase key or position when
+instances disagree. Shared trees count once, including across board entries.
+
+A board summarizes the roots in its current server snapshot, so keep completed
+roots listed when their counts belong in a history overview. Lingering items
+that have left the server list are outside that snapshot. Per-plan snapshots
+are locked; the entire workload is not frozen for rendering. The `:state`
+backend records these counts; disabled and other backends return no plans.
+Lifecycle completion records execution, and does not imply that a scientific
+result has passed any domain-specific qualification.
+
 ## Labelled sub-progress via `update_progress!` kwargs
 
 Pass keyword arguments to `update_progress!` to create labelled sub-rows:

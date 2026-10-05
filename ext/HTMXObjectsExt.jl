@@ -1,5 +1,6 @@
 module HTMXObjectsExt
 import HTMXObjects
+import Treebars
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
@@ -241,6 +242,22 @@ htmx_treebar_styles() = h.style(Raw("""
    survives updates exactly like the .treebar-poller wrapper does. */
 .treebar-board-header { display: flex; gap: 0.5rem; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 0.5rem; }
 .treebar-board-count { font-size: 0.85em; color: var(--pico-muted-color, #888); }
+.treebar-phase-overview { margin-block: 0.75rem; }
+.treebar-phase-plan { overflow-x: auto; margin-block: 0.5rem; }
+.treebar-phase-plan table { width: 100%; font-size: 0.85em; }
+.treebar-phase-plan caption { text-align: left; font-weight: 600; padding-block: 0.3rem; }
+.treebar-phase-plan th, .treebar-phase-plan td { padding: 0.3rem 0.5rem; }
+.treebar-phase-plan th { text-align: left; overflow-wrap: anywhere; }
+.treebar-phase-plan th[scope="row"] { overflow-wrap: anywhere; min-width: 8rem; }
+.treebar-phase-plan td { text-align: right; font-variant-numeric: tabular-nums; }
+@media (max-width: 600px) {
+    .treebar-phase-plan table, .treebar-phase-plan caption, .treebar-phase-plan tbody { display: block; }
+    .treebar-phase-plan thead { display: none; }
+    .treebar-phase-plan tr { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 0.5rem; }
+    .treebar-phase-plan th[scope="row"] { grid-column: 1 / -1; min-width: 0; }
+    .treebar-phase-plan td { display: flex; flex-direction: column; align-items: flex-start; padding-inline: 0.25rem; }
+    .treebar-phase-plan td::before { content: attr(data-phase-state); font-size: 0.7rem; text-transform: capitalize; overflow-wrap: anywhere; }
+}
 .treebar-board-pause {
     margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
     width: auto; cursor: pointer;
@@ -603,6 +620,13 @@ htmx_treebar_script() = h.script(Raw("""
         var count = board.querySelector(':scope > .treebar-board-header > .treebar-board-count');
         var ncount = incoming.querySelector(':scope > .treebar-board-header > .treebar-board-count');
         if (count && ncount) count.replaceWith(document.importNode(ncount, true));
+        var overview = board.querySelector(':scope > .treebar-board-overview');
+        var noverview = incoming.querySelector(':scope > .treebar-board-overview');
+        if (noverview) {
+            var freshOverview = document.importNode(noverview, true);
+            if (overview) overview.replaceWith(freshOverview);
+            else board.insertBefore(freshOverview, list);
+        } else if (overview) overview.remove();
         boardEmpty(board);
         // The reconciler inserts spans through DOM APIs, not an htmx swap, so
         // track them synchronously (scoped to the board); the observer below
@@ -717,11 +741,28 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, kwargs...)
+function _phase_overview_html(nodes; board=false)
+    plans = Treebars.phase_overview(nodes)
+    isempty(plans) && !board && return ""
+    states = (:pending, :running, :finished, :failed, :skipped)
+    tables = [h.div(class="treebar-phase-plan")(
+        h.table()(
+            h.caption("Phase plan $i · $(plan.items) prepared items"),
+            h.thead(h.tr(h.th(scope="col")("Phase"),
+                [h.th(scope="col")(uppercasefirst(string(state))) for state in states])),
+            h.tbody([h.tr(h.th(scope="row")(phase.label),
+                [h.td(data_phase_state=string(state))(string(getproperty(phase, state)))
+                    for state in states]) for phase in plan.phases]),
+        )) for (i, plan) in enumerate(plans)]
+    h.div(class=board ? "treebar-phase-overview treebar-board-overview" : "treebar-phase-overview")(tables)
+end
+
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Bool=false, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
     children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen, max_finished)
-    lock(sp.lock) do
+    overview = phase_overview ? _phase_overview_html(node) : ""
+    tree = lock(sp.lock) do
         duration_node = _duration_span(sp)
         interrupt_node = _interrupt_span(node)
         pending = is_pending(sp)
@@ -764,6 +805,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
             end
         end
     end
+    phase_overview ? h.div(class="treebar-with-overview")(overview, tree) : tree
 end
 
 # Render a full progress tree rooted at node. Top-level root is always
@@ -771,10 +813,10 @@ end
 # flattened away — their grandchildren render in their place. Same per-pass
 # `seen` dedup as the StateProgress method above (kept in sync for any
 # non-StateProgress backend that reaches this fallback).
-function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), kwargs...)
+function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), phase_overview::Bool=false, kwargs...)
     children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
     children_html = [htmx_render(child; scoped, seen, kwargs...) for child in children]
-    h.div(class="treebar-root")(children_html)
+    h.div(class="treebar-root")(phase_overview ? _phase_overview_html(node) : "", children_html)
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
@@ -831,7 +873,11 @@ function _elide_finished(children, max_finished)
 end
 
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
+function htmx_render_children(node::ProgressNode{<:StateProgress}; phase_overview::Bool=false, kwargs...)
+    tree = _htmx_render_children(node; kwargs...)
+    phase_overview ? h.div(class="treebar-with-overview")(_phase_overview_html(node), tree) : tree
+end
+function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
     isnothing(max_finished) || max_finished >= 0 ||
         throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl
@@ -955,10 +1001,10 @@ Client-side:
 </div>
 ```
 """
-htmx_ws_render(node::ProgressNode; id="treebar-progress") = node_to_html(h.div(; id)(htmx_render(node)))
+htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Bool=false) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
 
 function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
-        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false)
+        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false, phase_overview::Bool=false)
     isempty(id) && throw(ArgumentError("htmx_ws_progress requires a nonempty unique id"))
     node = isnothing(progress) ?
         initialize_progress!(:state; description, N, pending=true) : progress
@@ -966,7 +1012,7 @@ function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
         content,
         h.details(; id=id * "-disclosure", open=(collapsed ? nothing : true))(
             h.summary("Progress"),
-            h.div(; id=id * "-progress")(htmx_render(node))),
+            h.div(; id=id * "-progress")(htmx_render(node; phase_overview))),
         h.div(; id=id * "-updates")(),
     )
 end
@@ -993,8 +1039,8 @@ end
 _is_oob_fragment(f) = f isa Node &&
     (haskey(f.attrs, Symbol("hx-swap-oob")) || haskey(f.attrs, Symbol("data-hx-swap-oob")))
 
-function _ws_progress_frame(id, progress, fragments)
-    payload = htmx_ws_render(progress; id=id * "-progress")
+function _ws_progress_frame(id, progress, fragments; phase_overview::Bool=false)
+    payload = htmx_ws_render(progress; id=id * "-progress", phase_overview)
     isempty(fragments) && return payload
     plain = Any[]
     oob = Any[]
@@ -1013,14 +1059,14 @@ function _ws_progress_frame(id, progress, fragments)
 end
 
 function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
-        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64)
+        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64, phase_overview::Bool=false)
     _validate_ws_progress(id, interval, buffer)
     node = _ws_progress_root(parent, N; description)
-    ws_progress(produce, ws, node; id, interval, buffer)
+    ws_progress(produce, ws, node; id, interval, buffer, phase_overview)
 end
 
 function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:StateProgress};
-        id::AbstractString, interval=0.1, buffer::Integer=64)
+        id::AbstractString, interval=0.1, buffer::Integer=64, phase_overview::Bool=false)
     _validate_ws_progress(id, interval, buffer)
     (is_pending(node) || is_running(node)) ||
         throw(ArgumentError("ws_progress producer requires a pending or running node"))
@@ -1039,7 +1085,7 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
         nothing
     end
     # Render outside the send catch: serialization errors are not disconnects.
-    initial = htmx_ws_render(node; id=id * "-progress")
+    initial = htmx_ws_render(node; id=id * "-progress", phase_overview)
     try
         send(ws, initial)
     catch err
@@ -1063,7 +1109,7 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
             isready(queue) || break
             push!(fragments, take!(queue))
         end
-        _ws_progress_frame(id, progress, fragments)
+        _ws_progress_frame(id, progress, fragments; phase_overview)
     end
     result = nothing
     try
@@ -1191,7 +1237,7 @@ end
 
 function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
         empty="No running jobs.", id="treebar-board", linger_ms::Integer=3000,
-        expanded::Bool=false, live::Bool=!isnothing(poll_url))
+        expanded::Bool=false, live::Bool=!isnothing(poll_url), phase_overview::Bool=false)
     # First occurrence of a key wins: the client matches items by key, so a
     # duplicate would make two DOM items fight over one identity.
     seen = Set{String}()
@@ -1216,6 +1262,9 @@ function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
             _board_count(unique_entries),
             live ? _board_pause_button() : "",
         ),
+        phase_overview ? _phase_overview_html(
+            [node for e in unique_entries for node in (_board_get(e, :node, nothing),)
+                if node isa ProgressNode]; board=true) : "",
         h.div(class="treebar-board-list")(items),
         empty_node,
         poller,
@@ -1366,7 +1415,7 @@ function _polling_default_parent(req)
     end
     current_dispatch_parent()
 end
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, phase_overview::Bool=false, kwargs...)
     chrome in (:auto, :quiet) || throw(ArgumentError("polling_fetchindex: chrome must be :auto or :quiet, got $(repr(chrome))"))
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
@@ -1401,12 +1450,12 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
             track_job && !sync && _is_unresolved_handle(rv) &&
                 _track_job(rv, status, ip; label, req)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
-                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome)
+                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome, phase_overview)
         end
     catch err
         (keep_progress && !sync) || rethrow()
         _polling_wrap(_polling_inner_done(_caught_error_ex(err, error_obj, req),
-                                          _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true));
+                                          _kept_progress(HTMXObjects.getstatus(ip, keys...; kwargs...); open=true, phase_overview));
                       terminal=true)
     end
 end
@@ -1437,10 +1486,10 @@ _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 # incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto) =
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Bool=false) =
     istaskfailed(rv) ? throw(rv.result) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
-        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview) :
+        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview)
 
 # Report a hand-rolled poller's in-flight compute to HTMXObjects' job ledger
 # (`HTMXObjects.track_job!`), so it shows on the runtime dashboard and job
@@ -1490,11 +1539,11 @@ end
 # the client terminalizes the stable wrapper in place. With keep_progress
 # (default, but not on the sync loopback), the frozen tree is appended below
 # the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto)
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Bool=false)
     if _is_unresolved_handle(rv)
         return sync ?
-            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome) :
-            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome)
+            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview) :
+            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview)
     end
     # A READY handle must never reach render_result raw — resolve it here. This is
     # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
@@ -1502,11 +1551,11 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     # ready handle). A compatible ready handle is a legal completion race, so it
     # is normalized silently rather than diagnosed as package skew.
     if _is_handle(rv)
-        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome)
+        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview)
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
-        _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false)); terminal=true) :
+        _polling_wrap(_polling_inner_done(body, _kept_progress(status; open=false, phase_overview)); terminal=true) :
         _polling_wrap(_polling_inner_done(body); terminal=true)
 end
 
@@ -1517,9 +1566,9 @@ end
 # failed node visible). `treebar-frozen` makes the client ticker skip it, so a
 # terminal tree still holding a "running" node is static, not counting up.
 # Empty string when there is no status node.
-function _kept_progress(status; open::Bool=false)
+function _kept_progress(status; open::Bool=false, phase_overview::Bool=false)
     isnothing(status) && return ""
-    body = (h.summary("Progress"), htmx_render(status; scoped=true))
+    body = (h.summary("Progress"), htmx_render(status; scoped=true, phase_overview))
     open ? h.details(class="treebar-frozen", open=true)(body...) : h.details(class="treebar-frozen")(body...)
 end
 
@@ -1583,19 +1632,19 @@ end
 _label_restates_root(label, status) =
     !isnothing(label) && _status_root_description(status) == string(label)
 
-function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto)
+function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto, phase_overview::Bool=false)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
     inner_body = if isnothing(label)
-        htmx_render(status; article=true, scoped=false)
+        htmx_render(status; article=true, scoped=false, phase_overview)
     elseif _label_restates_root(label, status)
         # The badge and the root header already carry this string — an
         # interim "<label> — running..." header would restate it a third
         # time. Only the redundant header line goes: the article wrapper
         # stays, and a configured Stop control stays inside it.
-        h.article(stop_btn, htmx_render(status; scoped=false))
+        h.article(stop_btn, htmx_render(status; scoped=false, phase_overview))
     else
-        h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false))
+        h.article(h.header("$label — running...", stop_btn), htmx_render(status; scoped=false, phase_overview))
     end
     _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
                   pausable=true, badge=_poll_badge(label, status), chrome=chrome)
@@ -1769,8 +1818,8 @@ so the htmx ws-extension swaps by element id on the client.
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
-        id="treebar-progress", interval=0.1, force=false, kwargs...)
-    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node)))
+        id="treebar-progress", interval=0.1, force=false, phase_overview::Bool=false, kwargs...)
+    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task

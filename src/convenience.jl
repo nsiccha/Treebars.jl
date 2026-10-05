@@ -98,7 +98,7 @@ and clean up on exception.
 `descriptions` may be:
 
 - an iterable of description strings (e.g. `Vector{String}` or `Tuple`) —
-  `phases` is a `Vector{ProgressNode}` of the same length, in iteration order.
+  `phases` follows the iterable's `map` shape, with `ProgressNode` values.
 - a `NamedTuple` — `phases` is a `NamedTuple` with the same keys and
   `ProgressNode` values. The per-phase description is the NT value if it is
   an `AbstractString`, otherwise `string(key)` — so `NamedTuple`s whose values
@@ -133,7 +133,9 @@ end
 ```
 """
 function with_prepared_phases(f, parent, descriptions; kwargs...)
-    phases = map(d -> prepare_progress!(parent; description=string(d), kwargs...), descriptions)
+    labels = map(string, descriptions)
+    keys = Tuple(1:length(labels))
+    phases = _prepare_phase_nodes(parent, (:declared, Tuple(labels)), keys, labels; kwargs...)
     _run_prepared_phases(f, phases)
 end
 
@@ -142,9 +144,8 @@ _phase_desc(v::AbstractString, k) = v
 _phase_desc(_, k) = string(k)
 
 function with_prepared_phases(f, parent, labels::NamedTuple; kwargs...)
-    phases = map(keys(labels)) do k
-        prepare_progress!(parent; description=_phase_desc(labels[k], k), kwargs...)
-    end
+    descriptions = Tuple(_phase_desc(labels[k], k) for k in keys(labels))
+    phases = _prepare_phase_nodes(parent, (:named, keys(labels)), keys(labels), descriptions; kwargs...)
     _run_prepared_phases(f, NamedTuple{keys(labels)}(phases))
 end
 
@@ -888,12 +889,19 @@ end
 function _emit_phases(phases, ctx)
     labeled = [(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
     pending_syms = [gensym(:phase) for _ in labeled]
+    group_sym = gensym(:phase_group)
+    labels_sym = gensym(:phase_labels)
+    plan_identity = QuoteNode((:macro, gensym(:phase_plan)))
+    phase_keys = QuoteNode(Tuple(eachindex(labeled)))
+    labels_expr = Expr(:tuple, (lbl for (lbl, _) in labeled)...)
 
     prepare_stmts = Any[
-        :( $sym = $prepare_progress!(
-            $(ctx.progress); description=$lbl, transient=$(ctx.transient),
+        :( $labels_sym = $labels_expr ),
+        :( $group_sym = $_prepare_phase_group($(ctx.progress), $plan_identity, $phase_keys, $labels_sym) ),
+        (:( $sym = $_prepare_planned_phase(
+            $(ctx.progress), $group_sym, $i; description=$labels_sym[$i], transient=$(ctx.transient),
         ) )
-        for (sym, (lbl, _)) in zip(pending_syms, labeled)
+        for (i, sym) in enumerate(pending_syms))...,
     ]
 
     # Pre-first-marker (leading) statements run before any labeled phase is
