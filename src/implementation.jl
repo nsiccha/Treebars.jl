@@ -2,6 +2,21 @@ struct IncrementBy{di}
     IncrementBy(di) = new{di}()
 end
 
+# Prepared phase counts outlive transient phase nodes, without retaining them.
+# Only prepared-phase owners allocate a group; ordinary counters keep nothing.
+mutable struct _PhaseGroup
+    lock::ReentrantLock
+    keys::Tuple
+    labels::Vector{Union{Nothing,String}}
+    counts::Matrix{Int}
+    items::Int
+end
+
+struct _PhaseMembership
+    group::_PhaseGroup
+    index::Int
+end
+
 # `mutable` with all-`const` fields: the node is never reassigned, but a node's
 # IDENTITY is what every container keys on — `children` sets (`push!`/`pop!` on
 # attach/detach), the renderers' per-pass `IdSet` dedup, DO's repeat
@@ -308,10 +323,14 @@ mutable struct StateProgress
     # pre-enumerated and then bypassed.
     started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
     finalized_at::Union{DateTime,Nothing}
-    StateProgress(; description="Running...", N=nothing, pending=false) = new(
-        ReentrantLock(), description, N, 0, "",
-        !pending, false, pending ? nothing : now(), nothing
-    )
+    phase_groups::Union{Nothing,OrderedDict{Any,_PhaseGroup}}
+    phase_member::Union{Nothing,_PhaseMembership}
+    function StateProgress(; description="Running...", N=nothing, pending=false, _phase_member=nothing)
+        sp = new(ReentrantLock(), description, N, 0, "",
+            !pending, false, pending ? nothing : now(), nothing, nothing, _phase_member)
+        isnothing(_phase_member) || _record_phase_transition!(sp, 1)
+        sp
+    end
 end
 
 # A node is a *bare wrapper* when it would render as a pure structural level —
@@ -516,13 +535,13 @@ isrunning(node::ProgressNode) = true
 initialize_progress!(::Val{:state}; description="Running...", N=nothing, pending=false, kwargs...) = ProgressNode(
     StateProgress(; description, N, pending), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
-function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, kwargs...)
-    child = StateProgress(; description, N, pending)
+function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
+    child = StateProgress(; description, N, pending, _phase_member)
     child.message = value
     child
 end
-function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, kwargs...)
-    child = StateProgress(; description, pending)
+function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
+    child = StateProgress(; description, pending, _phase_member)
     child.message = value
     child
 end
@@ -530,10 +549,12 @@ end
 # Transition a pending node to running. Idempotent — no-op if already started.
 function start_progress!(sp::StateProgress)
     lock(sp.lock) do
+        previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         if isnothing(sp.started_at)
             sp.started_at = now()
             sp.running = true
         end
+        _record_phase_transition!(sp, previous)
     end
 end
 
@@ -560,19 +581,23 @@ update_progress!(sp::StateProgress, ::Nothing) = nothing
 
 function fail_progress!(sp::StateProgress, args...; kwargs...)
     lock(sp.lock) do
+        previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         sp.failed = true
         sp.running = false
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
+        _record_phase_transition!(sp, previous)
     end
 end
 function finalize_progress!(sp::StateProgress)
     lock(sp.lock) do
+        previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         sp.running = false
         t = now()
         isnothing(sp.started_at) && (sp.started_at = t)
         sp.finalized_at = t
+        _record_phase_transition!(sp, previous)
     end
 end
 # Terminate a pending node WITHOUT backfilling `started_at` — the one thing
@@ -581,10 +606,12 @@ end
 # node finalizes or fails, a terminal node stays as it is.
 function skip_progress!(sp::StateProgress)
     lock(sp.lock) do
+        previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.running = false
             sp.finalized_at = now()
         end
+        _record_phase_transition!(sp, previous)
     end
 end
 
