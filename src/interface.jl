@@ -153,7 +153,7 @@ end
 interrupt_requested(::Nothing) = false
 
 """
-    htmx_render(node; article=false, scoped=true, max_finished=nothing, kwargs...)
+    htmx_render(node; article=false, scoped=true, max_finished=nothing, phase_overview=false, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
 lives in the HTMXObjects package extension — loading `HTMXObjects` activates
@@ -171,6 +171,12 @@ Each node's header includes a `.treebar-duration` span; the
 [`htmx_treebar_script`](@ref) ticker advances running nodes locally between
 polls. Skipped nodes show no duration. `scoped` and `max_finished` are
 forwarded to `htmx_render_children` at every level (see there).
+
+`phase_overview=true` prepends per-plan lifecycle counts from
+[`phase_overview`](@ref), once above the tree. It does not elide individual
+nodes. The same opt-in is supported by `htmx_render_children`,
+`htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`, and
+`polling_fetchindex` (HTTP and WebSocket).
 """
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
@@ -349,7 +355,8 @@ htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_rend
 """
     htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
                       empty="No running jobs.", id="treebar-board",
-                      linger_ms=3000, expanded=false, live=poll_url !== nothing)
+                      linger_ms=3000, expanded=false, live=poll_url !== nothing,
+                      phase_overview=false)
 
 Render a keyed, changing collection of progress trees — a live "running jobs"
 board — as an HTMX `Node`. Implementation lives in the HTMXObjects package
@@ -402,6 +409,14 @@ the live board by it. For WebSocket push see [`ws_board`](@ref).
 
 Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
 page.
+
+`phase_overview=true` shows one overview across the listed entries' progress
+nodes. Shared nodes and duplicate entry keys count once; entries without a
+node contribute no phase counts. The overview follows the current server
+snapshot, while departing items may still linger visually. A history board
+must continue listing completed roots to include their counts. Item trees
+remain in their existing disclosures. `htmx_ws_render_board` and `ws_board`
+forward this opt-in.
 """
 function htmx_render_board end
 

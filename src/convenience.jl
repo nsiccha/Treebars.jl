@@ -98,7 +98,7 @@ and clean up on exception.
 `descriptions` may be:
 
 - an iterable of description strings (e.g. `Vector{String}` or `Tuple`) —
-  `phases` is a `Vector{ProgressNode}` of the same length, in iteration order.
+  `phases` follows the iterable's `map` shape, with `ProgressNode` values.
 - a `NamedTuple` — `phases` is a `NamedTuple` with the same keys and
   `ProgressNode` values. The per-phase description is the NT value if it is
   an `AbstractString`, otherwise `string(key)` — so `NamedTuple`s whose values
@@ -133,9 +133,9 @@ end
 ```
 """
 function with_prepared_phases(f, parent, descriptions; kwargs...)
-    labels = Tuple(string(d) for d in descriptions)
-    keys = Tuple(eachindex(labels))
-    phases = _prepare_phase_nodes(parent, (:declared, labels), keys, labels; kwargs...)
+    labels = map(string, descriptions)
+    keys = Tuple(1:length(labels))
+    phases = _prepare_phase_nodes(parent, (:declared, Tuple(labels)), keys, labels; kwargs...)
     _run_prepared_phases(f, phases)
 end
 

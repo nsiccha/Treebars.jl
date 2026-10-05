@@ -10,9 +10,12 @@ function _record_phase_transition!(sp::StateProgress, previous)
     current = _phase_state_index(sp)
     previous == current && return nothing
     group = member.group
-    lock(group.lock) do
-        group.counts[member.index, previous] -= 1
-        group.counts[member.index, current] += 1
+    while !isnothing(group)
+        lock(group.lock) do
+            group.counts[member.index, previous] -= 1
+            group.counts[member.index, current] += 1
+        end
+        group = group.ancestor
     end
     nothing
 end
@@ -26,27 +29,36 @@ function _prepare_phase_group(parent::ProgressNode{<:StateProgress}, identity, k
     while istransient(owner) && owner.parent isa ProgressNode{<:StateProgress}
         owner = owner.parent
     end
-    group = lock(owner.impl.lock) do
-        groups = owner.impl.phase_groups
+    ancestor = owner === parent ? nothing : _get_phase_group!(owner, identity, keys, labels)
+    group = _get_phase_group!(parent, identity, keys, labels; ancestor)
+    current = group
+    while !isnothing(current)
+        lock(current.lock) do
+            current.items += 1
+            for i in eachindex(keys)
+                current.counts[i, 1] += 1
+                # An item-specific label does not redefine phase identity.
+                current.labels[i] == string(labels[i]) || (current.labels[i] = nothing)
+            end
+        end
+        current = current.ancestor
+    end
+    group
+end
+
+function _get_phase_group!(node, identity, keys, labels; ancestor=nothing)
+    lock(node.impl.lock) do
+        groups = node.impl.phase_groups
         if isnothing(groups)
             groups = OrderedDict{Any,_PhaseGroup}()
-            owner.impl.phase_groups = groups
+            node.impl.phase_groups = groups
         end
         get!(groups, identity) do
-            _PhaseGroup(ReentrantLock(), keys,
-                Union{Nothing,String}[string(label) for label in labels],
+            _PhaseGroup(ReentrantLock(), ancestor, keys,
+                Union{Nothing,String}[string(label) for label in Tuple(labels)],
                 zeros(Int, length(keys), 5), 0)
         end
     end
-    lock(group.lock) do
-        group.items += 1
-        for i in eachindex(keys)
-            group.counts[i, 1] += 1
-            # An item-specific label does not redefine the phase's identity.
-            group.labels[i] == string(labels[i]) || (group.labels[i] = nothing)
-        end
-    end
-    group
 end
 
 _phase_membership(::Nothing, i) = nothing
@@ -58,8 +70,11 @@ _prepare_planned_phase(parent, group::_PhaseGroup, i; kwargs...) =
 
 function _prepare_phase_nodes(parent, identity, keys, labels; kwargs...)
     group = _prepare_phase_group(parent, identity, keys, labels)
-    [_prepare_planned_phase(parent, group, i; description=labels[i], kwargs...)
-        for i in eachindex(labels)]
+    index = Ref(0)
+    map(labels) do label
+        index[] += 1
+        _prepare_planned_phase(parent, group, index[]; description=label, kwargs...)
+    end
 end
 
 function _phase_group_records(node::ProgressNode{<:StateProgress})
@@ -70,30 +85,27 @@ function _phase_group_records(node::ProgressNode{<:StateProgress})
 end
 _phase_group_records(::ProgressNode) = Pair{Any,_PhaseGroup}[]
 
-function _collect_phase_groups!(output, seen_nodes, seen_groups, node::ProgressNode)
+function _collect_phase_groups!(records, seen_nodes, seen_groups, node::ProgressNode)
     _first_seen!(seen_nodes, node) || return
     for (identity, group) in _phase_group_records(node)
         group in seen_groups && continue
         push!(seen_groups, group)
-        lock(group.lock) do
-            if haskey(output, identity)
-                record = output[identity]
-                record.counts .+= group.counts
-                record.items[] += group.items
-                for i in eachindex(record.labels)
-                    record.labels[i] == group.labels[i] || (record.labels[i] = nothing)
-                end
-            else
-                output[identity] = (; keys=group.keys, labels=copy(group.labels),
-                    counts=copy(group.counts), items=Ref(group.items))
-            end
-        end
+        push!(records, identity => group)
     end
     for child in node.children
-        _collect_phase_groups!(output, seen_nodes, seen_groups, child)
+        _collect_phase_groups!(records, seen_nodes, seen_groups, child)
     end
 end
-_collect_phase_groups!(output, seen_nodes, seen_groups, ::Nothing) = nothing
+_collect_phase_groups!(records, seen_nodes, seen_groups, ::Nothing) = nothing
+
+function _phase_group_covered(group, seen_groups)
+    ancestor = group.ancestor
+    while !isnothing(ancestor)
+        ancestor in seen_groups && return true
+        ancestor = ancestor.ancestor
+    end
+    false
+end
 
 _phase_fallback_label(key::Symbol) = string(key)
 _phase_fallback_label(key::Integer) = "Phase $key"
@@ -120,10 +132,29 @@ produce an empty tuple. A collection of nodes can be passed for a job board.
 """
 function phase_overview(nodes)
     output = OrderedDict{Any,Any}()
+    records = Pair{Any,_PhaseGroup}[]
     seen_nodes = Base.IdSet{ProgressNode}()
     seen_groups = Base.IdSet{_PhaseGroup}()
     for node in _overview_roots(nodes)
-        _collect_phase_groups!(output, seen_nodes, seen_groups, node)
+        _collect_phase_groups!(records, seen_nodes, seen_groups, node)
+    end
+    # A surviving ancestor includes its transient descendants' totals. Discover
+    # all reachable groups first, so input/root order cannot double-count them.
+    for (identity, group) in records
+        _phase_group_covered(group, seen_groups) && continue
+        lock(group.lock) do
+            if haskey(output, identity)
+                record = output[identity]
+                record.counts .+= group.counts
+                record.items[] += group.items
+                for i in eachindex(record.labels)
+                    record.labels[i] == group.labels[i] || (record.labels[i] = nothing)
+                end
+            else
+                output[identity] = (; keys=group.keys, labels=copy(group.labels),
+                    counts=copy(group.counts), items=Ref(group.items))
+            end
+        end
     end
     Tuple((; items=record.items[], phases=Tuple(
         (; key=record.keys[i],

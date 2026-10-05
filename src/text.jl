@@ -89,7 +89,7 @@ function _print_text_tree(io::IO, node::ProgressNode)
 end
 
 """
-    render_text(node) -> String
+    render_text(node; phase_overview=false) -> String
 
 Render a progress tree as plain text — the node hierarchy with labels, phase
 nesting, counters, running messages and lifecycle state. Works on a finished
@@ -132,9 +132,26 @@ node.)
 
 Returns `"(no progress tree)"` for `nothing`, matching the no-op-on-`nothing`
 convention of the lifecycle functions.
+
+Set `phase_overview=true` to prepend the per-plan phase counts from
+[`phase_overview`](@ref). The ordinary tree follows in full.
 """
-render_text(node::ProgressNode) = sprint(_print_text_tree, node)
-render_text(::Nothing) = "(no progress tree)"
+function render_text(node::ProgressNode; phase_overview::Bool=false)
+    sprint() do io
+        if phase_overview
+            for (i, plan) in enumerate(Treebars.phase_overview(node))
+                println(io, "Phase plan $i · $(plan.items) prepared items")
+                for phase in plan.phases
+                    println(io, "  ", phase.label, ": ",
+                        join(("$(getproperty(phase, state)) $state" for state in
+                            (:pending, :running, :finished, :failed, :skipped)), " · "))
+                end
+            end
+        end
+        _print_text_tree(io, node)
+    end
+end
+render_text(::Nothing; phase_overview::Bool=false) = "(no progress tree)"
 
 Base.show(io::IO, ::MIME"text/plain", node::ProgressNode) = _print_text_tree(io, node)
 

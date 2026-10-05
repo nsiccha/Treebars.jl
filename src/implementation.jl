@@ -6,6 +6,7 @@ end
 # Only prepared-phase owners allocate a group; ordinary counters keep nothing.
 mutable struct _PhaseGroup
     lock::ReentrantLock
+    ancestor::Union{Nothing,_PhaseGroup}
     keys::Tuple
     labels::Vector{Union{Nothing,String}}
     counts::Matrix{Int}
