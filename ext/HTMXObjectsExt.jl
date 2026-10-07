@@ -75,6 +75,12 @@ function _duration_span(sp::StateProgress)
     end
 end
 
+# Where a live region says how old its shown state is: rendered empty and
+# hidden in the region's chrome (a poller's badge panel, a live board's
+# header, each WebSocket frame); `htmx_treebar_script` fills it once the
+# region goes stale or loses its connection (see "Freshness" there).
+_freshness_span() = h.span(class="treebar-freshness", hidden=true)()
+
 # Pending-interrupt marker for a node header (see `_shows_interrupt_request`):
 # the same text `render_text` prints, so the two renderers agree.
 _interrupt_span(node::ProgressNode) =
@@ -202,6 +208,26 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-badge-status { font-size: 0.8rem; flex: none; }
 .treebar-badge-bar { width: 6rem; margin: 0; flex: none; }
 .treebar-badge-elapsed { font-size: 0.8rem; color: var(--pico-muted-color, #888); flex: none; }
+/* Freshness (htmx_treebar_script): a live region whose shown state is old
+   says how old, in the `.treebar-freshness` text of its chrome. `stale`
+   stops the polling pulse; `lost` (updates have failed for seconds, not
+   one blip) also marks the strip and the text in the error color, dims the
+   live content, and opens a quiet badge's panel, so the notice is seen
+   without hovering. The text wraps like the badge label; nothing clips. */
+.treebar-freshness { font-size: 0.8rem; color: var(--pico-muted-color, #888); }
+.treebar-freshness[hidden] { display: none; }
+.treebar-poller[data-treebar-freshness] > .treebar-badge > .treebar-badge-strip { animation: none; }
+.treebar-poller[data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-strip {
+    background: var(--pico-del-color, #c62828); opacity: 0.9;
+}
+.treebar-poller[data-treebar-freshness="lost"] > .treebar-badge .treebar-freshness,
+.treebar-board[data-treebar-freshness="lost"] > .treebar-board-header > .treebar-freshness,
+[data-treebar-freshness="lost"] .treebar-ws-frame > .treebar-freshness { color: var(--pico-del-color, #c62828); }
+.treebar-poller[data-treebar-freshness="lost"] > .treebar-poller-inner,
+.treebar-board[data-treebar-freshness="lost"] > .treebar-board-list,
+[data-treebar-freshness="lost"] .treebar-ws-frame > :not(.treebar-freshness) { opacity: 0.55; }
+.treebar-poller[data-chrome="quiet"][data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-panel,
+.htmxo-live-reporter .treebar-poller[data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-panel { max-height: none; }
 .treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
 /* Message-bearing nodes now use the same treebar-node + treebar-header structure
    as container nodes, so treebar-label/treebar-value/treebar-description classes
@@ -258,6 +284,7 @@ htmx_treebar_styles() = h.style(Raw("""
    so UI state on it (data-show-* pill toggles above, data-open for the tree)
    survives updates exactly like the .treebar-poller wrapper does. */
 .treebar-board-header { display: flex; gap: 0.5rem; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 0.5rem; }
+.treebar-board-header > .treebar-freshness { flex: 1; }
 .treebar-board-count { font-size: 0.85em; color: var(--pico-muted-color, #888); }
 .treebar-phase-overview { margin-block: 0.75rem; }
 .treebar-phase-plan { overflow-x: auto; margin-block: 0.5rem; }
@@ -338,9 +365,10 @@ htmx_treebar_styles() = h.style(Raw("""
 # seeded once and kept current by a MutationObserver, so ticks and swaps cost
 # work proportional to the active nodes / changed fragment, never the document.
 # The same script owns poller Pause/terminalization, the keyed board
-# reconciler (`htmx_render_board`), and carrying viewer choices (overview
+# reconciler (`htmx_render_board`), carrying viewer choices (overview
 # disclosures, WebSocket-frame pill toggles) onto the markup each live update
-# swaps in.
+# swaps in, and each live region's freshness: how old its shown state is, and
+# whether its connection is lost.
 htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
@@ -396,6 +424,10 @@ htmx_treebar_script() = h.script(Raw("""
         // Same for a paused board (htmx_render_board): pause freezes it whole.
         var b = el.closest('.treebar-board');
         if (b && b.dataset.paused === '1') return;
+        // And for a region whose connection is lost (see freshness below):
+        // the server can no longer confirm the work is still running, so
+        // its clocks hold the last known state until an update arrives.
+        if (el.closest('[data-treebar-freshness="lost"]')) return;
         if (el._tbAnchor === undefined) anchor(el);
         var s = ' — ' + fmt(Date.now() - el._tbAnchor) + ' so far';
         // A determinate node also counts its ETA down (fmt clamps negatives to
@@ -415,7 +447,7 @@ htmx_treebar_script() = h.script(Raw("""
         var p = el.parentElement;
         if (!p || !p.classList.contains('treebar-poller')) return;
         p.classList.replace('treebar-poller', 'treebar-terminal');
-        ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped', 'showReused'].forEach(function(key){
+        ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped', 'showReused', 'treebarFreshness'].forEach(function(key){
             delete p.dataset[key];
         });
         var badge = p.querySelector(':scope > .treebar-badge');
@@ -462,6 +494,7 @@ htmx_treebar_script() = h.script(Raw("""
             var t = d ? d.textContent : '';
             if (el._tbLast !== t){ el.textContent = t; el._tbLast = t; }
         }
+        paintFreshness(p, Date.now());
     }
     // Incremental active-progress tracking: the ticker NEVER scans the
     // document. Two live sets — running duration spans and poller wrappers —
@@ -473,25 +506,190 @@ htmx_treebar_script() = h.script(Raw("""
     // 30s on a 16k-node page. Snag browser-progress-573fb052.)
     var liveRunning = new Set();
     var livePollers = new Set();
+    // Boards and WebSocket sources whose freshness is shown (a poller's is
+    // shown by its badge sync, so pollers stay in livePollers).
+    var liveRegions = new Set();
     var RUNNING_SEL = '.treebar-duration[data-treebar-status="running"]';
     var POLLER_SEL = '.treebar-poller';
+    // A live board renders a freshness span in its header; a WebSocket
+    // source is the [ws-connect] element its frames arrive in.
+    var BOARD_FRESH_SEL = '.treebar-board-header > .treebar-freshness';
+    var FRAME_SEL = '.treebar-ws-frame';
+    var SOCKET_SEL = '[ws-connect], [data-ws-connect]';
+    var TRACK_SEL = [RUNNING_SEL, POLLER_SEL, BOARD_FRESH_SEL, FRAME_SEL].join(', ');
     function trackRunning(el){
         if (el._tbAnchor === undefined) anchor(el);
         liveRunning.add(el);
     }
-    function collectRunning(root){
-        if (root.nodeType === 1 && root.matches(RUNNING_SEL)) trackRunning(root);
-        if (root.nodeType !== 1 && root.nodeType !== 9) return;
-        var q = root.querySelectorAll(RUNNING_SEL);
-        for (var i = 0; i < q.length; i++) trackRunning(q[i]);
+    function track(el){
+        if (el.matches(RUNNING_SEL)) trackRunning(el);
+        else if (el.matches(POLLER_SEL)) livePollers.add(el);
+        else {
+            var r = el.closest(el.matches(FRAME_SEL) ? SOCKET_SEL : '.treebar-board');
+            if (r) liveRegions.add(r);
+        }
     }
-    function collectPollers(root){
-        if (root.nodeType === 1 && root.matches(POLLER_SEL)) livePollers.add(root);
+    // One selector pass per inserted fragment, whatever it holds.
+    function collect(root){
+        if (root.nodeType === 1 && root.matches(TRACK_SEL)) track(root);
         if (root.nodeType !== 1 && root.nodeType !== 9) return;
-        var q = root.querySelectorAll(POLLER_SEL);
-        for (var j = 0; j < q.length; j++) livePollers.add(q[j]);
+        var q = root.querySelectorAll(TRACK_SEL);
+        for (var i = 0; i < q.length; i++) track(q[i]);
     }
-    function collect(root){ collectRunning(root); collectPollers(root); }
+    // --- Freshness ----------------------------------------------------------
+    // A live region shows the server's state as of its last update, so it
+    // says how old that state is. Each region keeps, on the client clock,
+    // when the server last confirmed it (_tbOkAt; first sight counts, as the
+    // server just rendered it) and since when its updates have been failing
+    // (_tbFailSince). Every tick turns those into data-treebar-freshness on
+    // the region and the text of the hidden .treebar-freshness span the
+    // server renders in its chrome:
+    //   absent  live: confirmed recently; the span stays hidden.
+    //   stale   nothing confirmed for STALE_MS or five poll intervals,
+    //           whichever is longer: a backgrounded tab that stopped
+    //           polling, a slow or hung server. "Updated 1m 4s ago".
+    //   lost    every attempt has failed for LOST_MS straight: a dead
+    //           server, a gateway 5xx, a dropped socket. "Connection lost ·
+    //           updated 1m 4s ago · retrying". A failure the next update
+    //           recovers from is a blip and shows nothing; once lost, a
+    //           region stays lost until an update succeeds.
+    // Failure never stops a region: htmx keeps its `every` timer, and the ws
+    // extension reconnects after an abnormal close, so the region heals by
+    // itself when the server returns. Regions: a .treebar-poller (the
+    // requests of its own .treebar-poller-inner), a live .treebar-board (its
+    // .treebar-board-poll requests, or the boards a WebSocket pushes), and a
+    // WebSocket source carrying .treebar-ws-frame frames.
+    var STALE_MS = 5000, LOST_MS = 5000;
+    function markOk(r){
+        r._tbOkAt = Date.now();
+        r._tbFailSince = 0;
+        r._tbSettled = false;
+    }
+    // `why` is empty when the server is unreachable (no response, or a
+    // gateway that cannot reach it) and names the status otherwise.
+    function markFail(r, why, retrying){
+        if (!r._tbFailSince) r._tbFailSince = Date.now();
+        r._tbFailWhy = why;
+        r._tbRetrying = retrying;
+        r._tbSettled = false;
+    }
+    // Five missed polls before an old state counts as stale; never sooner
+    // than STALE_MS. Same interval grammar as htmx's `every`.
+    function staleAfter(r){
+        if (r._tbStaleMs === undefined){
+            var el = r.querySelector(':scope > .treebar-poller-inner, :scope > .treebar-board-poll');
+            var m = el && /every\\s+(\\d+(?:\\.\\d+)?)(ms|s|m)?/.exec(el.getAttribute('hx-trigger') || '');
+            var ms = m ? parseFloat(m[1]) * (m[2] === 's' ? 1000 : m[2] === 'm' ? 60000 : 1) : 0;
+            r._tbStaleMs = Math.max(STALE_MS, 5 * ms);
+        }
+        return r._tbStaleMs;
+    }
+    function freshness(r, now){
+        if (r._tbOkAt === undefined) r._tbOkAt = now;
+        if (r._tbFailSince && now - r._tbFailSince >= LOST_MS) return 'lost';
+        if (r._tbSettled) return '';
+        return now - r._tbOkAt >= staleAfter(r) ? 'stale' : '';
+    }
+    function freshnessText(r, state, now){
+        if (!state) return '';
+        var ms = now - r._tbOkAt;
+        var age = 'updated ' + (ms < 60_000 ? Math.floor(ms / 1000) + 's' : fmt(ms)) + ' ago';
+        if (state === 'stale') return 'U' + age.slice(1);
+        return (r._tbFailWhy ? 'Updates failing (' + r._tbFailWhy + ')' : 'Connection lost') + ' · ' + age +
+            (r._tbRetrying && r.dataset.paused !== '1' ? ' · retrying' : '');
+    }
+    function freshnessSpans(r){
+        if (r.classList.contains('treebar-poller')) return r.querySelectorAll(':scope > .treebar-badge .treebar-freshness');
+        if (r.classList.contains('treebar-board')) return r.querySelectorAll(':scope > .treebar-board-header > .treebar-freshness');
+        return r.querySelectorAll('.treebar-ws-frame > .treebar-freshness');
+    }
+    function paintFreshness(r, now){
+        var state = freshness(r, now);
+        if ((r.dataset.treebarFreshness || '') !== state){
+            if (state) r.dataset.treebarFreshness = state; else delete r.dataset.treebarFreshness;
+        }
+        // Repaint only when the text changes (at most once a second while
+        // stale or lost, never while live). A frame or snapshot arriving
+        // later brings its own hidden span and confirms the region live, so
+        // no span can miss a change.
+        var text = freshnessText(r, state, now);
+        if (r._tbFreshText === text) return;
+        r._tbFreshText = text;
+        var spans = freshnessSpans(r);
+        for (var i = 0; i < spans.length; i++){ spans[i].textContent = text; spans[i].hidden = !text; }
+    }
+    function paintRegions(){
+        var now = Date.now();
+        liveRegions.forEach(function(r){
+            if (!r.isConnected){ liveRegions.delete(r); return; }
+            paintFreshness(r, now);
+        });
+    }
+    // The region a poll request belongs to. A poller's inner replaces itself
+    // before htmx fires afterRequest, so htmx re-fires the event on the
+    // nearest element still in the document — the poller wrapper.
+    function pollRegion(el){
+        if (!el || !el.classList) return null;
+        if (el.classList.contains('treebar-board-poll')) return el.closest('.treebar-board');
+        if (!el.classList.contains('treebar-poller-inner')) return null;
+        var p = el.parentElement;
+        return p && p.classList.contains('treebar-poller') ? p : null;
+    }
+    function requestRegion(d){
+        var req = d.requestConfig && d.requestConfig.elt;
+        var r = pollRegion(req);
+        if (r) return r;
+        return req && req.classList && req.classList.contains('treebar-poller-inner') &&
+            d.elt && d.elt.classList && d.elt.classList.contains('treebar-poller') ? d.elt : null;
+    }
+    // Failures arrive as their own events; an aborted request is neither.
+    document.addEventListener('htmx:afterRequest', function(evt){
+        var d = evt.detail || {};
+        if (d.successful !== true) return;
+        var r = requestRegion(d);
+        if (r) markOk(r);
+    });
+    function pollFailed(evt){
+        var d = evt.detail || {};
+        var r = requestRegion(d);
+        if (!r) return;
+        var s = evt.type === 'htmx:responseError' && d.xhr ? d.xhr.status : 0;
+        markFail(r, s === 0 || s === 502 || s === 503 || s === 504 ? '' : 'HTTP ' + s, true);
+    }
+    ['htmx:sendError', 'htmx:timeout', 'htmx:responseError'].forEach(function(name){
+        document.addEventListener(name, pollFailed);
+    });
+    // WebSocket sources (htmx ws extension). A frame message confirms its
+    // source; board messages are confirmed by the reconciler (they never
+    // reach wsAfterMessage). A close or error fails the source and every
+    // live board on it, except the server ending a stream normally after
+    // its last update: when nothing shown is still running there is nothing
+    // left to go stale.
+    function socketRegions(s){
+        var out = [];
+        if (s.querySelector(FRAME_SEL)){ liveRegions.add(s); out.push(s); }
+        var boards = s.querySelectorAll('.treebar-board');
+        for (var i = 0; i < boards.length; i++) if (liveRegions.has(boards[i])) out.push(boards[i]);
+        return out;
+    }
+    document.addEventListener('htmx:wsAfterMessage', function(evt){
+        if (evt.target.querySelector && evt.target.querySelector(FRAME_SEL)){
+            liveRegions.add(evt.target);
+            markOk(evt.target);
+        }
+    });
+    document.addEventListener('htmx:wsClose', function(evt){
+        var e = evt.detail && evt.detail.event, code = e ? e.code : 0;
+        // The codes the ws extension reconnects after.
+        var retrying = [1006, 1011, 1012, 1013].indexOf(code) >= 0;
+        socketRegions(evt.target).forEach(function(r){
+            if ((code === 1000 || code === 1005) && !r.querySelector(RUNNING_SEL)){ markOk(r); r._tbSettled = true; }
+            else markFail(r, '', retrying);
+        });
+    });
+    document.addEventListener('htmx:wsError', function(evt){
+        socketRegions(evt.target).forEach(function(r){ markFail(r, '', true); });
+    });
     // Lazy prune: removals and terminalizations drop out on the next tick.
     function runningAlive(el){
         if (!el.isConnected || el.dataset.treebarStatus !== 'running'){ liveRunning.delete(el); return false; }
@@ -519,6 +717,7 @@ htmx_treebar_script() = h.script(Raw("""
     function tickAll(){
         liveRunning.forEach(function(el){ if (runningAlive(el)) tick(el); });
         syncAllBadges();
+        paintRegions();
     }
     function reanchorAndTick(evt){
         terminalizePoller(evt);
@@ -731,7 +930,9 @@ htmx_treebar_script() = h.script(Raw("""
             var board = incoming.id && document.getElementById(incoming.id);
             if (!board || !board.classList.contains('treebar-board')) return;
             n += 1;
-            if (board.dataset.paused !== '1') reconcileBoard(board, incoming);
+            if (board.dataset.paused === '1') return;
+            reconcileBoard(board, incoming);
+            markOk(board);
         });
         return n;
     }
@@ -1131,9 +1332,12 @@ Client-side:
 # A WebSocket frame replaces its whole `<div id>` on every update. The frame is
 # its tree's pill scope — the tree renders unscoped below it, as under a
 # poller — and htmx_treebar_script copies a viewer's pill toggles from each
-# frame onto the next frame with the same id.
+# frame onto the next frame with the same id. Its leading freshness span is
+# where the script says the stream has gone stale or its socket is lost; the
+# last frame stays on screen when no more arrive.
 _ws_frame(node; id, phase_overview::Union{Bool,Symbol}=false) =
-    h.div(; id, class="treebar-ws-frame", _PILL_DEFAULTS...)(htmx_render(node; scoped=false, phase_overview))
+    h.div(; id, class="treebar-ws-frame", _PILL_DEFAULTS...)(
+        _freshness_span(), htmx_render(node; scoped=false, phase_overview))
 
 htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Union{Bool,Symbol}=false) =
     node_to_html(_ws_frame(node; id, phase_overview))
@@ -1392,6 +1596,7 @@ function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
           data_treebar_linger_ms=string(linger_ms))(
         h.div(class="treebar-board-header")(
             _board_count(unique_entries),
+            live ? _freshness_span() : "",
             live ? _board_pause_button() : "",
         ),
         Treebars._overview_enabled(phase_overview) ? _phase_overview_html(
@@ -1444,6 +1649,12 @@ unambiguous terminal fragment. While polling, the wrapper itself is
 untouched, so UX state on it (`data-show-finished` / `-failed` /
 `-pending` / `-skipped` / `-reused`, set by pill clicks, and `data-chrome`)
 persists across polls.
+
+The badge also says how current the tree is: after five intervals (at least
+5s) without an update it reads "Updated 1m 4s ago", and once every poll has
+failed for 5s straight (server down, gateway 5xx) it reads "Connection lost ·
+updated … · retrying", dims the tree and holds its clocks. Polling never
+stops on failure, and the first successful poll clears the notice.
 
 The inner's `hx-select` is top-level-only: each branch excludes matches
 nested inside another match, so a poll response containing a nested poller
@@ -1839,6 +2050,7 @@ function _poll_badge(label, status)
             (isnothing(label) || _label_restates_root(label, status)) ? "" :
                 h.span(class="treebar-badge-label")(string(label)),
             h.span(class="treebar-badge-status")("Polling"),
+            _freshness_span(),
             h.progress(class="treebar-badge-bar")(),
             # No badge elapsed when the root row renders its own duration
             # span (dedup, see above). The client mirror tolerates the

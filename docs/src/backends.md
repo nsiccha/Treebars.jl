@@ -70,7 +70,9 @@ htmx(...; extra_head=(htmx_treebar_styles(), htmx_treebar_script(), ...))
   `treebar-*` CSS classes.
 - [`htmx_treebar_script`](@ref) returns a `<script>` node with a client-side
   duration ticker that advances running nodes locally between server polls
-  (so the elapsed-time counter doesn't stutter).
+  (so the elapsed-time counter doesn't stutter). It also owns pausing,
+  board reconciliation and each live region's
+  [freshness](#freshness-how-current-the-live-view-is).
 
 ### Polling with cancel — `polling_fetchindex`
 
@@ -142,6 +144,33 @@ freezes it.
 For push instead of polling, [`ws_board`](@ref) sends the same full snapshots
 over a WebSocket (the htmx `ws` extension hands each frame to the same
 reconciler); other transports can call `window.treebarUpdateBoard(html)`.
+
+### Freshness: how current the live view is
+
+A live region shows the server's state as of its last update. When that
+state is old, the region says so, with no setup beyond the page assets:
+
+- **Stale.** No update has arrived for five poll intervals (at least 5s).
+  Common causes: a backgrounded tab stopped polling, or the server is slow.
+  The region reads "Updated 1m 4s ago" until the next update, and the
+  poller's strip stops pulsing.
+- **Connection lost.** Every update attempt has failed for 5s straight: the
+  server is down, a gateway answers 502/503/504, or the socket dropped. The
+  region reads "Connection lost · updated 1m 4s ago · retrying" ("Updates
+  failing (HTTP 404)" for other error statuses). The live tree dims, its
+  running clocks hold their last known values, the poller's strip turns the
+  error color, and a quiet poller opens its panel. A single failed poll that
+  the next one recovers from shows nothing.
+
+A lost region keeps retrying (polls keep their timer, and the htmx `ws`
+extension reconnects after an abnormal close). It stays marked lost until an
+update succeeds, then clears at once.
+
+The notice appears in the poller badge, in a live board's header, and at the
+top of each WebSocket frame ([`htmx_ws_progress`](@ref) /
+[`htmx_ws_render`](@ref)). Static renders carry none. A stream that ended
+normally after its last update, with nothing still running, is settled and
+never goes stale.
 
 ## HTTP / WebSocket (`ws_progress`)
 
