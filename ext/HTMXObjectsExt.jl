@@ -273,7 +273,7 @@ htmx_treebar_styles() = h.style(Raw("""
 @media (max-width: 600px) {
     .treebar-phase-plan table, .treebar-phase-plan caption, .treebar-phase-plan tbody { display: block; }
     .treebar-phase-plan thead { display: none; }
-    .treebar-phase-plan tr { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); margin-bottom: 0.5rem; }
+    .treebar-phase-plan tr { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 0.5rem; }
     .treebar-phase-plan th[scope="row"] { grid-column: 1 / -1; min-width: 0; }
     .treebar-phase-plan td { display: flex; flex-direction: column; align-items: flex-start; padding-inline: 0.25rem; }
     .treebar-phase-plan td::before { content: attr(data-phase-state); font-size: 0.7rem; text-transform: capitalize; overflow-wrap: anywhere; }
