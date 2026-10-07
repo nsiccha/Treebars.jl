@@ -399,8 +399,11 @@ function htmx_ws_progress end
     htmx_ws_render(node; id="treebar-progress")
 
 Default `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded.
-Wraps [`htmx_render`](@ref) in a `<div id=…>` so the HTMX ws extension swaps
-by element id.
+Wraps [`htmx_render`](@ref) in a `<div id=… class="treebar-ws-frame">` so the
+HTMX ws extension swaps by element id. The frame is the tree's pill scope,
+like a poller's wrapper: with [`htmx_treebar_script`](@ref) on the page, a
+viewer's pill toggles (and nested phase-plan disclosures) carry over to each
+next frame with the same `id`.
 """
 htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_render. Load HTMXObjects to enable HTML WebSocket rendering."
 

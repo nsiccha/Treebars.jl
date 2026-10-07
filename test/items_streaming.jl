@@ -59,6 +59,71 @@ end
     @test_throws ArgumentError htmx_ws_progress(initial; url="/feed", id="")
 end
 
+@testitem "WebSocket frames hold the pill state viewers toggle" tags=[:streaming] setup=[TreebarsTestImports] begin
+    let
+        html(x) = repr(MIME"text/html"(), x)
+        root = initialize_progress!(:state; description="Run")
+        finalize_progress!(initialize_progress!(root; description="loaded"))
+        initialize_progress!(root, 10; description="fitting")
+        frame() = htmx_ws_render(root; id="run-progress")
+        first_frame = frame()
+        # The frame root is the pill scope (with the poller's defaults); the
+        # tree below it is unscoped, so pill toggles act on the frame.
+        @test startswith(first_frame, "<div id=\"run-progress\" class=\"treebar-ws-frame\" data-show-finished=\"0\" " *
+            "data-show-pending=\"1\" data-show-failed=\"1\" data-show-skipped=\"0\" data-show-reused=\"0\">")
+        @test occursin("treebar-pill-finished", first_frame)
+        @test !occursin(r"class=\"treebar-children\" data-show", first_frame)
+        @test occursin("<div id=\"run-progress\" class=\"treebar-ws-frame\"",
+            html(htmx_ws_progress("Content"; url="/feed", id="run", progress=root)))
+        @test occursin(".treebar-ws-frame[data-show-finished=\"1\"]", html(htmx_treebar_styles()))
+
+        # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or
+        # chromium): a pill toggled on one frame still holds on the next,
+        # which replaces the whole frame as the htmx ws extension does.
+        if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+            @test_skip true
+        else
+            chrome = Sys.which("google-chrome")
+            isnothing(chrome) && (chrome = Sys.which("chromium"))
+            isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires Chrome")
+            finalize_progress!(initialize_progress!(root; description="checked"))
+            next_frame = frame()
+            literal(s) = "'" * replace(s, "\\"=>"\\\\", "'"=>"\\'", "\n"=>"\\n", "</"=>"<\\/") * "'"
+            driver = """
+            window.addEventListener('load', async function(){
+                var next = $(literal(next_frame));
+                var shown = function(){ return Array.prototype.map.call(document.querySelectorAll('.treebar-child-finished'),
+                    function(el){ return getComputedStyle(el).display === 'none' ? 0 : 1; }).join(''); };
+                var r = [shown()];
+                var old = document.getElementById('run-progress');
+                old.querySelector('.treebar-pill-finished').click();
+                r.push(shown());
+                old.outerHTML = next;
+                await new Promise(function(done){ setTimeout(done, 0); });
+                var now = document.getElementById('run-progress');
+                r.push(now !== old ? now.dataset.showFinished + now.dataset.showPending : 'same', shown());
+                var out = document.createElement('pre'); out.id = 'result';
+                out.textContent = r.join('|');
+                document.body.appendChild(out);
+            });
+            """
+            dir = mktempdir()
+            file = joinpath(dir, "frames.html")
+            write(file, "<!DOCTYPE html>" * html(h.html(
+                h.head(htmx_treebar_styles(), htmx_treebar_script()),
+                h.body(Raw(first_frame), h.script(Raw(driver))))))
+            profile = joinpath(dir, "profile")
+            dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+            result = match(r"<pre id=\"result\">([^<]*)</pre>", dom)
+            @test result !== nothing
+            # hidden, then shown on click, and still shown (toggle carried, the
+            # pending default intact) on a replacement frame with two finished.
+            @test result === nothing ? false : result.captures[1] == "0|1|11|11"
+        end
+        finalize_progress!(root)
+    end
+end
+
 @testitem "Streaming producer delivers every fragment and final progress" tags=[:streaming] setup=[TreebarsTestImports, StreamingFixtures] begin
     parent = initialize_progress!(:state; description="App")
     frames, outcome = StreamingFixtures.capture_stream() do ws

@@ -208,6 +208,7 @@ htmx_treebar_styles() = h.style(Raw("""
    are no longer emitted. */
 
 /* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
+   .treebar-board-item on a board, .treebar-ws-frame for WebSocket frames,
    .treebar-children for static one-shot renders). data-show-* values are "0" or
    "1" rather than "true"/"false" because Cobweb drops attrs whose value is the
    string "false".
@@ -223,16 +224,16 @@ htmx_treebar_styles() = h.style(Raw("""
    construction. Only scopes that actually carry the data-show-* attribute set
    the var, so a scopeless inner .treebar-children (scoped=false inside a
    poller) is transparent to inheritance: the poller's value passes through. */
-.treebar-poller[data-show-finished="0"], .treebar-board-item[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
-.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
-.treebar-poller[data-show-failed="0"], .treebar-board-item[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
-.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
-.treebar-poller[data-show-pending="0"], .treebar-board-item[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
-.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
-.treebar-poller[data-show-skipped="0"], .treebar-board-item[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
-.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
-.treebar-poller[data-show-reused="0"], .treebar-board-item[data-show-reused="0"], .treebar-children[data-show-reused="0"] { --tb-reused-display: none; }
-.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-display: block; }
+.treebar-poller[data-show-finished="0"], .treebar-board-item[data-show-finished="0"], .treebar-ws-frame[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
+.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-ws-frame[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
+.treebar-poller[data-show-failed="0"], .treebar-board-item[data-show-failed="0"], .treebar-ws-frame[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
+.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-ws-frame[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
+.treebar-poller[data-show-pending="0"], .treebar-board-item[data-show-pending="0"], .treebar-ws-frame[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
+.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-ws-frame[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
+.treebar-poller[data-show-skipped="0"], .treebar-board-item[data-show-skipped="0"], .treebar-ws-frame[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
+.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-ws-frame[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
+.treebar-poller[data-show-reused="0"], .treebar-board-item[data-show-reused="0"], .treebar-ws-frame[data-show-reused="0"], .treebar-children[data-show-reused="0"] { --tb-reused-display: none; }
+.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-ws-frame[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-display: block; }
 .treebar-child-finished { display: var(--tb-finished-display, block); }
 .treebar-child-failed { display: var(--tb-failed-display, block); }
 .treebar-child-pending { display: var(--tb-pending-display, block); }
@@ -241,11 +242,11 @@ htmx_treebar_styles() = h.style(Raw("""
 
 /* Active-pill highlight, same nearest-scope-wins inheritance so a nested
    poller's pills reflect that poller's own toggle, not an ancestor's. */
-.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
-.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
-.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
-.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
-.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-pill-border: currentColor; }
+.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-ws-frame[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
+.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-ws-frame[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
+.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-ws-frame[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
+.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-ws-frame[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
+.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-ws-frame[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-pill-border: currentColor; }
 .treebar-pill-finished { border-color: var(--tb-finished-pill-border, transparent); }
 .treebar-pill-failed { border-color: var(--tb-failed-pill-border, transparent); }
 .treebar-pill-pending { border-color: var(--tb-pending-pill-border, transparent); }
@@ -338,7 +339,8 @@ htmx_treebar_styles() = h.style(Raw("""
 # work proportional to the active nodes / changed fragment, never the document.
 # The same script owns poller Pause/terminalization, the keyed board
 # reconciler (`htmx_render_board`), and carrying viewer choices (overview
-# disclosures) onto the markup each live update swaps in.
+# disclosures, WebSocket-frame pill toggles) onto the markup each live update
+# swaps in.
 htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
@@ -540,10 +542,11 @@ htmx_treebar_script() = h.script(Raw("""
     // the old markup leaves in the same observer batch that brings its
     // replacement, so a choice the viewer made on the old markup is moved
     // onto the new one before it paints: a disclosure's open state, matched
-    // by data-treebar-disclosure in document order. Server defaults apply
-    // only to markup that replaces nothing. Costs work proportional to the
-    // changed fragments, like the live sets above.
-    var CARRY_SEL = 'details[data-treebar-disclosure]';
+    // by data-treebar-disclosure in document order, and a WebSocket frame's
+    // pill toggles (data-show-*), matched by the frame's id. Server defaults
+    // apply only to markup that replaces nothing. Costs work proportional to
+    // the changed fragments, like the live sets above.
+    var CARRY_SEL = 'details[data-treebar-disclosure], .treebar-ws-frame[id]';
     function eachCarried(root, fn){
         if (root.nodeType !== 1) return;
         if (root.matches(CARRY_SEL)) fn(root);
@@ -552,16 +555,24 @@ htmx_treebar_script() = h.script(Raw("""
     }
     function carryViewerState(removed, added){
         if (!removed.length || !added.length) return;
-        var open = {}, any = false;
+        var open = {}, frames = {}, any = false;
         removed.forEach(function(root){ eachCarried(root, function(el){
+            any = true;
+            if (el.tagName !== 'DETAILS'){ frames[el.id] = el; return; }
             var key = el.dataset.treebarDisclosure;
             (open[key] = open[key] || []).push(el.open);
-            any = true;
         }); });
         if (!any) return;
         added.forEach(function(root){
             if (!root.isConnected) return;
             eachCarried(root, function(el){
+                if (el.tagName !== 'DETAILS'){
+                    var from = frames[el.id];
+                    if (from) Object.keys(from.dataset).forEach(function(k){
+                        if (k.indexOf('show') === 0) el.dataset[k] = from.dataset[k];
+                    });
+                    return;
+                }
                 var was = open[el.dataset.treebarDisclosure];
                 if (was && was.length){ var o = was.shift(); if (el.open !== o) el.open = o; }
             });
@@ -928,14 +939,23 @@ end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
-# Pill onclick: prefer the persistent wrapper — a .treebar-poller, or a
-# .treebar-board-item on a board — so toggles survive across updates; fall back
-# to the closest .treebar-children for static one-shot renders (no wrapper in
-# scope). The two-step `closest` (rather than one comma selector over all three)
+# Initial pill visibility for every scope that holds pill state — a poller or
+# board-item wrapper, a WebSocket frame, a scoped static `.treebar-children`:
+# pending and failed children show; finished, skipped and reused children are
+# terminal history with nothing left to do about them, so they hide behind
+# their "N finished" / "N skipped" / "N reused" pills.
+const _PILL_DEFAULTS = (; data_show_finished="0", data_show_pending="1",
+    data_show_failed="1", data_show_skipped="0", data_show_reused="0")
+
+# Pill onclick: prefer the scope that outlives updates — a .treebar-poller, a
+# .treebar-board-item on a board, or a WebSocket frame (.treebar-ws-frame,
+# replaced each frame but carried onto the next by htmx_treebar_script) — so
+# toggles survive across updates; fall back to the closest .treebar-children
+# for static one-shot renders (no wrapper in scope). The two-step `closest` (rather than one comma selector over all three)
 # is intentional — `closest('.treebar-poller, .treebar-children')` returns
 # whichever is the closer ancestor, which is always .treebar-children. The two
 # wrappers share one selector: the nearer one governs its own subtree.
-_pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-item') || this.closest('.treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
+_pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-item, .treebar-ws-frame') || this.closest('.treebar-children'); if(!s) return; s.dataset.$(key) = s.dataset.$(key) === '1' ? '0' : '1';"""
 
 # Render just the children of a ProgressNode (for top-level substatus display).
 # When `scoped=true` (default) the wrapper carries data-show-* attrs so pills
@@ -1083,16 +1103,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
     # 36 ms / 403 MB splatted vs 9 µs as a Vector), so this matters on older pins
     # too. The same holds for every other potentially long child list here.
     if scoped
-        h.div(class="treebar-children",
-            data_show_finished="0",
-            data_show_pending="1",
-            data_show_failed="1",
-            # Hidden by default, like finished: both are terminal and there is
-            # nothing left to do about them. The "N skipped" pill is what says
-            # they exist, so a completed request shows only what actually ran.
-            data_show_skipped="0",
-            # Reused children are terminal history too; "N reused" counts them.
-            data_show_reused="0")(
+        h.div(; class="treebar-children", _PILL_DEFAULTS...)(
             isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
             rendered,
         )
@@ -1117,7 +1128,15 @@ Client-side:
 </div>
 ```
 """
-htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Union{Bool,Symbol}=false) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
+# A WebSocket frame replaces its whole `<div id>` on every update. The frame is
+# its tree's pill scope — the tree renders unscoped below it, as under a
+# poller — and htmx_treebar_script copies a viewer's pill toggles from each
+# frame onto the next frame with the same id.
+_ws_frame(node; id, phase_overview::Union{Bool,Symbol}=false) =
+    h.div(; id, class="treebar-ws-frame", _PILL_DEFAULTS...)(htmx_render(node; scoped=false, phase_overview))
+
+htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Union{Bool,Symbol}=false) =
+    node_to_html(_ws_frame(node; id, phase_overview))
 
 function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
         progress=nothing, description="Working...", N=nothing, collapsed::Bool=false, phase_overview::Union{Bool,Symbol}=false)
@@ -1128,7 +1147,7 @@ function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
         content,
         h.details(; id=id * "-disclosure", open=(collapsed ? nothing : true))(
             h.summary("Progress"),
-            h.div(; id=id * "-progress")(htmx_render(node; phase_overview))),
+            _ws_frame(node; id=id * "-progress", phase_overview)),
         h.div(; id=id * "-updates")(),
     )
 end
@@ -1318,15 +1337,11 @@ function _board_item(entry; expanded::Bool)
     label_node = isnothing(href) ?
         h.strong(class="treebar-board-label")(label) :
         h.a(class="treebar-board-label", href=string(href))(label)
-    h.div(class="treebar-board-item",
+    h.div(; class="treebar-board-item",
         data_treebar_key=string(entry.key),
         data_treebar_state=string(state),
         data_open=expanded ? "1" : "0",
-        data_show_finished="0",
-        data_show_pending="1",
-        data_show_failed="1",
-        data_show_skipped="0",
-        data_show_reused="0")(
+        _PILL_DEFAULTS...)(
         h.div(class="treebar-board-item-content")(
             h.div(class="treebar-board-item-header")(
                 label_node,
@@ -1846,14 +1861,10 @@ end
 _polling_wrap(inner; pausable=false, terminal=false, badge="", chrome=:auto) =
     terminal ?
         h.div(class="treebar-terminal")(inner) :
-        h.div(class="treebar-poller",
+        h.div(; class="treebar-poller",
             data_chrome=(chrome === :quiet ? "quiet" : nothing),
             data_paused="0",
-            data_show_finished="0",
-            data_show_pending="1",
-            data_show_failed="1",
-            data_show_skipped="0",
-            data_show_reused="0")(pausable ? badge : "", inner)
+            _PILL_DEFAULTS...)(pausable ? badge : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server
@@ -1938,7 +1949,7 @@ so the htmx ws-extension swaps by element id on the client.
 """
 function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
         id="treebar-progress", interval=0.1, force=false, phase_overview::Union{Bool,Symbol}=false, kwargs...)
-    progress_render(node) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
+    progress_render(node) = htmx_ws_render(node; id, phase_overview)
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status
         if rv isa Task
