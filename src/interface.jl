@@ -114,6 +114,45 @@ skip_progress!(::Nothing) = nothing
 skip_progress!(::Any) = nothing
 
 """
+    reuse_progress!(node)
+
+Terminate a **pending or running** progress node as *reused* — its result was
+already available (a cache hit, or output prepared by an earlier run), so the
+work it stands for was not done this time. Distinct from
+[`finalize_progress!`](@ref) ("ran and completed") and from
+[`skip_progress!`](@ref) ("never entered; its result does not exist").
+
+Call it on a prepared phase before entering it, or from inside the phase body
+once the hit is known:
+
+```julia
+with_prepared_phases(parent, (prepare="Prepare model", fit="Fit")) do phases
+    cached(:prepare) ? reuse_progress!(phases.prepare) :
+        with_prepared_progress(_ -> prepare_model(), phases.prepare)
+    with_prepared_progress(phases.fit) do phase
+        hit = lookup_fit()
+        isnothing(hit) || (reuse_progress!(phase); return hit)
+        fit_model()
+    end
+end
+```
+
+A phase reused before it was entered has no duration; one reused from inside
+its body keeps the time spent finding out. The enclosing wrapper's later
+finalize leaves a reused node unchanged, while an exception thrown after the
+reuse still fails it. Pending children of a reused node become reused too;
+running children are finalized. Idempotent, and a no-op on a node that already
+finished, failed, or was skipped.
+
+Renders as `↺` in [`render_text`](@ref), as `reused` with an "N reused" pill
+in the HTML renderer, and in its own `reused` column of
+[`phase_overview`](@ref). Backends without the state (Term.jl) finalize the
+node instead; `nothing` is a no-op.
+"""
+reuse_progress!(::Nothing) = nothing
+reuse_progress!(::Any) = nothing
+
+"""
     request_interrupt!(node) -> node
 
 Ask the work running under `node` to stop early. Sets `node`'s interrupt flag,
@@ -169,7 +208,8 @@ Rendering rules (for `ProgressNode{<:StateProgress}`):
 
 Each node's header includes a `.treebar-duration` span; the
 [`htmx_treebar_script`](@ref) ticker advances running nodes locally between
-polls. Skipped nodes show no duration. `scoped` and `max_finished` are
+polls. Skipped nodes, and reused nodes that were never entered, show no
+duration. `scoped` and `max_finished` are
 forwarded to `htmx_render_children` at every level (see there).
 
 `phase_overview=true` prepends per-plan lifecycle counts from
@@ -211,14 +251,16 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
     htmx_render_children(node; scoped=true, max_finished=nothing)
 
 Render the children of a `ProgressNode` as an HTML fragment, classifying them
-into pending / running / finished / skipped / failed groups and emitting toggle
-pills (`"N pending"`, `"N finished"`, `"N skipped"`, `"N failed"`) at the top.
+into pending / running / finished / reused / skipped / failed groups and
+emitting toggle pills (`"N pending"`, `"N finished"`, `"N reused"`,
+`"N skipped"`, `"N failed"`) at the top. Finished, reused and skipped children
+start hidden behind their pills.
 Implementation lives in the HTMXObjects package extension — loading
 `HTMXObjects` activates it.
 
 Every child is rendered by default (`max_finished=nothing`). As an opt-in,
 `max_finished=k` renders individually only the newest `k` finished children
-per container (likewise skipped). The older ones are replaced by one
+per container (likewise reused, and skipped). The older ones are replaced by one
 `.treebar-elided` line ("N earlier finished not shown") that shows and hides
 with that group's pill. Pills count every child either way. Pending, running
 and failed children are never elided. [`render_text`](@ref) never elides.
@@ -263,7 +305,8 @@ the badge status mirror (pause glyph, polling/paused word, determinate bar,
 elapsed — refreshed from the live tree after every swap and tick), pause
 handling, and terminalization of a completed poller's persistent wrapper from
 `.treebar-poller` to `.treebar-terminal`. Terminal nodes keep the
-server-rendered duration text and skipped nodes carry no duration.
+server-rendered duration text; skipped nodes and never-entered reused nodes
+carry no duration.
 It is also the keyed reconciler behind [`htmx_render_board`](@ref): board
 polls, WebSocket frames and `window.treebarUpdateBoard(html)` update items in
 place by key instead of replacing the board.

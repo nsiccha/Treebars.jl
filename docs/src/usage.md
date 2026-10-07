@@ -132,11 +132,39 @@ If anything throws inside the `f(phases)` body, the phase that is
 rethrows. Any phase that is still `is_pending` is terminated as skipped. The
 same cleanup applies to an early return from the body.
 
+### Reused phases
+
+A prepared phase whose result already exists — a cache hit, or output an
+earlier run prepared — did no work, yet was not bypassed either. Mark it with
+[`reuse_progress!`](@ref), before entering it or from inside its body once the
+hit is known:
+
+```julia
+with_prepared_phases(progress, (prepare="Prepare model", fit="Fit")) do phases
+    cached(:prepare) ? reuse_progress!(phases.prepare) :
+        with_prepared_progress(_ -> prepare_model(), phases.prepare)
+    with_prepared_progress(phases.fit) do phase
+        hit = lookup_fit()
+        isnothing(hit) || (reuse_progress!(phase); return hit)
+        fit_model()
+    end
+end
+```
+
+A reused phase is terminal and successful: [`is_reused`](@ref) is `true` and
+it is neither finished nor skipped. [`render_text`](@ref) marks it `↺`, the
+HTML renderer labels it `reused` behind an "N reused" pill, and
+[`phase_overview`](@ref) counts it in its own `reused` column. A phase reused
+before it was entered shows no duration. Skipped phases are unchanged: they
+still mean that control flow never reached the phase and its result does not
+exist.
+
 ## Batched phase overview
 
 Existing pre-enumerated phase code supports a rendering opt-in. Repeated
 instances of each plan are counted by phase and lifecycle state: pending,
-running, finished, failed, and skipped. The individual trees remain available.
+running, finished, reused, failed, and skipped. The individual trees remain
+available.
 
 ```@example batch_overview
 using Treebars
@@ -159,8 +187,8 @@ and `ws_board` forward it. Defaults retain the ordinary tree view.
 
 [`phase_overview`](@ref) returns an immutable snapshot for inspection: a tuple
 of plans, each with `items` and `phases`; each phase has `key`, `label`, and
-the five lifecycle counts. Counts include completed transient phases after
-their nodes detach. Each phase's five counts sum to that plan's prepared item
+the six lifecycle counts. Counts include completed transient phases after
+their nodes detach. Each phase's six counts sum to that plan's prepared item
 count. Items that have not instantiated their phase plan yet are not counted.
 
 Different macro phase blocks stay separate. NamedTuple plans match by their

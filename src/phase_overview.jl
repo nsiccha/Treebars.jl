@@ -1,8 +1,11 @@
 # The lifecycle representation remains authoritative. Group counters are a
 # projection updated under the phase's lock, then the group's lock. Snapshot
 # readers never acquire a phase lock while holding a group lock.
+# Column order is storage only (renderers list states explicitly): 1 pending,
+# 2 running, 3 finished, 4 failed, 5 skipped, 6 reused.
 _phase_state_index(sp::StateProgress) =
-    is_pending(sp) ? 1 : is_running(sp) ? 2 : is_failed(sp) ? 4 : is_skipped(sp) ? 5 : 3
+    is_pending(sp) ? 1 : is_running(sp) ? 2 : is_failed(sp) ? 4 :
+    is_skipped(sp) ? 5 : is_reused(sp) ? 6 : 3
 
 function _record_phase_transition!(sp::StateProgress, previous)
     member = sp.phase_member
@@ -56,7 +59,7 @@ function _get_phase_group!(node, identity, keys, labels; ancestor=nothing)
         get!(groups, identity) do
             _PhaseGroup(ReentrantLock(), ancestor, keys,
                 Union{Nothing,String}[string(label) for label in Tuple(labels)],
-                zeros(Int, length(keys), 5), 0)
+                zeros(Int, length(keys), 6), 0)
         end
     end
 end
@@ -115,7 +118,7 @@ _phase_fallback_label(key::Integer) = "Phase $key"
 
 Snapshot counts for repeated, pre-enumerated phase plans below `node`.
 Each record has `items` and a tuple of `phases`; each phase has `key`, `label`,
-and `pending`, `running`, `finished`, `failed`, `skipped` counts.
+and `pending`, `running`, `finished`, `failed`, `skipped`, `reused` counts.
 
 `@progress` phase markers, `@phases`, and `with_prepared_phases` retain their
 plan automatically. Different macro phase blocks stay separate. NamedTuple
@@ -127,7 +130,7 @@ Counts include completed transient phases even after those nodes detach.
 Only instantiated plans are counted: items which have not yet prepared their
 phases are not invented. Snapshots deduplicate shared trees and are immutable;
 each plan is read under its lock, rather than freezing the whole workload.
-The `:state` backend records all five lifecycle states; disabled/other backends
+The `:state` backend records all six lifecycle states; disabled/other backends
 produce an empty tuple. A collection of nodes can be passed for a job board.
 """
 function phase_overview(nodes)
@@ -161,7 +164,7 @@ function phase_overview(nodes)
            label=something(record.labels[i], _phase_fallback_label(record.keys[i])),
            pending=record.counts[i, 1], running=record.counts[i, 2],
            finished=record.counts[i, 3], failed=record.counts[i, 4],
-           skipped=record.counts[i, 5])
+           skipped=record.counts[i, 5], reused=record.counts[i, 6])
         for i in eachindex(record.keys))) for record in values(output))
 end
 _overview_roots(node::ProgressNode) = (node,)

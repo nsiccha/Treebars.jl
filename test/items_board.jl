@@ -92,7 +92,7 @@ end
     # UI state lives on the wrapper, like `.treebar-poller`: pill toggles and
     # the tree's expansion. The content the client swaps is a separate child.
     a = _board_item_html(html, "a")
-    @test occursin("<div class=\"treebar-board-item\" data-treebar-key=\"a\" data-treebar-state=\"running\" data-open=\"0\" data-show-finished=\"0\" data-show-pending=\"1\" data-show-failed=\"1\" data-show-skipped=\"0\"><div class=\"treebar-board-item-content\">", html)
+    @test occursin("<div class=\"treebar-board-item\" data-treebar-key=\"a\" data-treebar-state=\"running\" data-open=\"0\" data-show-finished=\"0\" data-show-pending=\"1\" data-show-failed=\"1\" data-show-skipped=\"0\" data-show-reused=\"0\"><div class=\"treebar-board-item-content\">", html)
     @test count("treebar-board-item-content", html) == 4
     # The tree renders unscoped (the wrapper governs the pills) in a collapsed
     # <details> under the header.

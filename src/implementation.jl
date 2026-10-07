@@ -292,10 +292,12 @@ Lifecycle fields:
 - `finalized_at` — `nothing` while the node is running, set to `now()` by
   [`finalize_progress!`](@ref) or [`fail_progress!`](@ref).
 - `failed` — `true` after [`fail_progress!`](@ref).
+- `reused` — `true` after [`reuse_progress!`](@ref).
 
 Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
-[`is_finished`](@ref), [`is_failed`](@ref), [`is_skipped`](@ref),
-[`duration`](@ref). The five are mutually exclusive and exhaustive.
+[`is_finished`](@ref), [`is_reused`](@ref), [`is_failed`](@ref),
+[`is_skipped`](@ref), [`duration`](@ref). The six are mutually exclusive and
+exhaustive.
 """
 mutable struct StateProgress
     lock::ReentrantLock
@@ -305,30 +307,36 @@ mutable struct StateProgress
     message::String
     running::Bool
     failed::Bool
-    # The two timestamps encode all five lifecycle states; there is no separate
-    # state field, because every distinction is already a function of these
-    # three (`failed` exists only because "finished" vs "failed" is NOT derivable
-    # from timestamps — "skipped" is):
+    reused::Bool
+    # The two timestamps plus two Bools encode all six lifecycle states; there
+    # is no separate state field. `failed` and `reused` exist only because
+    # "finished" vs "failed" vs "reused" is NOT derivable from timestamps —
+    # "skipped" is:
     #
-    #   started_at   finalized_at   failed  →  state
-    #   ───────────  ─────────────  ──────     ───────
-    #   nothing      nothing        false      pending    (enumerated, not yet run)
-    #   set          nothing        false      running
-    #   set          set            false      finished   (ran, completed)
-    #   set          set            true       failed     (ran, threw)
-    #   nothing      set            false      SKIPPED    (never ran, never will)
+    #   started_at   finalized_at   failed  reused  →  state
+    #   ───────────  ─────────────  ──────  ──────     ───────
+    #   nothing      nothing        false   false      pending    (enumerated, not yet run)
+    #   set          nothing        false   false      running
+    #   set          set            false   false      finished   (ran, completed)
+    #   any          set            true    any        failed     (ran, threw)
+    #   nothing      set            false   false      SKIPPED    (never ran, never will)
+    #   any          set            false   true       REUSED     (result already available)
     #
     # The skipped row is why `finalize_progress!`/`fail_progress!` backfill
     # `started_at` and `skip_progress!` deliberately does NOT: "terminal but
     # never started" is exactly the combination that says the phase was
-    # pre-enumerated and then bypassed.
-    started_at::Union{DateTime,Nothing}  # nothing = never started (pending or skipped)
+    # pre-enumerated and then bypassed. `reuse_progress!` does not backfill it
+    # either: a phase reused before it was entered did no work and has no
+    # duration, while one reused after entering keeps the time spent finding
+    # out. A failure outranks reuse — an exception thrown after the reuse is
+    # still the error that phase must show.
+    started_at::Union{DateTime,Nothing}  # nothing = never started (pending, skipped, or reused unentered)
     finalized_at::Union{DateTime,Nothing}
     phase_groups::Union{Nothing,OrderedDict{Any,_PhaseGroup}}
     phase_member::Union{Nothing,_PhaseMembership}
     function StateProgress(; description="Running...", N=nothing, pending=false, _phase_member=nothing)
         sp = new(ReentrantLock(), description, N, 0, "",
-            !pending, false, pending ? nothing : now(), nothing, nothing, _phase_member)
+            !pending, false, false, pending ? nothing : now(), nothing, nothing, _phase_member)
         isnothing(_phase_member) || _record_phase_transition!(sp, 1)
         sp
     end
@@ -425,13 +433,14 @@ is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized
 
 `true` when a progress node **ran** and was finalized successfully (via
 [`finalize_progress!`](@ref)). A node that never started is
-[`is_skipped`](@ref), not finished.
+[`is_skipped`](@ref), not finished, and a node whose result was reused is
+[`is_reused`](@ref).
 
 For backends without lifecycle timestamps, `true` when the node is neither
 running nor failed — see `isrunning`.
 """
 is_finished(s::StateProgress) =
-    !isnothing(s.finalized_at) && !isnothing(s.started_at) && !s.failed
+    !isnothing(s.finalized_at) && !isnothing(s.started_at) && !s.failed && !s.reused
 
 """
     is_failed(s)
@@ -459,15 +468,30 @@ and no started timestamp. `false` for backends without the concept and for
 `nothing`, so a `Term`/disabled backend is unaffected.
 """
 is_skipped(s::StateProgress) =
-    isnothing(s.started_at) && !isnothing(s.finalized_at) && !s.failed
+    isnothing(s.started_at) && !isnothing(s.finalized_at) && !s.failed && !s.reused
+
+"""
+    is_reused(s)
+
+`true` when a progress node's result was **already available**, so the work it
+stands for was not done — a cache hit, or output prepared by an earlier run.
+Set by [`reuse_progress!`](@ref).
+
+Distinct from [`is_finished`](@ref) ("ran and completed") and from
+[`is_skipped`](@ref) ("never entered, and its result does not exist"): a reused
+phase is a success whose output exists. It has a duration only when it was
+entered before being marked reused. `false` for backends without the concept
+(Term.jl, where [`reuse_progress!`](@ref) finalizes instead) and for `nothing`.
+"""
+is_reused(s::StateProgress) = !isnothing(s.finalized_at) && s.reused && !s.failed
 
 """
     duration(s)
 
 Elapsed wall-clock time for a progress node as a `Dates.Period`. Returns
-`Millisecond(0)` for pending or skipped nodes; for running nodes counts up to
-`now()`; for finished/failed nodes returns the frozen
-`finalized_at - started_at`.
+`Millisecond(0)` for pending, skipped, or never-entered reused nodes; for
+running nodes counts up to `now()`; for finished/failed nodes, and reused nodes
+that were entered, returns the frozen `finalized_at - started_at`.
 """
 function duration(s::StateProgress)
     isnothing(s.started_at) && return Millisecond(0)
@@ -500,6 +524,7 @@ is_running(node::ProgressNode{<:StateProgress}) = is_running(node.impl)
 is_finished(node::ProgressNode{<:StateProgress}) = is_finished(node.impl)
 is_failed(node::ProgressNode{<:StateProgress}) = is_failed(node.impl)
 is_skipped(node::ProgressNode{<:StateProgress}) = is_skipped(node.impl)
+is_reused(node::ProgressNode{<:StateProgress}) = is_reused(node.impl)
 duration(node::ProgressNode{<:StateProgress}) = duration(node.impl)
 eta(node::ProgressNode{<:StateProgress}) = eta(node.impl)
 
@@ -522,6 +547,8 @@ is_failed(::Nothing) = false
 # exactly as it did before this state existed.
 is_skipped(::Any) = false
 is_skipped(::Nothing) = false
+is_reused(::Any) = false
+is_reused(::Nothing) = false
 # No ETA concept for backends without a counter, or for a nil node.
 eta(::Any) = nothing
 eta(::Nothing) = nothing
@@ -548,10 +575,13 @@ function initialize_progress!(sp::StateProgress; description="Running...", trans
 end
 
 # Transition a pending node to running. Idempotent — no-op if already started.
+# A terminal node is never restarted: a skipped or unentered reused node has no
+# `started_at` either, and backfilling one would invent a duration (and a
+# negative one, since `finalized_at` is earlier).
 function start_progress!(sp::StateProgress)
     lock(sp.lock) do
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
-        if isnothing(sp.started_at)
+        if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.started_at = now()
             sp.running = true
         end
@@ -593,6 +623,11 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
 end
 function finalize_progress!(sp::StateProgress)
     lock(sp.lock) do
+        # A reused node is already terminal. Wrappers (`with_prepared_progress`,
+        # the next phase marker) finalize the phase they entered after its body
+        # called `reuse_progress!`; that must neither move `finalized_at` nor
+        # backfill `started_at`.
+        is_reused(sp) && return nothing
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         sp.running = false
         t = now()
@@ -615,6 +650,47 @@ function skip_progress!(sp::StateProgress)
         _record_phase_transition!(sp, previous)
     end
 end
+# Terminate a pending or running node as reused. `started_at` is left as it is:
+# unset for a phase reused before it was entered (no work, no duration), set for
+# one reused from inside its body. Guarded on non-terminal, so it is idempotent
+# and never relabels a node that already finished, failed, or was skipped.
+function reuse_progress!(sp::StateProgress)
+    lock(sp.lock) do
+        previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
+        if isnothing(sp.finalized_at)
+            sp.running = false
+            sp.reused = true
+            sp.finalized_at = now()
+        end
+        _record_phase_transition!(sp, previous)
+    end
+end
+
+# Backends without a reused state (Term.jl) degrade to their closest terminal
+# success, exactly as they already degrade pending and failed display.
+reuse_progress!(node::ProgressNode) = finalize_progress!(node)
+
+function reuse_progress!(node::ProgressNode{<:StateProgress})
+    reuse_progress!(node.impl)
+    # Already finished, failed, or skipped: a terminal node stays as it was.
+    is_reused(node) || return nothing
+    for child in node.children
+        if isrunning(child)
+            # It ran; reusing its parent's result does not erase that.
+            finalize_progress!(child)
+        elseif is_pending(child)
+            # Its parent's result already exists, so its output does too.
+            reuse_progress!(child)
+        end
+    end
+    propagates_finalization(node) && !isnothing(node.parent) && isrunning(node.parent) && finalize_progress!(node.parent)
+    # Detach transients like finalize_progress!: a reused node is a success with
+    # no error to come back to.
+    if istransient(node) && !isnothing(node.parent)
+        pop!(node.parent.children, node, nothing)
+    end
+    nothing
+end
 
 # JSON-serializable snapshot (non-exported — prefer working with ProgressNode directly)
 function progress_state(sp::StateProgress)
@@ -630,6 +706,9 @@ function progress_state(sp::StateProgress)
             # `running` nor `failed` distinguishes it from a pending one —
             # a JSON consumer needs this key to tell them apart.
             "skipped" => is_skipped(sp),
+            # A reused phase is terminal and not failed, like a finished or
+            # skipped one; only this key says its result came from elsewhere.
+            "reused" => is_reused(sp),
             "started_at" => isnothing(sp.started_at) ? nothing : string(sp.started_at),
             "finalized_at" => isnothing(sp.finalized_at) ? nothing : string(sp.finalized_at),
         )

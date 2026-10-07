@@ -1517,6 +1517,170 @@ end
     end # let (restores @testset hard scope)
 end
 
+@testitem "reuse_progress! — the already-available terminal state" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
+    # A cache hit did no work yet was not bypassed: neither finished nor
+    # skipped. These assert `reused` stays MUTUALLY EXCLUSIVE with the other
+    # five states, reused before entry or from inside a running phase.
+    root = initialize_progress!(:state; description="Root")
+    p = prepare_progress!(root; description="cached")
+    reuse_progress!(p)
+    @test is_reused(p)
+    @test !is_pending(p) && !is_running(p) && !is_finished(p) && !is_failed(p) && !is_skipped(p)
+    @test p.impl.started_at === nothing        # reused before entry: no work, no duration
+    @test p.impl.finalized_at !== nothing
+    @test duration(p) == Dates.Millisecond(0)
+
+    # Idempotent; and the wrappers' later finalize/start leave it untouched —
+    # no moved `finalized_at`, no backfilled (negative) duration.
+    was = p.impl.finalized_at
+    reuse_progress!(p); finalize_progress!(p); start_progress!(p)
+    @test is_reused(p) && p.impl.finalized_at == was && p.impl.started_at === nothing
+
+    # Reused from inside its body: keeps the time spent finding out.
+    entered = prepare_progress!(root; description="entered")
+    start_progress!(entered)
+    sleep(0.01)
+    reuse_progress!(entered)
+    @test is_reused(entered) && !is_finished(entered)
+    @test entered.impl.started_at !== nothing && duration(entered) > Dates.Millisecond(0)
+
+    # Never relabels a node that already finished, failed, or was skipped.
+    ran = prepare_progress!(root; description="ran")
+    start_progress!(ran); finalize_progress!(ran); reuse_progress!(ran)
+    @test is_finished(ran) && !is_reused(ran)
+    broke = prepare_progress!(root; description="broke")
+    start_progress!(broke); fail_progress!(broke); reuse_progress!(broke)
+    @test is_failed(broke) && !is_reused(broke)
+    gone = prepare_progress!(root; description="gone")
+    skip_progress!(gone); reuse_progress!(gone)
+    @test is_skipped(gone) && !is_reused(gone)
+
+    # An exception after the reuse is still that phase's error.
+    late = prepare_progress!(root; description="late")
+    reuse_progress!(late); fail_progress!(late)
+    @test is_failed(late) && !is_reused(late)
+
+    # Pending children inherit the reuse; running children ran, so they finish.
+    outer = initialize_progress!(root; description="outer")
+    sub_pending = prepare_progress!(outer; description="sub pending")
+    sub_running = initialize_progress!(outer; description="sub running")
+    reuse_progress!(outer)
+    @test is_reused(outer) && is_reused(sub_pending) && is_finished(sub_running)
+
+    # Transients detach like a finalized node; persistent nodes stay attached.
+    t = prepare_progress!(root; description="transient", transient=true)
+    reuse_progress!(t)
+    @test is_reused(t) && !(t in root.children)
+    @test p in root.children
+
+    # JSON snapshot carries the distinguishing key.
+    @test Treebars.progress_state(p)["reused"] === true
+    @test Treebars.progress_state(ran)["reused"] === false
+
+    @test reuse_progress!(nothing) === nothing
+    @test is_reused(nothing) === false
+    finalize_progress!(root)
+    @test is_reused(p) && is_reused(entered)   # a parent's finalize keeps them
+    end # let (restores @testset hard scope)
+end
+
+@testitem "reuse_progress! inside the prepared-phase wrappers and phase markers" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+    hit = with_prepared_phases(root, (prepare="Prepare", fit="Fit", plot="Plot")) do phases
+        reuse_progress!(phases.prepare)                  # known before entry
+        v = with_prepared_progress(phases.fit) do phase  # discovered inside
+            reuse_progress!(phase)
+            :cached_fit
+        end
+        v                                                # `plot` is never entered
+    end
+    @test hit === :cached_fit
+    prepare, fit, plot = collect(root.children)
+    @test is_reused(prepare) && prepare.impl.started_at === nothing
+    @test is_reused(fit) && fit.impl.started_at !== nothing   # wrapper finalize kept it
+    @test is_skipped(plot)                               # skip semantics unchanged
+    @test only(phase_overview(root)).phases == (
+        (; key=:prepare, label="Prepare", pending=0, running=0, finished=0, failed=0, skipped=0, reused=1),
+        (; key=:fit, label="Fit", pending=0, running=0, finished=0, failed=0, skipped=0, reused=1),
+        (; key=:plot, label="Plot", pending=0, running=0, finished=0, failed=0, skipped=1, reused=0))
+
+    # A throw after the reuse still fails the phase it was thrown from.
+    err_root = initialize_progress!(:state; description="Err")
+    @test_throws ErrorException with_prepared_phases(err_root, ["Load"]) do phases
+        with_prepared_progress(only(phases)) do phase
+            reuse_progress!(phase)
+            error("after reuse")
+        end
+    end
+    @test is_failed(only(collect(err_root.children)))
+
+    # Macro phase markers: the next marker's finalize leaves the reuse in place.
+    macro_root = initialize_progress!(:state; description="Macro")
+    @progress macro_root begin
+        @progress "Cached"
+        reuse_progress!(__progress__)
+        @progress "Computed"
+        sum(1:3)
+    end
+    cached, computed = collect(macro_root.children)
+    @test is_reused(cached)          # the "Computed" marker's finalize kept it
+    # The last phase stays running until its parent finalizes (no trailing
+    # finalize in `_emit_phases`, pinned by the early-return item above).
+    finalize_progress!(macro_root)
+    @test is_reused(cached) && is_finished(computed)
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "render_text + htmx_render classify reused distinctly" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+    done = prepare_progress!(root; description="ranphase")
+    start_progress!(done); finalize_progress!(done)
+    cached = prepare_progress!(root; description="cachedphase")
+    update_progress!(cached, "from an earlier stage")
+    reuse_progress!(cached)
+    entered = prepare_progress!(root; description="enteredphase")
+    start_progress!(entered); reuse_progress!(entered)
+
+    lines = split(render_text(root), "\n")
+    cached_line = only(filter(l -> occursin("cachedphase", l), lines))
+    @test startswith(lstrip(cached_line, ['├', '└', '─', ' ']), "↺")
+    @test !occursin("✓", cached_line) && !occursin("⊘", cached_line)
+    @test occursin("— from an earlier stage", cached_line)
+    @test !occursin("[", cached_line)        # never entered: no 0s duration
+    @test occursin("↺", only(filter(l -> occursin("enteredphase", l), lines)))
+    @test occursin("[", only(filter(l -> occursin("enteredphase", l), lines)))
+    @test occursin("✓", only(filter(l -> occursin("ranphase", l), lines)))
+
+    html = sprint(io -> show(io, MIME"text/html"(), htmx_render(root)))
+    @test occursin("treebar-child-reused", html)
+    @test occursin("treebar-node treebar-reused", html)
+    @test occursin("2 reused", html) && occursin("1 finished", html)
+    @test occursin("data-treebar-status=\"reused\"", html)
+    @test occursin("— reused<", html)         # unentered: a label, not 0s
+    @test occursin("— reused (", html)        # entered: keeps its duration
+    @test occursin("data-show-reused=\"0\"", html)   # terminal history starts hidden
+    @test !occursin("treebar-child-failed", html) && !occursin("treebar-child-skipped", html)
+
+    # Opt-in elision treats reused as its own terminal group.
+    many = initialize_progress!(:state; description="Many")
+    for i in 1:4
+        reuse_progress!(prepare_progress!(many; description="r$i"))
+    end
+    out = sprint(io -> show(io, MIME"text/html"(), htmx_render(many; max_finished=1)))
+    @test occursin("4 reused", out)
+    @test occursin("3 earlier reused not shown", out)
+    @test occursin("treebar-child-reused treebar-elided", out)
+
+    styles = sprint(io -> show(io, MIME"text/html"(), htmx_treebar_styles()))
+    @test occursin(".treebar-child-reused", styles) && occursin("data-show-reused", styles)
+    finalize_progress!(root); finalize_progress!(many)
+    end # let (restores @testset hard scope)
+end
+
 @testitem "IterableProgress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
     let
     root = initialize_progress!(:state; description="Root")

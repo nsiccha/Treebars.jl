@@ -8,7 +8,7 @@ using TestItemRunner
     using Dates: Millisecond
     using Test, Treebars, Term
     using Treebars: isrunning, is_pending, is_running, is_finished, is_failed,
-        is_skipped, duration, eta, render_text
+        is_skipped, is_reused, duration, eta, render_text
 end
 
 @testitem "term backend finalizes without child->parent->child recursion" setup=[TermTestImports] tags=[:unit, :term] begin
@@ -140,6 +140,13 @@ end
         @test is_running(fjob) == false
         @test is_failed(fjob) == false
         @test is_finished(fjob) == true
+
+        # Term.jl has no reused display either: reusing a job finalizes it.
+        rjob = initialize_progress!(froot, 2; description="term-query-reused")
+        reuse_progress!(rjob)
+        @test is_running(rjob) == false
+        @test is_finished(rjob) == true
+        @test is_reused(rjob) == false
 
         # A finished tree dumps with finished markers.
         finalize_progress!(lab.impl)
