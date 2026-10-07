@@ -6,7 +6,7 @@ import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
     htmx_render_board, htmx_ws_render_board, ws_board,
-    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
+    ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_reused, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children, _shows_interrupt_request
 import Treebars: add_child!
 import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
@@ -20,6 +20,7 @@ function _status_string(sp::StateProgress)
     is_running(sp) && return "running"
     is_failed(sp) && return "failed"
     is_skipped(sp) && return "skipped"
+    is_reused(sp) && return "reused"
     "finished"
 end
 
@@ -32,6 +33,10 @@ function _initial_duration_text(sp::StateProgress)
     # any duration here would be the 0s that made a bypassed phase read as an
     # instantaneous one.
     is_skipped(sp) && return " — skipped"
+    # Same rule for a phase reused before it was entered: it did no work, so
+    # it gets no figure. Entered first, it keeps the time spent finding out.
+    is_reused(sp) && return isnothing(sp.started_at) ? " — reused" :
+        " — reused ($(short_duration(duration(sp))))"
     d = short_duration(duration(sp))
     if is_running(sp)
         # A determinate running node (0 < i < N) also gets a live ETA beside the
@@ -100,12 +105,18 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-pill-skipped {
     background: color-mix(in srgb, var(--pico-muted-color, #ccc) 15%, transparent);
 }
+.treebar-pill-reused {
+    background: color-mix(in srgb, var(--pico-ins-color, #d1fae5) 15%, transparent);
+}
 .treebar-pending { opacity: 0.55; }
 .treebar-pending .treebar-progress { opacity: 0.5; }
 /* Dimmer than pending and struck through: the phase is terminal, and the
    strike is what separates "never ran" from "not yet" at a glance. */
 .treebar-skipped { opacity: 0.45; }
 .treebar-skipped .treebar-description { text-decoration: line-through; }
+/* A success whose output already existed: dimmed like history, but never
+   struck through — unlike skipped, its result is available. */
+.treebar-reused { opacity: 0.7; }
 .treebar-pill:hover { opacity: 0.8; }
 .treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
 .treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
@@ -220,10 +231,13 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
 .treebar-poller[data-show-skipped="0"], .treebar-board-item[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
 .treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
+.treebar-poller[data-show-reused="0"], .treebar-board-item[data-show-reused="0"], .treebar-children[data-show-reused="0"] { --tb-reused-display: none; }
+.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-display: block; }
 .treebar-child-finished { display: var(--tb-finished-display, block); }
 .treebar-child-failed { display: var(--tb-failed-display, block); }
 .treebar-child-pending { display: var(--tb-pending-display, block); }
 .treebar-child-skipped { display: var(--tb-skipped-display, block); }
+.treebar-child-reused { display: var(--tb-reused-display, block); }
 
 /* Active-pill highlight, same nearest-scope-wins inheritance so a nested
    poller's pills reflect that poller's own toggle, not an ancestor's. */
@@ -231,10 +245,12 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
 .treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
 .treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
+.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-pill-border: currentColor; }
 .treebar-pill-finished { border-color: var(--tb-finished-pill-border, transparent); }
 .treebar-pill-failed { border-color: var(--tb-failed-pill-border, transparent); }
 .treebar-pill-pending { border-color: var(--tb-pending-pill-border, transparent); }
 .treebar-pill-skipped { border-color: var(--tb-skipped-pill-border, transparent); }
+.treebar-pill-reused { border-color: var(--tb-reused-pill-border, transparent); }
 
 /* Keyed board (htmx_render_board). The .treebar-board-item wrapper is never
    replaced by the client reconciler — only its .treebar-board-item-content —
@@ -378,7 +394,7 @@ htmx_treebar_script() = h.script(Raw("""
         var p = el.parentElement;
         if (!p || !p.classList.contains('treebar-poller')) return;
         p.classList.replace('treebar-poller', 'treebar-terminal');
-        ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped'].forEach(function(key){
+        ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped', 'showReused'].forEach(function(key){
             delete p.dataset[key];
         });
         var badge = p.querySelector(':scope > .treebar-badge');
@@ -744,7 +760,7 @@ htmx_treebar_script() = h.script(Raw("""
 function _phase_overview_html(nodes; board=false)
     plans = Treebars.phase_overview(nodes)
     isempty(plans) && !board && return ""
-    states = (:pending, :running, :finished, :failed, :skipped)
+    states = (:pending, :running, :finished, :reused, :failed, :skipped)
     tables = [h.div(class="treebar-phase-plan")(
         h.table()(
             h.caption("Phase plan $i · $(plan.items) prepared items"),
@@ -768,6 +784,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
         pending = is_pending(sp)
         node_class = pending      ? "treebar-node treebar-pending" :
                      is_skipped(sp) ? "treebar-node treebar-skipped" :
+                     is_reused(sp)  ? "treebar-node treebar-reused"  :
                                     "treebar-node"
         if !isnothing(sp.N)
             # Progress bar with counter (pending → value=0, max=N, dim)
@@ -843,7 +860,7 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 # different parent reached it first) is dropped from this level entirely —
 # no stray pill count, no duplicate render.
 # `max_finished`: an OPT-IN cap on how many FINISHED children — and,
-# separately, how many SKIPPED ones — a `.treebar-children` container renders
+# separately, how many REUSED and SKIPPED ones — a `.treebar-children` container renders
 # individually. The default is `nothing`, which renders every child: the user
 # does not want capped output by default (feedback on decision `1vsha8b`).
 # A caller that knowingly trades fidelity for poll cost can pass a number:
@@ -853,7 +870,7 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 
 # Which children render individually: of the finished ones only the newest
 # `max_finished` (last in `children` order, i.e. most recently attached), and
-# likewise of the skipped ones. Returns a keep mask plus, keyed by the position
+# likewise of the reused and the skipped ones. Returns a keep mask plus, keyed by the position
 # of each group's first elided child, the one-line note standing in for the
 # elided ones. The note carries that group's `treebar-child-*` class, so it
 # shows and hides with the group's pill. `nothing` keeps everything.
@@ -861,7 +878,7 @@ function _elide_finished(children, max_finished)
     keep = trues(length(children))
     notes = Dict{Int,Node}()
     isnothing(max_finished) && return keep, notes
-    for (pred, word) in ((is_finished, "finished"), (is_skipped, "skipped"))
+    for (pred, word) in ((is_finished, "finished"), (is_reused, "reused"), (is_skipped, "skipped"))
         idx = findall(pred, children)
         n = length(idx) - max_finished
         n > 0 || continue
@@ -900,7 +917,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
     # raw children exist but every one flattens away (for example, hidden leaf
     # nodes); the caller sees a non-empty `node.children` and therefore asks us
     # to render a children section even though there is nothing visible in it.
-    if isempty(children) && (is_finished(sp) || is_failed(sp) || is_skipped(sp))
+    if isempty(children) && (is_finished(sp) || is_failed(sp) || is_skipped(sp) || is_reused(sp))
         return ""
     end
     if isempty(children) && !isempty(sp.message)
@@ -915,6 +932,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
     n_failed = count(c -> is_failed(c), children)
     n_pending = count(c -> is_pending(c), children)
     n_skipped = count(c -> is_skipped(c), children)
+    n_reused = count(c -> is_reused(c), children)
 
     pills = Node[]
     if n_pending > 0
@@ -924,6 +942,10 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
     if n_finished > 0
         push!(pills, h.span(class="treebar-pill treebar-pill-finished",
             onclick=_pill_onclick("showFinished"))("$(n_finished) finished"))
+    end
+    if n_reused > 0
+        push!(pills, h.span(class="treebar-pill treebar-pill-reused",
+            onclick=_pill_onclick("showReused"))("$(n_reused) reused"))
     end
     if n_skipped > 0
         push!(pills, h.span(class="treebar-pill treebar-pill-skipped",
@@ -943,6 +965,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
     _child_class(c) =
         is_pending(c)  ? "treebar-child-pending"  :
         is_skipped(c)  ? "treebar-child-skipped"  :
+        is_reused(c)   ? "treebar-child-reused"   :
         is_finished(c) ? "treebar-child-finished" :
         is_failed(c)   ? "treebar-child-failed"   :
                          ""
@@ -976,7 +999,9 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true,
             # Hidden by default, like finished: both are terminal and there is
             # nothing left to do about them. The "N skipped" pill is what says
             # they exist, so a completed request shows only what actually ran.
-            data_show_skipped="0")(
+            data_show_skipped="0",
+            # Reused children are terminal history too; "N reused" counts them.
+            data_show_reused="0")(
             isempty(pills) ? "" : h.div(class="treebar-pills")(pills...),
             rendered,
         )
@@ -1209,7 +1234,8 @@ function _board_item(entry; expanded::Bool)
         data_show_finished="0",
         data_show_pending="1",
         data_show_failed="1",
-        data_show_skipped="0")(
+        data_show_skipped="0",
+        data_show_reused="0")(
         h.div(class="treebar-board-item-content")(
             h.div(class="treebar-board-item-header")(
                 label_node,
@@ -1310,7 +1336,8 @@ naturally stops the loop. The client then renames the stable wrapper to
 the rendered result (plus optional frozen progress record) as an
 unambiguous terminal fragment. While polling, the wrapper itself is
 untouched, so UX state on it (`data-show-finished` / `-failed` /
-`-pending`, set by pill clicks, and `data-chrome`) persists across polls.
+`-pending` / `-skipped` / `-reused`, set by pill clicks, and `data-chrome`)
+persists across polls.
 
 The inner's `hx-select` is top-level-only: each branch excludes matches
 nested inside another match, so a poll response containing a nested poller
@@ -1734,7 +1761,8 @@ _polling_wrap(inner; pausable=false, terminal=false, badge="", chrome=:auto) =
             data_show_finished="0",
             data_show_pending="1",
             data_show_failed="1",
-            data_show_skipped="0")(pausable ? badge : "", inner)
+            data_show_skipped="0",
+            data_show_reused="0")(pausable ? badge : "", inner)
 
 # The polling element. Self-swaps via outerHTML on each `every Xs` trigger.
 # `hx-select` strips the wrapper out of the response on each poll (the server

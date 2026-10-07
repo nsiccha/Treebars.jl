@@ -9,8 +9,8 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     add_child!,
     ProgressNode, StateProgress, htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script, ws_progress, htmx_ws_render, htmx_ws_progress,
     polling_fetchindex, htmx_render_board, htmx_ws_render_board, ws_board,
-    is_pending, is_running, is_finished, is_failed, is_skipped, is_displayed, duration, eta, short_duration,
-    prepare_progress!, start_progress!, skip_progress!,
+    is_pending, is_running, is_finished, is_failed, is_skipped, is_reused, is_displayed, duration, eta, short_duration,
+    prepare_progress!, start_progress!, skip_progress!, reuse_progress!,
     request_interrupt!, interrupt_requested, throw_if_interrupted, ProgressInterrupted,
     round2, short_string, Fraction,
     render_text, phase_overview

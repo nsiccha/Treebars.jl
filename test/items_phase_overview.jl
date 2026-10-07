@@ -1,12 +1,12 @@
 using TestItemRunner
 
-@testitem "Prepared phase overview distinguishes all five states" tags=[:unit, :phase_overview] begin
+@testitem "Prepared phase overview distinguishes all six states" tags=[:unit, :phase_overview] begin
     using Treebars
     let
         root = initialize_progress!(:state; description="Batch")
-        ready = Channel{Nothing}(5)
-        release = Channel{Nothing}(5)
-        tasks = map(1:5) do i
+        ready = Channel{Nothing}(6)
+        release = Channel{Nothing}(6)
+        tasks = map(1:6) do i
             @async with_progress(root; description="Item $i") do item
                 with_prepared_phases(item, (load="Load", fit="Fit")) do phases
                     if i == 2
@@ -19,6 +19,8 @@ using TestItemRunner
                         fail_progress!(phases.load)
                     elseif i == 5
                         skip_progress!(phases.load)
+                    elseif i == 6
+                        reuse_progress!(phases.load)
                     end
                     put!(ready, nothing)
                     take!(release)
@@ -29,10 +31,10 @@ using TestItemRunner
             take!(ready)
         end
         snapshot = only(phase_overview(root))
-        @test snapshot.items == 5
+        @test snapshot.items == 6
         @test snapshot.phases[1] == (; key=:load, label="Load",
-            pending=1, running=1, finished=1, failed=1, skipped=1)
-        @test snapshot.phases[2].pending == 5
+            pending=1, running=1, finished=1, failed=1, skipped=1, reused=1)
+        @test snapshot.phases[2].pending == 6
         @test snapshot.phases[2].running == 0
         # A second reachable edge and a repeated board root count the same
         # actual trees once. Snapshotting does not change lifecycle or children.
@@ -50,8 +52,9 @@ using TestItemRunner
         @test final.phases[1].finished == 2
         @test final.phases[1].failed == 1
         @test final.phases[1].skipped == 2
-        @test final.phases[2].skipped == 5
-        @test snapshot.phases[2].pending == 5 # an earlier snapshot stays frozen
+        @test final.phases[1].reused == 1   # never folded into finished
+        @test final.phases[2].skipped == 6
+        @test snapshot.phases[2].pending == 6 # an earlier snapshot stays frozen
     end
 end
 
@@ -59,8 +62,9 @@ end
     using Treebars, HTMXObjects
     let
         root = initialize_progress!(:state; description="Batch")
-        with_prepared_phases(root, (load="Load <public> & all labels", fit="Fit")) do phases
+        with_prepared_phases(root, (load="Load <public> & all labels", fit="Fit", cache="Cache")) do phases
             @with_progress phases.load nothing
+            reuse_progress!(phases.cache)
         end
         html(x) = sprint(show, MIME"text/html"(), x)
         @test !occursin("treebar-phase-overview", html(htmx_render(root)))
@@ -70,6 +74,8 @@ end
         @test occursin("Load &lt;public&gt; &amp; all labels", view)
         @test occursin("data-phase-state=\"finished\">1</td>", view)
         @test occursin("data-phase-state=\"skipped\">1</td>", view)
+        @test occursin("data-phase-state=\"reused\">1</td>", view)
+        @test occursin("<th scope=\"col\">Reused</th>", view)
         @test occursin("treebar-children", view)
         @test occursin("treebar-pill-finished", view)
         @test length(findall("treebar-phase-overview", view)) == 1
@@ -79,6 +85,8 @@ end
             progress=root, url="/public", id="probe", phase_overview=true)))
         text = render_text(root; phase_overview=true)
         @test occursin("1 finished", text) && occursin("1 skipped", text)
+        @test occursin("0 finished · 1 reused · 0 failed · 0 skipped", text)   # the Cache row
+        @test occursin("↺ Cache", text)
         @test occursin("✓ Load <public> & all labels", text)
         @test render_text(nothing; phase_overview=true) == "(no progress tree)"
         entry = (; key="one", label="Item", state=:done, node=root)

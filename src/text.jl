@@ -27,6 +27,7 @@
 _state_marker(node::ProgressNode) =
     is_failed(node)   ? "✗" :
     is_skipped(node)  ? "⊘" :
+    is_reused(node)   ? "↺" :
     is_finished(node) ? "✓" :
     is_pending(node)  ? "·" :
                         "▶"
@@ -42,12 +43,12 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         isempty(sp.description) || push!(parts, sp.description)
         isnothing(sp.N)         || push!(parts, "($(sp.i)/$(sp.N))")
         isempty(sp.message)     || push!(parts, "— $(sp.message)")
-        # Neither a pending nor a skipped node has a started_at, so `duration`
-        # would report a meaningless 0s — omit it rather than imply the phase
-        # has run. For a skipped node that 0s would be actively misleading:
-        # it is the one number that made a bypassed phase look like an
-        # instantaneous one.
-        (is_pending(sp) || is_skipped(sp)) ||
+        # A pending, skipped, or never-entered reused node has no started_at,
+        # so `duration` would report a meaningless 0s — omit it rather than
+        # imply the phase has run. For a skipped or reused node that 0s would
+        # be actively misleading: it is the one number that made a bypassed or
+        # cached phase look like an instantaneous one.
+        isnothing(sp.started_at) ||
             push!(parts, "[$(short_duration(duration(sp)))]")
         # ETA — non-nothing only for a running determinate node (0 < i < N),
         # so it never appears on a pending/skipped/finished/indeterminate one.
@@ -112,8 +113,10 @@ println(render_text(tree))
 ```
 
 Each line is `<state> <description> [(i/N)] [— message] [duration]`, where
-state is `·` pending, `▶` running, `✓` finished, `✗` failed, or `⊘` skipped.
-Pending and skipped nodes show no duration because they never started. A
+state is `·` pending, `▶` running, `✓` finished, `↺` reused, `✗` failed, or
+`⊘` skipped. Pending and skipped nodes show no duration because they never
+started; a reused node shows one only if it was entered before
+[`reuse_progress!`](@ref) marked it. A
 pending or running node that [`request_interrupt!`](@ref) was called on ends in
 `· interrupt requested` until it terminates.
 
@@ -124,7 +127,7 @@ parent renders once per tree. So an empty result means the markers really did
 not produce nodes — see [`@progress`](@ref) for why a bare `"label"` inside a
 `begin … end` block is swallowed as a docstring. (A caller that opts into
 `max_finished` on [`htmx_render_children`](@ref) gets an HTML render that
-elides older finished/skipped children; `render_text` always prints every
+elides older finished/reused/skipped children; `render_text` always prints every
 node.)
 
 `show(io, MIME"text/plain"(), node)` renders the same thing, so a
@@ -144,7 +147,7 @@ function render_text(node::ProgressNode; phase_overview::Bool=false)
                 for phase in plan.phases
                     println(io, "  ", phase.label, ": ",
                         join(("$(getproperty(phase, state)) $state" for state in
-                            (:pending, :running, :finished, :failed, :skipped)), " · "))
+                            (:pending, :running, :finished, :reused, :failed, :skipped)), " · "))
                 end
             end
         end

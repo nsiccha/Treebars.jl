@@ -12,7 +12,8 @@ parent–child relationships for hierarchical progress tracking.
 - **Tree-structured progress** — nested progress nodes with parent/child
   relationships, automatic propagation, and per-node lifecycle state
   ([`is_pending`](@ref), [`is_running`](@ref), [`is_finished`](@ref),
-  [`is_failed`](@ref), [`is_skipped`](@ref), [`duration`](@ref)).
+  [`is_failed`](@ref), [`is_skipped`](@ref), [`is_reused`](@ref),
+  [`duration`](@ref)).
 - **Backend-agnostic** — interface dispatches to a `:state` backend (text /
   HTML / WebSocket) or `:term` backend (Term.jl terminal rendering). A `nothing`
   backend disables progress (all operations no-op), making instrumentation
