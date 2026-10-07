@@ -213,8 +213,10 @@ duration. `scoped` and `max_finished` are
 forwarded to `htmx_render_children` at every level (see there).
 
 `phase_overview=true` prepends per-plan lifecycle counts from
-[`phase_overview`](@ref), once above the tree. It does not elide individual
-nodes. The same opt-in is supported by `htmx_render_children`,
+[`phase_overview`](@ref), once above the tree. A plan declared inside another
+plan's prepared phase is indented under it and captioned with that phase's
+label; `phase_overview=:top` shows only the outermost plans. It does not elide
+individual nodes. The same opt-in is supported by `htmx_render_children`,
 `htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`, and
 `polling_fetchindex` (HTTP and WebSocket).
 """
@@ -453,8 +455,8 @@ the live board by it. For WebSocket push see [`ws_board`](@ref).
 Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
 page.
 
-`phase_overview=true` shows one overview across the listed entries' progress
-nodes. Shared nodes and duplicate entry keys count once; entries without a
+`phase_overview=true` (or `:top`, outermost plans only) shows one overview
+across the listed entries' progress nodes. Shared nodes and duplicate entry keys count once; entries without a
 node contribute no phase counts. The overview follows the current server
 snapshot, while departing items may still linger visually. A history board
 must continue listing completed roots to include their counts. Item trees

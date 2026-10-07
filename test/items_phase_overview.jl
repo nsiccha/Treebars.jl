@@ -98,6 +98,92 @@ end
     end
 end
 
+@testitem "Nested phase plans are labeled and scoped by their declaring phase" tags=[:unit, :phase_overview, :render] begin
+    using Treebars, HTMXObjects
+    let
+        root = initialize_progress!(:state; description="Synthetic run")
+        stages = (alpha="Alpha", beta="Beta", gamma="Gamma")
+        # `alpha` and `gamma` declare identical preparation keys.
+        preps = (alpha=(compile="Compile", warm="Warm"), beta=(build="Build",),
+                 gamma=(compile="Compile", warm="Warm"))
+        stage_nodes = ProgressNode[]
+        for model in ("first", "second")
+            with_progress(root; description="Model $model") do model_node
+                with_prepared_phases(model_node, stages) do stage_phases
+                    for k in keys(stages)
+                        with_prepared_progress(stage_phases[k]) do stage
+                            push!(stage_nodes, stage)
+                            with_prepared_phases(stage, preps[k]) do prep_phases
+                                foreach(p -> with_prepared_progress(_ -> nothing, p), prep_phases)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        plans = phase_overview(root)
+        @test length(plans) == 4
+        outer = plans[1]
+        # The two model nodes disagree, so the outer plan has no label.
+        @test outer.label === nothing && outer.parent === nothing && outer.items == 2
+        @test [p.label for p in plans[2:end]] == ["Alpha", "Beta", "Gamma"]
+        @test [p.parent for p in plans[2:end]] ==
+            [(; plan=1, phase=:alpha), (; plan=1, phase=:beta), (; plan=1, phase=:gamma)]
+        # Identical declarations inside different phases stay separate.
+        @test all(p -> p.items == 2, plans[2:end])
+        @test plans[2].phases == plans[4].phases
+        @test all(p -> p.finished == 2, plans[2].phases)
+        # Outside its enclosing plan, a nested plan keeps its declaring label.
+        alone = only(phase_overview(first(stage_nodes)))
+        @test alone.label == "Alpha" && alone.parent === nothing && alone.items == 1
+
+        text = render_text(root; phase_overview=true)
+        @test occursin("Phase plan 1 · 2 prepared items\n", text)
+        @test occursin("\n  Alpha · 2 prepared items\n    Compile: 0 pending", text)
+        @test occursin("\n  Gamma · 2 prepared items\n", text)
+        top = render_text(root; phase_overview=:top)
+        @test occursin("Phase plan 1 · 2 prepared items", top)
+        @test !occursin("Alpha · 2 prepared items", top) && !occursin("Compile:", top)
+        @test_throws ArgumentError render_text(root; phase_overview=:nested)
+
+        html(x) = sprint(show, MIME"text/html"(), x)
+        captions(v) = [m.captures[1] for m in eachmatch(r"<caption>(.*?)</caption>", v)]
+        view = html(htmx_render(root; phase_overview=true))
+        @test captions(view) == ["Phase plan 1 · 2 prepared items", "Alpha · 2 prepared items",
+            "Beta · 2 prepared items", "Gamma · 2 prepared items"]
+        @test length(findall("treebar-phase-plan treebar-phase-plan-nested", view)) == 3
+        @test length(findall("data-phase-depth=\"1\"", view)) == 3
+        scoped = html(htmx_render(root; phase_overview=:top))
+        @test captions(scoped) == ["Phase plan 1 · 2 prepared items"]
+        @test !occursin("treebar-phase-plan-nested", scoped)
+        @test captions(htmx_ws_render(root; phase_overview=:top)) == captions(scoped)
+        entry = (; key="run", label="Run", state=:done, node=root)
+        @test captions(html(htmx_render_board([entry]; phase_overview=:top))) == captions(scoped)
+        @test_throws ArgumentError htmx_render(root; phase_overview=:nested)
+    end
+end
+
+@testitem "Nested macro phase plans name the phase that declared them" tags=[:unit, :phase_overview, :macro] begin
+    using Treebars
+    let
+        batch = initialize_progress!(:state; description="Synthetic batch")
+        @progress batch "Items" for item in 1:3
+            @progress "Load"
+            @progress "Fit"
+            with_prepared_phases(__progress__, (warm="Warm", draw="Draw")) do phases
+                foreach(p -> with_prepared_progress(_ -> nothing, p), phases)
+            end
+        end
+        outer, inner = phase_overview(batch)
+        # Transient iterations retain the outer plan on the loop node they share.
+        @test outer.label == "Items" && outer.items == 3
+        @test inner.label == "Fit" && inner.parent == (; plan=1, phase=2)
+        @test inner.items == 3 && all(p -> p.finished == 3, inner.phases)
+        @test startswith(render_text(batch; phase_overview=true),
+            "Items · 3 prepared items\n  Load: 0 pending · 0 running · 3 finished")
+    end
+end
+
 @testmodule PhaseOverviewPollingFixtures begin
     using Treebars, DynamicObjects
     export PhaseOverviewPoll, _PHASE_READY, _PHASE_RELEASE

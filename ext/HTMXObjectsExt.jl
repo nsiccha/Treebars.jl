@@ -266,6 +266,10 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-phase-plan th { text-align: left; overflow-wrap: anywhere; }
 .treebar-phase-plan th[scope="row"] { overflow-wrap: anywhere; min-width: 8rem; }
 .treebar-phase-plan td { text-align: right; font-variant-numeric: tabular-nums; }
+.treebar-phase-plan-nested { padding-inline-start: 0.5rem; border-inline-start: 2px solid var(--pico-muted-border-color, #ddd); }
+.treebar-phase-plan[data-phase-depth="1"] { margin-inline-start: 1rem; }
+.treebar-phase-plan[data-phase-depth="2"] { margin-inline-start: 2rem; }
+.treebar-phase-plan[data-phase-depth="3"] { margin-inline-start: 3rem; }
 @media (max-width: 600px) {
     .treebar-phase-plan table, .treebar-phase-plan caption, .treebar-phase-plan tbody { display: block; }
     .treebar-phase-plan thead { display: none; }
@@ -757,27 +761,30 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-function _phase_overview_html(nodes; board=false)
-    plans = Treebars.phase_overview(nodes)
-    isempty(plans) && !board && return ""
+# A plan nested in another plan's phase is indented under it (depth capped for
+# the stylesheet) and captioned with that phase's label.
+function _phase_overview_html(nodes, mode; board=false)
+    entries = Treebars._overview_entries(nodes, mode)
+    isempty(entries) && !board && return ""
     states = (:pending, :running, :finished, :reused, :failed, :skipped)
-    tables = [h.div(class="treebar-phase-plan")(
+    tables = [h.div(class=entry.depth == 0 ? "treebar-phase-plan" : "treebar-phase-plan treebar-phase-plan-nested",
+            data_phase_depth=string(min(entry.depth, 3)))(
         h.table()(
-            h.caption("Phase plan $i · $(plan.items) prepared items"),
+            h.caption(entry.caption),
             h.thead(h.tr(h.th(scope="col")("Phase"),
                 [h.th(scope="col")(uppercasefirst(string(state))) for state in states])),
             h.tbody([h.tr(h.th(scope="row")(phase.label),
                 [h.td(data_phase_state=string(state))(string(getproperty(phase, state)))
-                    for state in states]) for phase in plan.phases]),
-        )) for (i, plan) in enumerate(plans)]
+                    for state in states]) for phase in entry.plan.phases]),
+        )) for entry in entries]
     h.div(class=board ? "treebar-phase-overview treebar-board-overview" : "treebar-phase-overview")(tables)
 end
 
-function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Bool=false, kwargs...)
+function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
     children_node = isempty(node.children) ? "" : htmx_render_children(node; scoped, seen, max_finished)
-    overview = phase_overview ? _phase_overview_html(node) : ""
+    overview = _phase_overview_html(node, phase_overview)
     tree = lock(sp.lock) do
         duration_node = _duration_span(sp)
         interrupt_node = _interrupt_span(node)
@@ -822,7 +829,7 @@ function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=
             end
         end
     end
-    phase_overview ? h.div(class="treebar-with-overview")(overview, tree) : tree
+    Treebars._overview_enabled(phase_overview) ? h.div(class="treebar-with-overview")(overview, tree) : tree
 end
 
 # Render a full progress tree rooted at node. Top-level root is always
@@ -830,10 +837,10 @@ end
 # flattened away — their grandchildren render in their place. Same per-pass
 # `seen` dedup as the StateProgress method above (kept in sync for any
 # non-StateProgress backend that reaches this fallback).
-function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), phase_overview::Bool=false, kwargs...)
+function htmx_render(node::ProgressNode; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), phase_overview::Union{Bool,Symbol}=false, kwargs...)
     children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
     children_html = [htmx_render(child; scoped, seen, kwargs...) for child in children]
-    h.div(class="treebar-root")(phase_overview ? _phase_overview_html(node) : "", children_html)
+    h.div(class="treebar-root")(_phase_overview_html(node, phase_overview), children_html)
 end
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
@@ -890,9 +897,10 @@ function _elide_finished(children, max_finished)
 end
 
 htmx_render_children(::Nothing; kwargs...) = h.p("Starting..."; class="u-text-muted", aria_busy="true")
-function htmx_render_children(node::ProgressNode{<:StateProgress}; phase_overview::Bool=false, kwargs...)
+function htmx_render_children(node::ProgressNode{<:StateProgress}; phase_overview::Union{Bool,Symbol}=false, kwargs...)
     tree = _htmx_render_children(node; kwargs...)
-    phase_overview ? h.div(class="treebar-with-overview")(_phase_overview_html(node), tree) : tree
+    Treebars._overview_enabled(phase_overview) ?
+        h.div(class="treebar-with-overview")(_phase_overview_html(node, phase_overview), tree) : tree
 end
 function _htmx_render_children(node::ProgressNode{<:StateProgress}; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
     isnothing(max_finished) || max_finished >= 0 ||
@@ -1026,10 +1034,10 @@ Client-side:
 </div>
 ```
 """
-htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Bool=false) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
+htmx_ws_render(node::ProgressNode; id="treebar-progress", phase_overview::Union{Bool,Symbol}=false) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
 
 function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
-        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false, phase_overview::Bool=false)
+        progress=nothing, description="Working...", N=nothing, collapsed::Bool=false, phase_overview::Union{Bool,Symbol}=false)
     isempty(id) && throw(ArgumentError("htmx_ws_progress requires a nonempty unique id"))
     node = isnothing(progress) ?
         initialize_progress!(:state; description, N, pending=true) : progress
@@ -1064,7 +1072,7 @@ end
 _is_oob_fragment(f) = f isa Node &&
     (haskey(f.attrs, Symbol("hx-swap-oob")) || haskey(f.attrs, Symbol("data-hx-swap-oob")))
 
-function _ws_progress_frame(id, progress, fragments; phase_overview::Bool=false)
+function _ws_progress_frame(id, progress, fragments; phase_overview::Union{Bool,Symbol}=false)
     payload = htmx_ws_render(progress; id=id * "-progress", phase_overview)
     isempty(fragments) && return payload
     plain = Any[]
@@ -1084,14 +1092,14 @@ function _ws_progress_frame(id, progress, fragments; phase_overview::Bool=false)
 end
 
 function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
-        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64, phase_overview::Bool=false)
+        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64, phase_overview::Union{Bool,Symbol}=false)
     _validate_ws_progress(id, interval, buffer)
     node = _ws_progress_root(parent, N; description)
     ws_progress(produce, ws, node; id, interval, buffer, phase_overview)
 end
 
 function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:StateProgress};
-        id::AbstractString, interval=0.1, buffer::Integer=64, phase_overview::Bool=false)
+        id::AbstractString, interval=0.1, buffer::Integer=64, phase_overview::Union{Bool,Symbol}=false)
     _validate_ws_progress(id, interval, buffer)
     (is_pending(node) || is_running(node)) ||
         throw(ArgumentError("ws_progress producer requires a pending or running node"))
@@ -1263,7 +1271,7 @@ end
 
 function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
         empty="No running jobs.", id="treebar-board", linger_ms::Integer=3000,
-        expanded::Bool=false, live::Bool=!isnothing(poll_url), phase_overview::Bool=false)
+        expanded::Bool=false, live::Bool=!isnothing(poll_url), phase_overview::Union{Bool,Symbol}=false)
     # First occurrence of a key wins: the client matches items by key, so a
     # duplicate would make two DOM items fight over one identity.
     seen = Set{String}()
@@ -1288,9 +1296,9 @@ function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
             _board_count(unique_entries),
             live ? _board_pause_button() : "",
         ),
-        phase_overview ? _phase_overview_html(
+        Treebars._overview_enabled(phase_overview) ? _phase_overview_html(
             [node for e in unique_entries for node in (_board_get(e, :node, nothing),)
-                if node isa ProgressNode]; board=true) : "",
+                if node isa ProgressNode], phase_overview; board=true) : "",
         h.div(class="treebar-board-list")(items),
         empty_node,
         poller,
@@ -1442,7 +1450,7 @@ function _polling_default_parent(req)
     end
     current_dispatch_parent()
 end
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, phase_overview::Bool=false, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     chrome in (:auto, :quiet) || throw(ArgumentError("polling_fetchindex: chrome must be :auto or :quiet, got $(repr(chrome))"))
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
@@ -1513,7 +1521,7 @@ _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 # incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Bool=false) =
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false) =
     istaskfailed(rv) ? throw(rv.result) :
     sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview) :
         _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview)
@@ -1566,7 +1574,7 @@ end
 # the client terminalizes the stable wrapper in place. With keep_progress
 # (default, but not on the sync loopback), the frozen tree is appended below
 # the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Bool=false)
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false)
     if _is_unresolved_handle(rv)
         return sync ?
             _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview) :
@@ -1593,7 +1601,7 @@ end
 # failed node visible). `treebar-frozen` makes the client ticker skip it, so a
 # terminal tree still holding a "running" node is static, not counting up.
 # Empty string when there is no status node.
-function _kept_progress(status; open::Bool=false, phase_overview::Bool=false)
+function _kept_progress(status; open::Bool=false, phase_overview::Union{Bool,Symbol}=false)
     isnothing(status) && return ""
     body = (h.summary("Progress"), htmx_render(status; scoped=true, phase_overview))
     open ? h.details(class="treebar-frozen", open=true)(body...) : h.details(class="treebar-frozen")(body...)
@@ -1659,7 +1667,7 @@ end
 _label_restates_root(label, status) =
     !isnothing(label) && _status_root_description(status) == string(label)
 
-function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto, phase_overview::Bool=false)
+function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto, phase_overview::Union{Bool,Symbol}=false)
     stop_btn = isempty(cancel_url) ? "" : h.a("Stop"; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
     inner_body = if isnothing(label)
@@ -1846,7 +1854,7 @@ so the htmx ws-extension swaps by element id on the client.
 - `kwargs...`: passed through to `fetchindex`
 """
 function polling_fetchindex(ws::WebSocket, render_result, ip, keys...;
-        id="treebar-progress", interval=0.1, force=false, phase_overview::Bool=false, kwargs...)
+        id="treebar-progress", interval=0.1, force=false, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     progress_render(node) = node_to_html(h.div(; id)(htmx_render(node; phase_overview)))
     final_html(content)   = node_to_html(h.div(; id)(content))
     fetchindex(ip, keys...; force, kwargs...) do rv, status

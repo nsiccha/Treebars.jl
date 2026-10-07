@@ -186,14 +186,51 @@ The same `phase_overview=true` keyword works with `htmx_render`,
 and `ws_board` forward it. Defaults retain the ordinary tree view.
 
 [`phase_overview`](@ref) returns an immutable snapshot for inspection: a tuple
-of plans, each with `items` and `phases`; each phase has `key`, `label`, and
-the six lifecycle counts. Counts include completed transient phases after
-their nodes detach. Each phase's six counts sum to that plan's prepared item
-count. Items that have not instantiated their phase plan yet are not counted.
+of plans, each with `label`, `parent`, `items` and `phases`; each phase has
+`key`, `label`, and the six lifecycle counts. Counts include completed
+transient phases after their nodes detach. Each phase's six counts sum to that
+plan's prepared item count. Items that have not instantiated their phase plan
+yet are not counted.
+
+### Nested plans
+
+A plan declared inside a prepared phase of another plan — for example, each
+stage's own preparations under a per-model stage plan — is nested under that
+phase. No extra declaration is needed: the overview names it after the phase
+that declared it and indents it under the enclosing plan.
+
+```@example batch_overview
+benchmark = initialize_progress!(:state; description="Public synthetic run")
+stages = (compile="Compile", sample="Sample")
+for model in ("first", "second")
+    with_progress(benchmark; description="Model $model") do model_node
+        with_prepared_phases(model_node, stages) do stage_phases
+            with_prepared_progress(stage_phases.compile) do stage
+                with_prepared_phases(stage, (parse="Parse", build="Build")) do steps
+                    foreach(step -> with_prepared_progress(_ -> nothing, step), steps)
+                end
+            end
+            with_prepared_progress(_ -> nothing, stage_phases.sample)
+        end
+    end
+end
+println(render_text(benchmark; phase_overview=true))
+```
+
+`phase_overview=:top` shows only the outermost plans, keeping the overview to
+one summary per independent plan while every nested phase stays in the tree.
+It is accepted wherever `phase_overview=true` is. In a snapshot, a nested
+plan's `parent` is `(; plan, phase)`: the enclosing record's index and the
+enclosing phase's key; plans are ordered so each precedes those nested in it.
+The same declaration inside different enclosing phases forms separate plans.
+An outermost plan is labeled with the description of the node that declared
+it when every declaring node agrees (otherwise `label` is `nothing` and
+renderers number it "Phase plan N"); a nested plan rendered without its
+enclosing plan keeps its phase label.
 
 Different macro phase blocks stay separate. NamedTuple plans match by their
 complete ordered key sequence; iterable plans match by their complete
-declared label sequence. Matching a phase alone never merges different
+declared label sequence, within the same enclosing phase. Matching a phase alone never merges different
 sequences, and arbitrary tree descriptions do not determine phase identity.
 An item-specific display label falls back to the phase key or position when
 instances disagree. Shared trees count once, including across board entries.
