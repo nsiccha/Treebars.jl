@@ -4,7 +4,7 @@ using TestItemRunner
 using HTTP, Sockets, Treebars, HTMXObjects
 export capture_stream
 
-function capture_stream(run; disconnect=false)
+function capture_stream(run; disconnect=false, on_frame=frame -> nothing)
     # HTTP 1.x accepts a pre-bound listener; no guessed or raced test port.
     socket = Sockets.listen(ip"127.0.0.1", 0)
     port = last(Sockets.getsockname(socket))
@@ -21,6 +21,7 @@ function capture_stream(run; disconnect=false)
         HTTP.WebSockets.open("ws://127.0.0.1:$port/feed"; proxy=nothing) do ws
             for frame in ws
                 push!(frames, String(frame))
+                on_frame(last(frames))
                 disconnect && break
             end
         end
@@ -266,6 +267,59 @@ end
         @test !isnothing(i_close) && !isnothing(i_oob)
         @test last(i_close) < first(i_oob)
     end
+end
+
+@testitem "Streaming publishes leave at once, not at the next interval" tags=[:streaming] setup=[TreebarsTestImports, StreamingFixtures] begin
+    # Contract (snag ws-progress-publ-5060de34): `publish` wakes the sender, so
+    # a fragment and the final tree leave as soon as the sender is free rather
+    # than at the next `interval` tick. With a 60 s interval, tick-paced
+    # delivery would time out every wait below.
+    delivered = Channel{Int}(Inf)
+    note(frame) = for m in eachmatch(r"window\.step\((\d+)\)", frame)
+        put!(delivered, parse(Int, m.captures[1]))
+    end
+    started = time()
+    frames, outcome = StreamingFixtures.capture_stream(; on_frame=note) do ws
+        ws_progress(ws; id="stream", interval=60) do publish, p
+            map(1:3) do k
+                publish(h.script(Raw("window.step($k);")))
+                timedwait(() -> isready(delivered), 20) == :ok ||
+                    error("fragment $k waited for the interval")
+                take!(delivered)
+            end
+        end
+    end
+    @test outcome == (:ok, [1, 2, 3])
+    @test occursin("data-treebar-status=\"finished\"", last(frames))
+    # The final tree did not wait for the interval either.
+    @test time() - started < 40
+
+    # Publishes within `min_interval` of the previous frame coalesce into one.
+    seen = Threads.Atomic{Int}(0)
+    count_frame(_) = Threads.atomic_add!(seen, 1)
+    frames, outcome = StreamingFixtures.capture_stream(; on_frame=count_frame) do ws
+        ws_progress(ws; id="stream", interval=60, min_interval=2) do publish, p
+            # The initial frame, then the first frame of the send loop.
+            timedwait(() -> seen[] >= 2, 20) == :ok || error("no live frame")
+            for k in 1:5
+                publish(h.script(Raw("window.step($k);")))
+            end
+            :done
+        end
+    end
+    @test outcome == (:ok, :done)
+    carrying = filter(frame -> occursin("window.step(", frame), frames)
+    @test length(carrying) == 1
+    @test all(k -> occursin("window.step($k);", only(carrying)), 1:5)
+
+    frames, outcome = StreamingFixtures.capture_stream() do ws
+        ws_progress(ws; id="stream", min_interval=-1) do publish, p
+            nothing
+        end
+    end
+    @test first(outcome) == :error
+    @test last(outcome) isa ArgumentError
+    @test isempty(frames)
 end
 
 @testitem "Streaming disconnect releases bounded publishers" tags=[:streaming] setup=[TreebarsTestImports, StreamingFixtures] begin
