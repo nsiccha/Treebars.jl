@@ -1362,9 +1362,10 @@ _ws_progress_root(parent::ProgressNode, ::Nothing; description) =
 _ws_progress_root(parent::ProgressNode, N::Integer; description) =
     initialize_progress!(parent, N; description, transient=false)
 
-function _validate_ws_progress(id, interval, buffer)
+function _validate_ws_progress(id, interval, min_interval, buffer)
     isempty(id) && throw(ArgumentError("ws_progress requires a nonempty unique id"))
     interval > 0 || throw(ArgumentError("ws_progress interval must be positive"))
+    min_interval >= 0 || throw(ArgumentError("ws_progress min_interval must be nonnegative"))
     buffer > 0 || throw(ArgumentError("ws_progress buffer must be positive"))
 end
 
@@ -1398,19 +1399,24 @@ function _ws_progress_frame(id, progress, fragments; phase_overview::Union{Bool,
 end
 
 function ws_progress(produce::Function, ws::WebSocket; id::AbstractString,
-        description="Working...", N=nothing, parent=nothing, interval=0.1, buffer::Integer=64, phase_overview::Union{Bool,Symbol}=false)
-    _validate_ws_progress(id, interval, buffer)
+        description="Working...", N=nothing, parent=nothing, interval=0.1, min_interval=0.016,
+        buffer::Integer=64, phase_overview::Union{Bool,Symbol}=false)
+    _validate_ws_progress(id, interval, min_interval, buffer)
     node = _ws_progress_root(parent, N; description)
-    ws_progress(produce, ws, node; id, interval, buffer, phase_overview)
+    ws_progress(produce, ws, node; id, interval, min_interval, buffer, phase_overview)
 end
 
 function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:StateProgress};
-        id::AbstractString, interval=0.1, buffer::Integer=64, phase_overview::Union{Bool,Symbol}=false)
-    _validate_ws_progress(id, interval, buffer)
+        id::AbstractString, interval=0.1, min_interval=0.016, buffer::Integer=64,
+        phase_overview::Union{Bool,Symbol}=false)
+    _validate_ws_progress(id, interval, min_interval, buffer)
     (is_pending(node) || is_running(node)) ||
         throw(ArgumentError("ws_progress producer requires a pending or running node"))
     start_progress!(node)
     queue = Channel{Any}(buffer)
+    # Publishing and finishing wake the sender, so a fragment and the final
+    # tree leave as soon as the sender is free, not at the next `interval`.
+    wake = Base.Event(true)
     connected = Threads.Atomic{Bool}(true)
     publish = fragment -> begin
         connected[] || return nothing
@@ -1421,6 +1427,7 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
             connected[] && rethrow()
             err isa InvalidStateException || rethrow()
         end
+        notify(wake)
         nothing
     end
     # Render outside the send catch: serialization errors are not disconnects.
@@ -1440,9 +1447,12 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
             rethrow()
         finally
             finalize_progress!(node)
+            notify(wake)
         end
     end
     render_live = progress -> begin
+        # Everything published before this point rides this frame.
+        reset(wake)
         fragments = Any[]
         for _ in 1:buffer
             isready(queue) || break
@@ -1452,7 +1462,7 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
     end
     result = nothing
     try
-        connected[] && ws_progress(ws, node; interval, render=render_live)
+        connected[] && ws_progress(ws, node; interval, min_interval, wake, render=render_live)
     finally
         connected[] = false
         isopen(queue) && close(queue)

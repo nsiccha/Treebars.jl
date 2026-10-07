@@ -332,7 +332,7 @@ function htmx_treebar_script end
 
 # ws_progress fallback
 """
-    ws_progress(ws, node; interval=0.1, render=repr)
+    ws_progress(ws, node; interval=0.1, render=repr, wake=nothing, min_interval=0)
 
 Push live progress updates over a WebSocket until `node` finalises.
 Implementation lives in the HTTP package extension — load `HTTP` to activate
@@ -342,13 +342,18 @@ it.
 sent over `ws`. The default `render=repr` is text-only; load `HTMXObjects` to
 get [`htmx_ws_render`](@ref), which produces an HTML fragment with a stable
 `id` suitable for HTMX swap-by-id.
+
+`wake`, a `Base.Event`, sends the next frame as soon as it is notified rather
+than at the end of `interval`, but never sooner than `min(min_interval,
+interval)` seconds after the previous frame, so a burst of notifications
+coalesces into one frame. The producer form below wakes its sender this way.
 """
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 
 """
     ws_progress(produce, ws; id, description="Working...", N=nothing,
-                parent=nothing, interval=0.1, buffer=64)
-    ws_progress(produce, ws, progress; id, interval=0.1, buffer=64)
+                parent=nothing, interval=0.1, min_interval=0.016, buffer=64)
+    ws_progress(produce, ws, progress; id, interval=0.1, min_interval=0.016, buffer=64)
 
 Run `produce(publish, progress)` while streaming HTML updates to a matching
 [`htmx_ws_progress`](@ref) view. Load `HTMXObjects` and `HTTP` to activate it.
@@ -357,6 +362,14 @@ use the node with `@progress` and publish HTMX update nodes as partial results
 arrive. Treebars owns the bounded queue and the sole WebSocket sender; the
 initial tree is sent before the producer starts, and queued updates are flushed
 before the completed tree. The producer runs on the default thread pool.
+
+Each `publish`, and the producer finishing, wakes the sender: everything queued
+so far leaves in one frame with the current tree, without waiting for the next
+`interval`. Frames are at least `min(min_interval, interval)` seconds apart, so
+a burst of publishes coalesces instead of re-sending the tree for each one;
+`min_interval=0` sends as soon as the sender is free. Without publishes, the
+tree is re-sent every `interval` seconds. `buffer` bounds the queue: a publisher
+that outruns the sender waits for room.
 `publish` honors `hx-swap-oob`: a published `Node` carrying that attribute is
 delivered as a top-level message sibling, so the htmx ws extension swaps it
 into its target outside the `<id>-updates` sink instead of appending it there.
