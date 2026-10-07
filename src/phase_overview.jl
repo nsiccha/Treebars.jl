@@ -174,7 +174,12 @@ each plan is read under its lock, rather than freezing the whole workload.
 The `:state` backend records all six lifecycle states; disabled/other backends
 produce an empty tuple. A collection of nodes can be passed for a job board.
 """
-function phase_overview(nodes)
+phase_overview(nodes) = first(_phase_overview_snapshot(nodes))
+
+# The snapshot plus each plan's internal key: the declared identity and its
+# chain of declaring phases, fixed when the plan is first prepared, so it names
+# the same plan in every snapshot (renderers derive disclosure keys from it).
+function _phase_overview_snapshot(nodes)
     output = OrderedDict{Any,Any}()
     records = _PhaseGroup[]
     seen_nodes = Base.IdSet{ProgressNode}()
@@ -219,13 +224,14 @@ function phase_overview(nodes)
         end
     end
     plans = Any[]
+    plan_keys = Any[]
     for key in outermost
-        _push_overview_plan!(plans, output, nested, key, nothing)
+        _push_overview_plan!(plans, plan_keys, output, nested, key, nothing)
     end
-    Tuple(plans)
+    Tuple(plans), plan_keys
 end
 
-function _push_overview_plan!(plans, output, nested, key, parent)
+function _push_overview_plan!(plans, plan_keys, output, nested, key, parent)
     record = output[key]
     phases = Tuple(
         (; key=record.keys[i],
@@ -244,9 +250,10 @@ function _push_overview_plan!(plans, output, nested, key, parent)
         isnothing(host) || isempty(host) ? nothing : host
     end
     push!(plans, (; label, parent, items=record.items[], phases))
+    push!(plan_keys, key)
     index = length(plans)
     for child in get(nested, key, ())
-        _push_overview_plan!(plans, output, nested, child,
+        _push_overview_plan!(plans, plan_keys, output, nested, child,
             (; plan=index, phase=output[child].declarer.phase))
     end
 end
@@ -256,26 +263,46 @@ _overview_roots(nodes) = nodes
 
 # The `phase_overview` rendering keyword shared by the text and HTML renderers:
 # `true` shows every plan, `:top` only the outermost plans of the rendered
-# roots, and `false` none. Any other value is refused, never treated as false.
-_overview_enabled(mode::Bool) = mode
-_overview_enabled(mode::Symbol) = (_overview_depth_limit(mode); true)
+# roots, `:collapsed` every plan with the nested ones closed until a viewer
+# opens them, and `false` none. `depth` is the deepest nesting rendered (-1:
+# no overview) and `open` whether nested plans start expanded. Any other value
+# is refused, never treated as false.
+_overview_mode(mode::Bool) = (; depth=mode ? typemax(Int) : -1, open=true)
+_overview_mode(mode::Symbol) = _overview_mode(Val(mode))
+_overview_mode(::Val{:top}) = (; depth=0, open=true)
+_overview_mode(::Val{:collapsed}) = (; depth=typemax(Int), open=false)
+_overview_mode(::Val{mode}) where {mode} = throw(ArgumentError(
+    "phase_overview accepts true, false, :top or :collapsed; got :$mode"))
 
-_overview_depth_limit(::Bool) = typemax(Int)
-_overview_depth_limit(mode::Symbol) = mode === :top ? 0 :
-    throw(ArgumentError("phase_overview accepts true, false or :top; got :$mode"))
+_overview_enabled(mode) = _overview_mode(mode).depth >= 0
 
-# Rendered overview entries: each plan with its nesting depth and caption.
+# Rendered overview entries: each plan with its nesting depth, caption, the
+# entry index of the plan it is nested in, whether it starts open, and a
+# disclosure key. The key hashes the plan's internal key, so it is the same in
+# every snapshot of a live view — unaffected by plans that appear later or by
+# labels and counts that change — and a viewer's open/closed choice can follow
+# each plan across updates.
 function _overview_entries(nodes, mode)
-    _overview_enabled(mode) || return ()
-    limit = _overview_depth_limit(mode)
+    (; depth, open) = _overview_mode(mode)
+    limit = depth
+    limit < 0 && return ()
+    plans, plan_keys = _phase_overview_snapshot(nodes)
     depths = Int[]
+    rendered = Int[]   # per snapshot plan: its entry index, or 0 when not rendered
     entries = Any[]
-    for plan in phase_overview(nodes)
-        depth = isnothing(plan.parent) ? 0 : depths[plan.parent.plan] + 1
+    for (plan, plan_key) in zip(plans, plan_keys)
+        parent = plan.parent
+        depth = isnothing(parent) ? 0 : depths[parent.plan] + 1
         push!(depths, depth)
-        depth <= limit || continue
+        if depth > limit
+            push!(rendered, 0)
+            continue
+        end
         name = something(plan.label, "Phase plan $(length(entries) + 1)")
-        push!(entries, (; plan, depth, caption="$name · $(plan.items) prepared items"))
+        push!(entries, (; plan, depth, caption="$name · $(plan.items) prepared items",
+            parent=isnothing(parent) ? nothing : rendered[parent.plan],
+            open=depth == 0 || open, key=string(hash(repr(plan_key)); base=36)))
+        push!(rendered, length(entries))
     end
     entries
 end

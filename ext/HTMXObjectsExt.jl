@@ -266,10 +266,24 @@ htmx_treebar_styles() = h.style(Raw("""
 .treebar-phase-plan th { text-align: left; overflow-wrap: anywhere; }
 .treebar-phase-plan th[scope="row"] { overflow-wrap: anywhere; min-width: 8rem; }
 .treebar-phase-plan td { text-align: right; font-variant-numeric: tabular-nums; }
-.treebar-phase-plan-nested { padding-inline-start: 0.5rem; border-inline-start: 2px solid var(--pico-muted-border-color, #ddd); }
-.treebar-phase-plan[data-phase-depth="1"] { margin-inline-start: 1rem; }
-.treebar-phase-plan[data-phase-depth="2"] { margin-inline-start: 2rem; }
-.treebar-phase-plan[data-phase-depth="3"] { margin-inline-start: 3rem; }
+/* A nested plan is a disclosure inside the plan it is nested in, so each level
+   indents once more; its summary carries the caption, which the table keeps
+   for assistive technology only. */
+.treebar-phase-disclosure {
+    margin: 0.25rem 0 0.25rem 1rem; padding-inline-start: 0.5rem;
+    border-inline-start: 2px solid var(--pico-muted-border-color, #ddd);
+}
+.treebar-phase-disclosure > summary { font-size: 0.85em; font-weight: 600; overflow-wrap: anywhere; cursor: pointer; }
+.treebar-phase-disclosure[open] > summary { margin-bottom: 0.25rem; }
+.treebar-phase-disclosure > .treebar-phase-plan caption {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip-path: inset(50%); white-space: nowrap;
+}
+.treebar-phase-overview-controls { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
+.treebar-phase-overview-controls button {
+    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
+    width: auto; cursor: pointer;
+}
 @media (max-width: 600px) {
     .treebar-phase-plan table, .treebar-phase-plan caption, .treebar-phase-plan tbody { display: block; }
     .treebar-phase-plan thead { display: none; }
@@ -322,8 +336,9 @@ htmx_treebar_styles() = h.style(Raw("""
 # Tracking is incremental: two live sets (running spans, poller wrappers)
 # seeded once and kept current by a MutationObserver, so ticks and swaps cost
 # work proportional to the active nodes / changed fragment, never the document.
-# The same script owns poller Pause/terminalization and the keyed board
-# reconciler (`htmx_render_board`).
+# The same script owns poller Pause/terminalization, the keyed board
+# reconciler (`htmx_render_board`), and carrying viewer choices (overview
+# disclosures) onto the markup each live update swaps in.
 htmx_treebar_script() = h.script(Raw("""
 (function(){
     // Band-based formatter mirroring the server-side short_duration: sub-100ms
@@ -520,11 +535,45 @@ htmx_treebar_script() = h.script(Raw("""
     // only. Poller wrappers are born by insertion (childList) and die by
     // terminalization or removal (lazy prune in syncBadgeLive) — never by a
     // class flip a filter would need to watch, so `class` stays unobserved.
+    // Viewer choices carried across live updates. A poll swap, a WebSocket
+    // frame and a board update each replace rendered markup wholesale, and
+    // the old markup leaves in the same observer batch that brings its
+    // replacement, so a choice the viewer made on the old markup is moved
+    // onto the new one before it paints: a disclosure's open state, matched
+    // by data-treebar-disclosure in document order. Server defaults apply
+    // only to markup that replaces nothing. Costs work proportional to the
+    // changed fragments, like the live sets above.
+    var CARRY_SEL = 'details[data-treebar-disclosure]';
+    function eachCarried(root, fn){
+        if (root.nodeType !== 1) return;
+        if (root.matches(CARRY_SEL)) fn(root);
+        var q = root.querySelectorAll(CARRY_SEL);
+        for (var i = 0; i < q.length; i++) fn(q[i]);
+    }
+    function carryViewerState(removed, added){
+        if (!removed.length || !added.length) return;
+        var open = {}, any = false;
+        removed.forEach(function(root){ eachCarried(root, function(el){
+            var key = el.dataset.treebarDisclosure;
+            (open[key] = open[key] || []).push(el.open);
+            any = true;
+        }); });
+        if (!any) return;
+        added.forEach(function(root){
+            if (!root.isConnected) return;
+            eachCarried(root, function(el){
+                var was = open[el.dataset.treebarDisclosure];
+                if (was && was.length){ var o = was.shift(); if (el.open !== o) el.open = o; }
+            });
+        });
+    }
     var tbObserver = new MutationObserver(function(records){
+        var removed = [], added = [];
         for (var i = 0; i < records.length; i++){
             var r = records[i];
             if (r.type === 'childList'){
-                for (var j = 0; j < r.addedNodes.length; j++) collect(r.addedNodes[j]);
+                for (var j = 0; j < r.addedNodes.length; j++){ collect(r.addedNodes[j]); added.push(r.addedNodes[j]); }
+                for (var k = 0; k < r.removedNodes.length; k++) removed.push(r.removedNodes[k]);
             } else if (r.type === 'attributes' && r.target.nodeType === 1){
                 var el = r.target;
                 if (!el.classList.contains('treebar-duration')) continue;
@@ -540,6 +589,7 @@ htmx_treebar_script() = h.script(Raw("""
                 }
             }
         }
+        carryViewerState(removed, added);
     });
     document.addEventListener('htmx:afterSwap', reanchorAndTick);
     document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
@@ -745,6 +795,58 @@ htmx_treebar_script() = h.script(Raw("""
 # and is imported above — the core text renderer (`render_text`) shares it, so
 # the text dump and this HTML render can never disagree about which nodes exist.
 
+# A plan nested in another plan's phase renders as a disclosure inside that
+# plan's output, captioned with the declaring phase's label: open for
+# `phase_overview=true`, closed for `:collapsed`. `data-treebar-disclosure`
+# names the plan stably across snapshots, so `htmx_treebar_script` keeps a
+# viewer's choice when a live update replaces the overview.
+const _OVERVIEW_STATES = (:pending, :running, :finished, :reused, :failed, :skipped)
+
+_phase_plan_table(entry) =
+    h.div(class=entry.depth == 0 ? "treebar-phase-plan" : "treebar-phase-plan treebar-phase-plan-nested",
+        data_phase_depth=string(min(entry.depth, 3)))(
+        h.table()(
+            h.caption(entry.caption),
+            h.thead(h.tr(h.th(scope="col")("Phase"),
+                [h.th(scope="col")(uppercasefirst(string(state))) for state in _OVERVIEW_STATES])),
+            h.tbody([h.tr(h.th(scope="row")(phase.label),
+                [h.td(data_phase_state=string(state))(string(getproperty(phase, state)))
+                    for state in _OVERVIEW_STATES]) for phase in entry.plan.phases]),
+        ))
+
+# HTMX flattens a Vector child one level only, so every list below is flat:
+# a plan's table followed by the disclosures of the plans nested in it.
+function _phase_plan_html(entries, nested, i)
+    entry = entries[i]
+    body = Any[_phase_plan_table(entry)]
+    for j in nested[i]
+        push!(body, h.details(class="treebar-phase-disclosure", data_treebar_disclosure=entries[j].key,
+            open=entries[j].open ? true : nothing)(h.summary(entries[j].caption), _phase_plan_html(entries, nested, j)))
+    end
+    body
+end
+
+_disclosure_onclick(open::Bool) = "var o = this.closest('.treebar-phase-overview'); if(!o) return; " *
+    "o.querySelectorAll('details.treebar-phase-disclosure').forEach(function(d){ d.open = $open; });"
+
+function _phase_overview_html(nodes, mode; board=false)
+    entries = Treebars._overview_entries(nodes, mode)
+    isempty(entries) && !board && return ""
+    nested = [Int[] for _ in entries]
+    for (i, entry) in enumerate(entries)
+        isnothing(entry.parent) || push!(nested[entry.parent], i)
+    end
+    controls = any(entry -> entry.depth > 0, entries) ?
+        h.div(class="treebar-phase-overview-controls")(
+            h.button(type="button", class="outline secondary treebar-phase-expand",
+                onclick=_disclosure_onclick(true))("Expand all"),
+            h.button(type="button", class="outline secondary treebar-phase-collapse",
+                onclick=_disclosure_onclick(false))("Collapse all")) : ""
+    plans = reduce(vcat, (_phase_plan_html(entries, nested, i) for (i, entry) in enumerate(entries)
+        if isnothing(entry.parent)); init=Any[])
+    h.div(class=board ? "treebar-phase-overview treebar-board-overview" : "treebar-phase-overview")(controls, plans)
+end
+
 # Render a StateProgress node as HTML. `scoped=false` (used internally by
 # polling_fetchindex) suppresses data-show-* attrs on inner .treebar-children,
 # so the .treebar-poller wrapper's descendant CSS rule controls visibility
@@ -761,25 +863,6 @@ htmx_treebar_script() = h.script(Raw("""
 # Its children are hoisted to the parent's level by
 # `_flatten_displayed_children`, so a transparent node is normally never
 # reached here — this branch is the safety net for direct calls.
-# A plan nested in another plan's phase is indented under it (depth capped for
-# the stylesheet) and captioned with that phase's label.
-function _phase_overview_html(nodes, mode; board=false)
-    entries = Treebars._overview_entries(nodes, mode)
-    isempty(entries) && !board && return ""
-    states = (:pending, :running, :finished, :reused, :failed, :skipped)
-    tables = [h.div(class=entry.depth == 0 ? "treebar-phase-plan" : "treebar-phase-plan treebar-phase-plan-nested",
-            data_phase_depth=string(min(entry.depth, 3)))(
-        h.table()(
-            h.caption(entry.caption),
-            h.thead(h.tr(h.th(scope="col")("Phase"),
-                [h.th(scope="col")(uppercasefirst(string(state))) for state in states])),
-            h.tbody([h.tr(h.th(scope="row")(phase.label),
-                [h.td(data_phase_state=string(state))(string(getproperty(phase, state)))
-                    for state in states]) for phase in entry.plan.phases]),
-        )) for entry in entries]
-    h.div(class=board ? "treebar-phase-overview treebar-board-overview" : "treebar-phase-overview")(tables)
-end
-
 function htmx_render(node::ProgressNode{<:StateProgress}; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl

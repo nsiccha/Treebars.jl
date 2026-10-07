@@ -163,6 +163,162 @@ end
     end
 end
 
+@testitem "Nested phase plans render as keyed disclosures, collapsed on request" tags=[:unit, :phase_overview, :render] begin
+    using Treebars, HTMXObjects
+    let
+        html(x) = sprint(show, MIME"text/html"(), x)
+        disclosures(v) = [m.match for m in eachmatch(r"<details class=\"treebar-phase-disclosure\"[^>]*>", v)]
+        keys_of(v) = [m.captures[1] for m in eachmatch(r"data-treebar-disclosure=\"([^\"]+)\"", v)]
+        isopen(tag) = occursin(r"\bopen(?:=|\s|>)", tag)
+        root = initialize_progress!(:state; description="Synthetic run")
+        stages = (alpha="Alpha", beta="Beta", gamma="Gamma")
+        # `alpha` and `gamma` declare identical preparation keys.
+        preps = (alpha=(compile="Compile", warm="Warm"), beta=(build="Build",),
+                 gamma=(compile="Compile", warm="Warm"))
+        early = Ref("")   # one model, before its last stage prepared
+        for model in ("first", "second")
+            with_progress(root; description="Model $model") do model_node
+                with_prepared_phases(model_node, stages) do stage_phases
+                    for k in keys(stages)
+                        model == "first" && k === :gamma &&
+                            (early[] = html(htmx_render(root; phase_overview=:collapsed)))
+                        with_prepared_progress(stage_phases[k]) do stage
+                            with_prepared_phases(stage, preps[k]) do prep_phases
+                                foreach(p -> with_prepared_progress(_ -> nothing, p), prep_phases)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        collapsed = html(htmx_render(root; phase_overview=:collapsed))
+        tags = disclosures(collapsed)
+        @test length(tags) == 3 && !any(isopen, tags)
+        # The outermost plan stays a plain table ahead of its nested disclosures.
+        @test findfirst("Phase plan 1 · 2 prepared items", collapsed)[1] < findfirst("<details", collapsed)[1]
+        @test occursin("<summary>Alpha · 2 prepared items</summary>", collapsed)
+        @test occursin("treebar-phase-expand", collapsed) && occursin("treebar-phase-collapse", collapsed)
+        # Every plan keeps a stable key: identical declarations under different
+        # phases differ, and neither a plan that appears later nor the outer
+        # label changing ("Model first" -> unlabeled) renames the earlier ones.
+        @test allunique(keys_of(collapsed))
+        @test occursin("Model first · 1 prepared items", early[])
+        @test keys_of(early[]) == keys_of(collapsed)[1:2]
+        @test keys_of(html(htmx_render(root; phase_overview=true))) == keys_of(collapsed)
+
+        expanded = html(htmx_render(root; phase_overview=true))
+        @test length(disclosures(expanded)) == 3 && all(isopen, disclosures(expanded))
+        top = html(htmx_render(root; phase_overview=:top))
+        @test isempty(disclosures(top)) && !occursin("treebar-phase-expand", top)
+        # A plan with nothing nested in it gets no disclosure controls.
+        flat = initialize_progress!(:state; description="Flat batch")
+        with_prepared_phases(flat, (load="Load", fit="Fit")) do phases
+            foreach(p -> with_prepared_progress(_ -> nothing, p), phases)
+        end
+        @test !occursin("treebar-phase-expand", html(htmx_render(flat; phase_overview=true)))
+
+        # Every renderer that accepts `true` accepts `:collapsed`.
+        @test disclosures(htmx_ws_render(root; phase_overview=:collapsed)) == tags
+        @test disclosures(html(htmx_ws_progress("Content"; progress=root, url="/public", id="probe",
+            phase_overview=:collapsed))) == tags
+        @test disclosures(html(htmx_render_children(root; phase_overview=:collapsed))) == tags
+        entry = (; key="run", label="Run", state=:done, node=root)
+        @test disclosures(html(htmx_render_board([entry]; phase_overview=:collapsed))) == tags
+        @test_throws "phase_overview accepts true, false, :top or :collapsed" htmx_render(root; phase_overview=:nested)
+
+        # Text shows what the HTML view shows before a viewer opens anything.
+        text = render_text(root; phase_overview=:collapsed)
+        @test occursin("Phase plan 1 · 2 prepared items\n  Alpha: 0 pending", text)
+        @test occursin("\n  ▸ Alpha · 2 prepared items\n  ▸ Beta · 2 prepared items\n  ▸ Gamma · 2 prepared items\n", text)
+        @test !occursin("Compile:", text)
+        @test !occursin("▸", render_text(root; phase_overview=true))
+    end
+end
+
+@testitem "Viewer disclosure choices survive live replacement in a browser" tags=[:unit, :phase_overview, :render] begin
+    using Treebars, HTMXObjects
+    let
+        # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or chromium).
+        # No htmx and no server: the page replaces markup exactly as each live
+        # transport does — a WebSocket frame swaps its whole `<div id>`, a poll
+        # swaps the poller's inner, a board update goes through the reconciler —
+        # and records which nested plans are open afterwards.
+        if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+            @test_skip true
+        else
+            chrome = Sys.which("google-chrome")
+            isnothing(chrome) && (chrome = Sys.which("chromium"))
+            isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires Chrome")
+            html(x) = sprint(show, MIME"text/html"(), x)
+            root = initialize_progress!(:state; description="Synthetic run")
+            frames = String[]
+            board(; id="b") = html(htmx_render_board([(; key="run", label="Run", state=:running,
+                elapsed_ms=1, node=root)]; id, phase_overview=:collapsed))
+            with_prepared_phases(root, (alpha="Alpha", beta="Beta")) do stages
+                for k in (:alpha, :beta)
+                    with_prepared_progress(stages[k]) do stage
+                        with_prepared_phases(stage, (compile="Compile", warm="Warm")) do steps
+                            foreach(p -> with_prepared_progress(_ -> nothing, p), steps)
+                            push!(frames, htmx_ws_render(root; id="run-progress", phase_overview=:collapsed))
+                        end
+                    end
+                end
+            end
+            poll = html(HTMXObjects.h.div(class="treebar-poller")(HTMXObjects.h.div(class="treebar-poller-inner")(
+                htmx_render(root; scoped=false, phase_overview=:collapsed))))
+            literal(s) = "'" * replace(s, "\\"=>"\\\\", "'"=>"\\'", "\n"=>"\\n", "</"=>"<\\/") * "'"
+            driver = """
+            window.addEventListener('load', async function(){
+                var F = [$(join(literal.(frames), ","))], P = $(literal(poll)), B = $(literal(board()));
+                // Each transport replaces markup in its own task; the carried
+                // state lands before the next one, so yield after each update.
+                var settle = function(){ return new Promise(function(done){ setTimeout(done, 0); }); };
+                var opened = function(el){ return Array.prototype.map.call(el.querySelectorAll('details.treebar-phase-disclosure'),
+                    function(d){ return d.open ? 1 : 0; }).join(''); };
+                var r = [];
+                var ws = document.getElementById('run-progress');
+                r.push(opened(ws));                                   // one nested plan, closed
+                ws.querySelector('details.treebar-phase-disclosure').open = true;
+                ws.outerHTML = F[1];                                  // next frame adds a second plan
+                await settle();
+                var ws2 = document.getElementById('run-progress');
+                r.push(ws2 !== ws ? opened(ws2) : 'same');
+                var poller = document.querySelector('.treebar-poller');
+                poller.querySelector('details.treebar-phase-disclosure').open = true;
+                var t = document.createElement('template'); t.innerHTML = P;
+                poller.querySelector('.treebar-poller-inner').replaceWith(t.content.querySelector('.treebar-poller-inner'));
+                await settle();
+                r.push(opened(poller));
+                var b = document.getElementById('b');
+                b.querySelector('.treebar-phase-expand').click();
+                treebarUpdateBoard(B);
+                await settle();
+                r.push(opened(b));
+                b.querySelector('.treebar-phase-collapse').click();
+                treebarUpdateBoard(B);
+                await settle();
+                r.push(opened(b));
+                var out = document.createElement('pre'); out.id = 'result';
+                out.textContent = r.join('|');
+                document.body.appendChild(out);
+            });
+            """
+            dir = mktempdir()
+            file = joinpath(dir, "carry.html")
+            write(file, "<!DOCTYPE html>" * html(h.html(
+                h.head(htmx_treebar_styles(), htmx_treebar_script()),
+                h.body(Raw(frames[1]), Raw(poll), Raw(board()), h.script(Raw(driver))))))
+            profile = joinpath(dir, "profile")
+            dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+            result = match(r"<pre id=\"result\">([^<]*)</pre>", dom)
+            @test result !== nothing
+            # ws: opened plan stays open, the newly appearing one starts closed;
+            # poll: the opened plan stays open; board: expand all / collapse all hold.
+            @test result === nothing ? false : result.captures[1] == "0|10|10|11|00"
+        end
+    end
+end
+
 @testitem "Nested macro phase plans name the phase that declared them" tags=[:unit, :phase_overview, :macro] begin
     using Treebars
     let
