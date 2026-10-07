@@ -100,8 +100,9 @@ end
     @test occursin("treebar-children", a) && !occursin("data-show-finished=\"0\"><div class=\"treebar-pills\"", a)
     @test occursin("1 finished", a)
     @test occursin("chains:", a)
-    # The pill toggles the nearest wrapper, poller or board item.
-    @test occursin("closest(&#39;.treebar-poller, .treebar-board-item&#39;)", a)
+    # The pill toggles the nearest scope that outlives updates: poller, board
+    # item or WebSocket frame.
+    @test occursin("closest(&#39;.treebar-poller, .treebar-board-item, .treebar-ws-frame&#39;)", a)
     # Label is escaped; the header ticks through the ordinary duration contract.
     @test occursin("<strong class=\"treebar-board-label\">Fit &lt;model&gt;</strong>", a)
     @test occursin("class=\"treebar-duration treebar-board-duration\" data-treebar-status=\"running\" data-elapsed-ms=\"4200\"> — 4.2s so far", a)

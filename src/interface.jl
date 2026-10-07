@@ -214,9 +214,13 @@ forwarded to `htmx_render_children` at every level (see there).
 
 `phase_overview=true` prepends per-plan lifecycle counts from
 [`phase_overview`](@ref), once above the tree. A plan declared inside another
-plan's prepared phase is indented under it and captioned with that phase's
-label; `phase_overview=:top` shows only the outermost plans. It does not elide
-individual nodes. The same opt-in is supported by `htmx_render_children`,
+plan's prepared phase renders as an open disclosure under it, summarized by
+that phase's label; `phase_overview=:collapsed` renders those disclosures
+closed, and `phase_overview=:top` shows only the outermost plans. With nested
+plans, "Expand all" / "Collapse all" controls head the overview. A viewer's
+open/closed choice per plan survives live updates when
+[`htmx_treebar_script`](@ref) is on the page. It does not elide individual
+nodes. The same opt-in is supported by `htmx_render_children`,
 `htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`, and
 `polling_fetchindex` (HTTP and WebSocket).
 """
@@ -311,7 +315,10 @@ server-rendered duration text; skipped nodes and never-entered reused nodes
 carry no duration.
 It is also the keyed reconciler behind [`htmx_render_board`](@ref): board
 polls, WebSocket frames and `window.treebarUpdateBoard(html)` update items in
-place by key instead of replacing the board.
+place by key instead of replacing the board. Every live update (poll swap,
+WebSocket frame, board update) keeps the viewer's choices: a nested phase-plan
+disclosure the viewer opened or closed (`phase_overview=true` / `:collapsed`)
+stays so on the replacement markup.
 Implementation lives in the HTMXObjects package extension.
 
 Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
@@ -392,8 +399,11 @@ function htmx_ws_progress end
     htmx_ws_render(node; id="treebar-progress")
 
 Default `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded.
-Wraps [`htmx_render`](@ref) in a `<div id=…>` so the HTMX ws extension swaps
-by element id.
+Wraps [`htmx_render`](@ref) in a `<div id=… class="treebar-ws-frame">` so the
+HTMX ws extension swaps by element id. The frame is the tree's pill scope,
+like a poller's wrapper: with [`htmx_treebar_script`](@ref) on the page, a
+viewer's pill toggles (and nested phase-plan disclosures) carry over to each
+next frame with the same `id`.
 """
 htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_render. Load HTMXObjects to enable HTML WebSocket rendering."
 
@@ -455,8 +465,9 @@ the live board by it. For WebSocket push see [`ws_board`](@ref).
 Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
 page.
 
-`phase_overview=true` (or `:top`, outermost plans only) shows one overview
-across the listed entries' progress nodes. Shared nodes and duplicate entry keys count once; entries without a
+`phase_overview=true` (or `:top`, outermost plans only, or `:collapsed`,
+nested plans closed) shows one overview across the listed entries' progress
+nodes. Shared nodes and duplicate entry keys count once; entries without a
 node contribute no phase counts. The overview follows the current server
 snapshot, while departing items may still linger visually. A history board
 must continue listing completed roots to include their counts. Item trees

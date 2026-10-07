@@ -139,12 +139,24 @@ convention of the lifecycle functions.
 Set `phase_overview=true` to prepend the per-plan phase counts from
 [`phase_overview`](@ref); a plan declared inside another plan's phase is
 indented under it and named after that phase. `phase_overview=:top` shows only
-the outermost plans. The ordinary tree follows in full.
+the outermost plans. `phase_overview=:collapsed` shows what the HTML view shows
+before a viewer opens anything: outermost plans in full, and each plan nested
+directly in them as one `▸ <caption>` line. The ordinary tree follows in full.
 """
 function render_text(node::ProgressNode; phase_overview::Union{Bool,Symbol}=false)
     sprint() do io
-        for entry in _overview_entries(node, phase_overview)
+        entries = _overview_entries(node, phase_overview)
+        shown = falses(length(entries))
+        for (i, entry) in enumerate(entries)
+            # A collapsed plan shows its caption only and hides the plans nested in it.
+            parent = entry.parent
+            shown[i] = isnothing(parent) || (shown[parent] && entries[parent].open)
+            shown[i] || continue
             indent = "  "^entry.depth
+            if !entry.open
+                println(io, indent, "▸ ", entry.caption)
+                continue
+            end
             println(io, indent, entry.caption)
             for phase in entry.plan.phases
                 println(io, indent, "  ", phase.label, ": ",

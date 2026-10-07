@@ -217,9 +217,23 @@ end
 println(render_text(benchmark; phase_overview=true))
 ```
 
+In the HTML views each nested plan is a disclosure under the plan it is nested
+in, summarized by the declaring phase's label, with "Expand all" / "Collapse
+all" controls above the overview. `phase_overview=true` starts them open;
+`phase_overview=:collapsed` starts them closed, so a run whose stages each
+declare their own preparations shows one summary line per stage until the
+viewer opens it. A viewer's open/closed choice per plan survives every live
+update (poll, WebSocket frame, board update) as long as `htmx_treebar_script()`
+is on the page. In `render_text`, `:collapsed` prints each closed plan as one
+`▸` caption line:
+
+```@example batch_overview
+println(render_text(benchmark; phase_overview=:collapsed))
+```
+
 `phase_overview=:top` shows only the outermost plans, keeping the overview to
 one summary per independent plan while every nested phase stays in the tree.
-It is accepted wherever `phase_overview=true` is. In a snapshot, a nested
+`:top` and `:collapsed` are accepted wherever `phase_overview=true` is. In a snapshot, a nested
 plan's `parent` is `(; plan, phase)`: the enclosing record's index and the
 enclosing phase's key; plans are ordered so each precedes those nested in it.
 The same declaration inside different enclosing phases forms separate plans.
