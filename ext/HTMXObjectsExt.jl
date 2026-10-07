@@ -1462,7 +1462,11 @@ function ws_progress(produce::Function, ws::WebSocket, node::ProgressNode{<:Stat
     end
     result = nothing
     try
-        connected[] && ws_progress(ws, node; interval, min_interval, wake, render=render_live)
+        # The route's own task is sticky to one thread, which a producer that
+        # never yields can occupy until it finishes. The sender gets its own
+        # task, free to run on any idle thread (the interactive pool if any).
+        connected[] && fetch(Threads.@spawn :interactive ws_progress(ws, node;
+            interval, min_interval, wake, render=render_live))
     finally
         connected[] = false
         isopen(queue) && close(queue)

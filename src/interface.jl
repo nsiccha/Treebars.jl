@@ -361,7 +361,9 @@ The callback receives a normal `:state` progress node and `publish(fragment)`:
 use the node with `@progress` and publish HTMX update nodes as partial results
 arrive. Treebars owns the bounded queue and the sole WebSocket sender; the
 initial tree is sent before the producer starts, and queued updates are flushed
-before the completed tree. The producer runs on the default thread pool.
+before the completed tree. The producer runs on the default thread pool; the
+sender runs on its own task (on the interactive pool when Julia has one), so a
+producer that never yields cannot hold it up.
 
 Each `publish`, and the producer finishing, wakes the sender: everything queued
 so far leaves in one frame with the current tree, without waiting for the next
