@@ -4,9 +4,15 @@ end
 
 # Prepared phase counts outlive transient phase nodes, without retaining them.
 # Only prepared-phase owners allocate a group; ordinary counters keep nothing.
+# `key` is the plan's overview identity: its declared identity plus the
+# enclosing prepared phase it was declared in (`declarer`, by plan key and
+# index — never a node or group reference, so no detached tree is retained).
 mutable struct _PhaseGroup
     lock::ReentrantLock
     ancestor::Union{Nothing,_PhaseGroup}
+    key::Any
+    declarer::Any
+    host::String
     keys::Tuple
     labels::Vector{Union{Nothing,String}}
     counts::Matrix{Int}

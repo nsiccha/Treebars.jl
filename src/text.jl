@@ -137,24 +137,25 @@ Returns `"(no progress tree)"` for `nothing`, matching the no-op-on-`nothing`
 convention of the lifecycle functions.
 
 Set `phase_overview=true` to prepend the per-plan phase counts from
-[`phase_overview`](@ref). The ordinary tree follows in full.
+[`phase_overview`](@ref); a plan declared inside another plan's phase is
+indented under it and named after that phase. `phase_overview=:top` shows only
+the outermost plans. The ordinary tree follows in full.
 """
-function render_text(node::ProgressNode; phase_overview::Bool=false)
+function render_text(node::ProgressNode; phase_overview::Union{Bool,Symbol}=false)
     sprint() do io
-        if phase_overview
-            for (i, plan) in enumerate(Treebars.phase_overview(node))
-                println(io, "Phase plan $i · $(plan.items) prepared items")
-                for phase in plan.phases
-                    println(io, "  ", phase.label, ": ",
-                        join(("$(getproperty(phase, state)) $state" for state in
-                            (:pending, :running, :finished, :reused, :failed, :skipped)), " · "))
-                end
+        for entry in _overview_entries(node, phase_overview)
+            indent = "  "^entry.depth
+            println(io, indent, entry.caption)
+            for phase in entry.plan.phases
+                println(io, indent, "  ", phase.label, ": ",
+                    join(("$(getproperty(phase, state)) $state" for state in
+                        (:pending, :running, :finished, :reused, :failed, :skipped)), " · "))
             end
         end
         _print_text_tree(io, node)
     end
 end
-render_text(::Nothing; phase_overview::Bool=false) = "(no progress tree)"
+render_text(::Nothing; phase_overview::Union{Bool,Symbol}=false) = "(no progress tree)"
 
 Base.show(io::IO, ::MIME"text/plain", node::ProgressNode) = _print_text_tree(io, node)
 
