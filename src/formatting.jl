@@ -61,7 +61,7 @@ round2(x::Missing) = x
 round2(x::String) = x
 
 """
-    short_string(x) -> String
+    short_string(x; sigdigits=2) -> String
 
 Compact string form for progress display:
 
@@ -70,8 +70,14 @@ Compact string form for progress display:
   `72000.0 → "72k"`, `-72000.0 → "-72k"`, `1e12 → "1.0T"`). The same numeric
   value renders identically whatever its type, and `-x` always renders as `x`
   with a leading `"-"`.
-- Below `1e3` a Real is rounded via [`round2`](@ref) with a trailing `".0"`
-  trimmed; an Integer renders as-is. Non-finite Reals pass through.
+- Below `1e3` a Real is rounded to `sigdigits` significant digits (the default 2
+  is [`round2`](@ref)); an Integer renders as-is. A trailing `".0"` is trimmed
+  once it is not one of those digits (`12.0 → "12"` but `1.0 → "1.0"`, and
+  `12.0 → "12.0"` at `sigdigits=3`). Non-finite Reals pass through.
+- `sigdigits` sets the precision of a suffixed mantissa the same way
+  (`short_string(123_456.0; sigdigits=4) == "123.5k"`, Integers included), and is
+  forwarded to the elements of vectors, pairs, named tuples and a wrapped
+  [`Fraction`](@ref). Other values ignore it. It must be positive.
 - Thresholds key off the *raw* value, so rounding may carry a mantissa up to
   `"1000"` (`999.0 → "1000"`, `999_999 → "1000k"`). Magnitudes past the largest
   suffix (`≥ 1e21`, BigInt only) render un-suffixed.
@@ -79,20 +85,29 @@ Compact string form for progress display:
 - Pairs render as `"k => v"`; named tuples as `"(;k=v, …)"`.
 - A wrapped [`Fraction`](@ref) renders as a percentage.
 
-Extend with package-specific methods in consuming packages.
+Extend with package-specific methods in consuming packages; accept a
+`sigdigits` keyword to honour it inside containers.
 """
-short_string(x) = string(x)
+short_string(x; sigdigits::Integer=2) = (_check_sigdigits(sigdigits); string(x))
 
-# Round-to-2-sig-figs with a trailing ".0" trimmed: the un-suffixed core shared
-# by the Real and Integer methods. It must NOT recurse back into `short_string`,
-# or a scaled value ≥ 1e3 would be abbreviated a second time (`10^12` → "1.0kG").
-function _short_significand(x::Real)
-    rv = string(round2(x))
-    # Trim on the DIGIT count, not the raw length: a leading "-" must not tip the
-    # threshold, else "1.0" is kept while "-1.0" becomes "-1" (so 1000 → "1.0k"
-    # but -1000 → "-1k").
-    ndigits = length(rv) - (startswith(rv, "-") ? 1 : 0)
-    endswith(rv, ".0") && ndigits > 3 ? rv[1:end-2] : rv
+# `round(x; sigdigits=0)` silently returns 0.0, so a non-positive count would
+# render every number as "0.0" instead of failing.
+function _check_sigdigits(sigdigits::Integer)
+    sigdigits > 0 || throw(ArgumentError("short_string: sigdigits must be positive, got $sigdigits"))
+    sigdigits
+end
+
+# Round to `sigdigits` significant figures with a trailing ".0" trimmed once it is
+# not one of them: the un-suffixed core shared by the Real and Integer methods. It
+# must NOT recurse back into `short_string`, or a scaled value ≥ 1e3 would be
+# abbreviated a second time (`10^12` → "1.0kG").
+function _short_significand(x::Real, sigdigits::Integer)
+    rv = string(round(x; sigdigits))
+    # Count DIGITS, not the raw length: a leading "-" must not tip the threshold,
+    # else "1.0" is kept while "-1.0" becomes "-1" (so 1000 → "1.0k" but
+    # -1000 → "-1k").
+    ndigits = length(rv) - (startswith(rv, "-") ? 1 : 0) - 1  # minus the "."
+    endswith(rv, ".0") && ndigits > sigdigits ? rv[1:end-2] : rv
 end
 
 # Largest-first. Full SI range: stopping at "G" made anything ≥ 1e12 scale into a
@@ -103,32 +118,36 @@ const _SI_SUFFIXES = ((1e18, "E"), (1e15, "P"), (1e12, "T"), (1e9, "G"), (1e6, "
 # `float` before `abs` so `abs(typemin(Int))` can't wrap around to a negative.
 # The upper bound keeps the mantissa in [1, 1000) — beyond the largest suffix
 # (≥ 1e21, reachable only by BigInt) we fall back to the un-suffixed form rather
-# than emit "1000E". Thresholds key off the RAW value, so round2 may still carry a
-# mantissa up to "1000" (999_999 → "1000k"); that is the documented behavior.
-function _si_suffixed(x::Real)
+# than emit "1000E". Thresholds key off the RAW value, so rounding may still carry
+# a mantissa up to "1000" (999_999 → "1000k"); that is the documented behavior.
+function _si_suffixed(x::Real, sigdigits::Integer)
     ax = abs(float(x))
     for (scale, suffix) in _SI_SUFFIXES
-        scale <= ax < 1000scale && return _short_significand(x / scale) * suffix
+        scale <= ax < 1000scale && return _short_significand(x / scale, sigdigits) * suffix
     end
     nothing
 end
 
-function short_string(x::Real)
+function short_string(x::Real; sigdigits::Integer=2)
+    _check_sigdigits(sigdigits)
     isfinite(x) || return string(x)
-    @something _si_suffixed(x) _short_significand(x)
+    @something _si_suffixed(x, sigdigits) _short_significand(x, sigdigits)
 end
-short_string(x::Integer) = @something _si_suffixed(x) string(x)
-function short_string(x::AbstractVector)
+short_string(x::Integer; sigdigits::Integer=2) =
+    @something _si_suffixed(x, _check_sigdigits(sigdigits)) string(x)
+function short_string(x::AbstractVector; sigdigits::Integer=2)
+    s(v) = short_string(v; sigdigits)
     "[" * if length(x) > 7
-        join(map(short_string, x[1:3]), ", ") * ", ..., " * join(map(short_string, x[end-2:end]), ", ")
+        join(map(s, x[1:3]), ", ") * ", ..., " * join(map(s, x[end-2:end]), ", ")
     else
-        join(map(short_string, x), ", ")
+        join(map(s, x), ", ")
     end * "]"
 end
-short_string(x::Pair) = "$(short_string(first(x))) => $(short_string(last(x)))"
-function short_string(x::NamedTuple)
+short_string(x::Pair; sigdigits::Integer=2) =
+    "$(short_string(first(x); sigdigits)) => $(short_string(last(x); sigdigits))"
+function short_string(x::NamedTuple; sigdigits::Integer=2)
     "(;" * join([
-        short_string(key) * "=" * short_string(value)
+        short_string(key) * "=" * short_string(value; sigdigits)
         for (key, value) in pairs(x)
     ], ", ") * ")"
 end
@@ -144,6 +163,6 @@ the underlying `value`.
 struct Fraction{T}
     value::T
 end
-short_string(x::Fraction) = short_string(x.value * 100) * "%"
+short_string(x::Fraction; sigdigits::Integer=2) = short_string(x.value * 100; sigdigits) * "%"
 Base.isless(x::Fraction, y::Fraction) = isless(x.value, y.value)
 Base.isequal(x::Fraction, y::Fraction) = isequal(x.value, y.value)
