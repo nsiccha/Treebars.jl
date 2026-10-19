@@ -305,6 +305,17 @@ Fraction(0.95) |> short_string  # "95%"
 short_duration(Dates.Second(83))  # "1m 23s"
 ```
 
+`short_string` rounds Reals to 2 significant digits. Pass `sigdigits` for a
+different precision; it also applies to suffixed mantissas and is forwarded
+into vectors, pairs, named tuples and `Fraction`:
+
+```julia
+short_string(π; sigdigits=4)               # "3.142"
+short_string(123_456.0; sigdigits=4)       # "123.5k"
+short_string([1.2345, 6.789]; sigdigits=3) # "[1.23, 6.79]"
+short_string(Fraction(0.9534); sigdigits=3)  # "95.3%"
+```
+
 These are useful for formatting metadata in `update_progress!` kwargs:
 
 ```julia
