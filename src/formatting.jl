@@ -75,9 +75,10 @@ Compact string form for progress display:
   once it is not one of those digits (`12.0 → "12"` but `1.0 → "1.0"`, and
   `12.0 → "12.0"` at `sigdigits=3`). Non-finite Reals pass through.
 - `sigdigits` sets the precision of a suffixed mantissa the same way
-  (`short_string(123_456.0; sigdigits=4) == "123.5k"`, Integers included), and is
-  forwarded to the elements of vectors, pairs, named tuples and a wrapped
-  [`Fraction`](@ref). Other values ignore it. It must be positive.
+  (`short_string(123_456.0; sigdigits=4) == "123.5k"`, Integers included). It
+  must be positive. Numbers, vectors, pairs, named tuples and a wrapped
+  [`Fraction`](@ref) take it; containers pass it on to each element whose own
+  method takes it and render any other element with its plain method.
 - Thresholds key off the *raw* value, so rounding may carry a mantissa up to
   `"1000"` (`999.0 → "1000"`, `999_999 → "1000k"`). Magnitudes past the largest
   suffix (`≥ 1e21`, BigInt only) render un-suffixed.
@@ -86,9 +87,9 @@ Compact string form for progress display:
 - A wrapped [`Fraction`](@ref) renders as a percentage.
 
 Extend with package-specific methods in consuming packages; accept a
-`sigdigits` keyword to honour it inside containers.
+`sigdigits` keyword for it to reach your method.
 """
-short_string(x; sigdigits::Integer=2) = (_check_sigdigits(sigdigits); string(x))
+short_string(x) = string(x)
 
 # `round(x; sigdigits=0)` silently returns 0.0, so a non-positive count would
 # render every number as "0.0" instead of failing.
@@ -135,8 +136,19 @@ function short_string(x::Real; sigdigits::Integer=2)
 end
 short_string(x::Integer; sigdigits::Integer=2) =
     @something _si_suffixed(x, _check_sigdigits(sigdigits)) string(x)
+# Keyword dispatch sees only methods that accept keywords, so passing `sigdigits`
+# to every element would silently skip a consumer's plain `short_string(::MyType)`.
+# An element gets the keyword only when its own most specific method takes it; at
+# the default no element needs it.
+function _short_element(v, sigdigits::Integer)
+    sigdigits == 2 && return short_string(v)
+    method = which(short_string, Tuple{typeof(v)})
+    :sigdigits in Base.kwarg_decl(method) ? short_string(v; sigdigits) : short_string(v)
+end
+
 function short_string(x::AbstractVector; sigdigits::Integer=2)
-    s(v) = short_string(v; sigdigits)
+    _check_sigdigits(sigdigits)
+    s(v) = _short_element(v, sigdigits)
     "[" * if length(x) > 7
         join(map(s, x[1:3]), ", ") * ", ..., " * join(map(s, x[end-2:end]), ", ")
     else
@@ -144,10 +156,11 @@ function short_string(x::AbstractVector; sigdigits::Integer=2)
     end * "]"
 end
 short_string(x::Pair; sigdigits::Integer=2) =
-    "$(short_string(first(x); sigdigits)) => $(short_string(last(x); sigdigits))"
+    "$(_short_element(first(x), _check_sigdigits(sigdigits))) => $(_short_element(last(x), sigdigits))"
 function short_string(x::NamedTuple; sigdigits::Integer=2)
+    _check_sigdigits(sigdigits)
     "(;" * join([
-        short_string(key) * "=" * short_string(value; sigdigits)
+        short_string(key) * "=" * _short_element(value, sigdigits)
         for (key, value) in pairs(x)
     ], ", ") * ")"
 end

@@ -1842,11 +1842,16 @@ end
 end
 
 @testitem "short_string sigdigits" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :format] begin
+    # Consumer extensions: one plain method, one that takes the keyword.
+    struct PlainLabel end
+    struct PreciseLabel end
+    Treebars.short_string(::PlainLabel) = "plain"
+    Treebars.short_string(::PreciseLabel; sigdigits=2) = "precise$sigdigits"
     let
     # The default is 2: passing it explicitly changes nothing.
     for v in Any[3.14159, 0.00123, 1.0, 10.0, 999.0, 72000.0, 1.5e6, 1e12, -72000.0,
                  42, 1000, 999_999, typemax(Int64), NaN, true, [1, 2.5], :a => 1.25,
-                 (; x=1.25), Fraction(0.953), "s"]
+                 (; x=1.25, s="s"), Fraction(0.953), [PlainLabel(), 1.25]]
         @test short_string(v; sigdigits=2) == short_string(v)
     end
     @test short_string(π; sigdigits=4) == "3.142"
@@ -1879,12 +1884,23 @@ end
     @test short_string(:a => 1.2345; sigdigits=3) == "a => 1.23"
     @test short_string((; a=1.2345, b="s"); sigdigits=3) == "(;a=1.23, b=s)"
     @test short_string(Fraction(0.9534); sigdigits=3) == "95.3%"
-    @test short_string("s"; sigdigits=3) == "s"
+    # A container renders other elements with their plain method, a consumer's
+    # included, and passes the keyword to a method that takes it.
+    @test short_string((; a=PlainLabel(), b=1.2345)) == "(;a=plain, b=1.2)"
+    @test short_string((; a=PlainLabel(), b=1.2345); sigdigits=3) == "(;a=plain, b=1.23)"
+    @test short_string([PreciseLabel(), "s", :t]; sigdigits=3) == "[precise3, s, t]"
+    @test short_string(PlainLabel() => PreciseLabel(); sigdigits=4) == "plain => precise4"
+    # refused: a keyword call to a method that cannot honour it fails loudly rather
+    # than rendering at the wrong precision (dev §1).
+    @test_throws MethodError short_string("s"; sigdigits=3)
+    @test_throws MethodError short_string(PlainLabel(); sigdigits=3)
     # refused: Base.round(x; sigdigits=0) silently returns 0.0, so a non-positive
     # count must fail rather than render every number as "0.0" (dev §1).
     @test_throws ArgumentError short_string(1.5; sigdigits=0)
     @test_throws ArgumentError short_string(5; sigdigits=0)
-    @test_throws ArgumentError short_string("s"; sigdigits=-1)
+    @test_throws ArgumentError short_string(["s"]; sigdigits=-1)
+    @test_throws ArgumentError short_string((; s="s"); sigdigits=0)
+    @test_throws ArgumentError short_string(:s => "s"; sigdigits=0)
     end # let (restores @testset hard scope)
 end
 
