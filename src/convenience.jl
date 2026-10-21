@@ -228,12 +228,21 @@ end
 
 The `@progress [label] map(itrs...) do args… end` sugar lowers to this, threading
 the per-element `child` as `__progress__` for the do-body (see [`@progress`](@ref)).
+A keyword block on that `map` call (`map(itrs...; kw...)`) keeps its plain-`map`
+meaning: it goes to the underlying `map`, so an empty `;` or an empty splat runs
+and a real keyword is `map`'s own `MethodError`. It does not reach the children;
+pass child `kwargs` through this function form instead.
 """
-function progress_map(f, parent, itrs...; description="Running...", transient=false, kwargs...)
+progress_map(f, parent, itrs...; kwargs...) = _progress_map(f, parent, itrs, (;); kwargs...)
+
+# `map_kwargs` is the keyword block of the `map` call the @progress map-sugar
+# rewrote (`(;)` from the function form); it is forwarded to the inner `map`.
+function _progress_map(f, parent, itrs::Tuple, map_kwargs::NamedTuple;
+                       description="Running...", transient=false, kwargs...)
     N = all(_has_length, itrs) ? minimum(length, itrs) : nothing
     loop = initialize_progress!(parent, N; description, transient)
     try
-        map(itrs...) do xs...
+        map(itrs...; map_kwargs...) do xs...
             child = initialize_progress!(loop; description="", kwargs...)
             try
                 f(child, xs...)
@@ -788,7 +797,8 @@ function _is_map_call(x)
 end
 
 # @progress ["label"] map(itrs...) do args...; body; end   (opt-in magic sugar)
-# Rewrites `map` → `progress_map`, threading a fresh per-element child node as
+# Rewrites `map` → `progress_map` (its `_progress_map` core, which also takes
+# the map call's keyword block), threading a fresh per-element child node as
 # the FIRST argument and walking the do-body so `__progress__` (and any nested
 # @progress) inside it bind to that child. The user-facing do-block stays
 # "childless": it lists only the element vars and refers to the node as
@@ -797,24 +807,36 @@ end
 function _map_progress_expr(x::Expr, label, ctx)
     child = gensym(:mapchild)
     if Meta.isexpr(x, :do)
-        callexpr = x.args[1]                 # Expr(:call, :map, itrs...)
+        callexpr = x.args[1]                 # Expr(:call, :map, [kw,] itrs...)
         lambda = x.args[2]                   # Expr(:->, params, body)
-        itrs = callexpr.args[2:end]
+        kw, itrs = _split_map_kwargs(callexpr.args[2:end])
         params = lambda.args[1]
         elem_params = Meta.isexpr(params, :tuple) ? params.args : Any[params]
         wrapped_body = progress_expr(lambda.args[2], _ctx(child, ctx.transient))
         g = Expr(:->, Expr(:tuple, child, elem_params...), wrapped_body)
-    else                                     # Expr(:call, :map, f, itrs...)
-        f = x.args[2]
-        itrs = x.args[3:end]
+    else                                     # Expr(:call, :map, [kw,] f, itrs...)
+        kw, fitrs = _split_map_kwargs(x.args[2:end])
+        f = fitrs[1]
+        itrs = fitrs[2:end]
         a = gensym(:args)
         g = Expr(:->, Expr(:tuple, child, Expr(:..., a)), Expr(:call, f, Expr(:..., a)))
     end
     desc = label === nothing ? "map(...)" : label
-    # The collections are evaluated in the enclosing scope: walk them there.
+    # The collections and the keyword block are evaluated in the enclosing
+    # scope: walk them there.
     itrs = Any[progress_expr(i, ctx) for i in itrs]
-    :($progress_map($g, $(ctx.progress), $(itrs...); description=$desc, transient=$(ctx.transient)))
+    map_kwargs = Expr(:tuple, progress_expr(kw, ctx))
+    :($_progress_map($g, $(ctx.progress), ($(itrs...),), $map_kwargs;
+        description=$desc, transient=$(ctx.transient)))
 end
+
+# A `map` call's own keyword block (`map(xs; kw...)`, the `:parameters` node the
+# parser puts first) split off its positional arguments; an empty block when it
+# has none. It becomes the NamedTuple `_progress_map` forwards to the inner
+# `map` — spliced among the positionals it was a lowering error.
+_split_map_kwargs(args) =
+    !isempty(args) && Meta.isexpr(args[1], :parameters) ? (args[1], args[2:end]) :
+                                                          (Expr(:parameters), args)
 
 # Single-stmt wrap (indeterminate child, runs for the duration of `body`)
 function _single_stmt_progress_expr(body, label, ctx)
