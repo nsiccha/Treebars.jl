@@ -2539,6 +2539,54 @@ naming the enclosing node.
 end
 
 """
+Snag `progress-label-m-6bd4c70c`: the map-sugar spliced the `map` call's own
+keyword block (`map(xs; kw...)`, a `:parameters` node) among `progress_map`'s
+positional arguments, so even an empty `;` failed to lower
+(`syntax: invalid syntax ;`). The block now keeps its plain-`map` meaning.
+"""
+@testitem "@progress map-sugar: the map call's keyword block keeps its plain-map meaning" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+    # Empty `;`, do form and call form, in a block and in a scope body.
+    @test (@progress root map([1, 2]; ) do x; x + 1; end) == [2, 3]
+    @test (@progress root map(x -> x + 1, [1, 2]; )) == [2, 3]
+    @test (@progress root begin
+        @progress "label" map([1, 2]; ) do x
+            x + 1
+        end
+    end) == [2, 3]
+    @test (Treebars.@progress_scope root begin
+        @progress "label" map([1, 2]; ) do x
+            x + 1
+        end
+    end) == [2, 3]
+    # An empty splat, with zipped iterables, as plain `map` accepts it.
+    kw = (;)
+    @test (@progress root map([1, 2], [10, 20]; kw...) do x, y; x + y; end) == [11, 22]
+    @test (@progress root map(+, [1, 2], [10, 20]; kw...)) == [11, 22]
+    # The keyword block is evaluated in the enclosing scope, like the iterables.
+    seen = Any[]
+    note(p) = (push!(seen, p); (;))
+    @test (@progress root map([1, 2]; note(__progress__)...) do x; x; end) == [1, 2]
+    @test seen[end] === root
+    # refused by `map` itself: plain `map` takes no keywords, and the sugar keeps
+    # the keyword block's plain-`map` meaning (snag `progress-label-m-6bd4c70c`).
+    @test_throws MethodError (@progress root map([1, 2]; foo=1) do x; x; end)
+    finalize_progress!(root)
+
+    # The bar and its per-element children are unchanged by the keyword block.
+    root2 = initialize_progress!(:state; description="Root2")
+    @progress root2 "bar" map([1, 2]; ) do x
+        update_progress!(__progress__, "el $x")
+    end
+    bar = only(root2.children)
+    @test bar.impl.description == "bar" && bar.impl.i == 2 && bar.impl.N == 2
+    @test length(bar.children) == 2
+    finalize_progress!(root2)
+    end # let (restores @testset hard scope)
+end
+
+"""
 Snag make-htmxobjects-7960c091: the ONLY ambient in Treebars — the
 default for `polling_fetchindex`'s `parent` kwarg, bound by
 HTMXObjects' `dispatch`, read only when that kwarg is absent. Pure
