@@ -2703,6 +2703,190 @@ collection IN FULL (never `...`); `@progress nothing for` opts a loop out.
     end # let (restores @testset hard scope)
 end
 
+"""
+Todo `1nobv9w` (user decision `0r44qxt`): DynamicObjects wraps every unmarked
+property body, and counting every loop there cost ~22 ns per iteration plus a
+node per loop run. `@progress_scope node body` lowers like `@progress node
+begin … end` (binding, phase markers, explicit nested forms) but leaves bare
+loops, comprehensions, generators and `map` plain.
+"""
+@testitem "@progress_scope: phases and explicit forms work, unmarked loops stay plain" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # Two phases and a 10^6-iteration bare loop: no counter. Literal
+    # `__progress__` in a phase is that phase; an explicit loop still counts.
+    root = initialize_progress!(:state; description="Root")
+    seen = Ref{Any}(nothing)
+    acc = Treebars.@progress_scope root begin
+        @progress "a"
+        s = 0
+        for i in 1:10^6
+            s += i
+        end
+        @progress "b"
+        seen[] = __progress__
+        @progress "rows" for j in 1:3
+            s += j
+        end
+        s
+    end
+    @test acc == sum(1:10^6) + 6
+    phases = collect(root.children)
+    @test [c.impl.description for c in phases] == ["a", "b"]
+    @test isempty(phases[1].children)
+    @test seen[].impl === phases[2].impl
+    rows = only(phases[2].children)
+    @test rows.impl.description == "rows" && rows.impl.i == 3 && rows.impl.N == 3
+    finalize_progress!(root)
+    @test !occursin("for i", render_text(root))
+
+    # Structurally: no counter machinery for a bare `for`, a `Threads.@threads
+    # for` (its macrocall survives untouched around the plain loop), a
+    # comprehension or a generator.
+    lowered = string(@macroexpand1 Treebars.@progress_scope node begin
+        @progress "a"
+        for i in 1:n; i; end
+        Threads.@threads :static for t in 1:n; t; end
+        [x for x in 1:n]
+        sum(x for x in 1:n)
+    end)
+    for counter in ("IterableProgress", "_iterable_node", "initialize_progress!", "IncrementBy")
+        @test !occursin(counter, lowered)
+    end
+    @test occursin("@threads :static for t", lowered)
+
+    # A bare `@threads for` runs plain; so does a non-block body (comprehension,
+    # generator, `map`), which `@progress` would instrument or reject.
+    root2 = initialize_progress!(:state; description="Root2")
+    hits = Threads.Atomic{Int}(0)
+    Treebars.@progress_scope root2 begin
+        @progress "p"
+        Threads.@threads for t in 1:8
+            Threads.atomic_add!(hits, 1)
+        end
+    end
+    @test hits[] == 8
+    @test isempty(only(root2.children).children)
+    @test (Treebars.@progress_scope root2 [x^2 for x in 1:3]) == [1, 4, 9]
+    @test collect(Treebars.@progress_scope root2 (x for x in 1:3)) == [1, 2, 3]
+    @test (Treebars.@progress_scope root2 map(x -> x + 1, 1:3)) == [2, 3, 4]
+    @test length(root2.children) == 1
+    finalize_progress!(root2)
+
+    # Phase markers in a plain loop body give each iteration its own phases,
+    # with no counter; the per-iteration wrapper is transient and detaches.
+    root3 = initialize_progress!(:state; description="Root3")
+    live = String[]
+    Treebars.@progress_scope root3 begin
+        for k in 1:2
+            @progress "step $k"
+            push!(live, render_text(root3))
+        end
+    end
+    @test occursin("step 1", live[1]) && occursin("step 2", live[2])
+    @test !any(occursin("for k", l) for l in live)
+    @test isempty(root3.children)
+    finalize_progress!(root3)
+
+    # Explicit nested forms lower as under @progress, counting their own loops.
+    root4 = initialize_progress!(:state; description="Root4")
+    Treebars.@progress_scope root4 begin
+        @progress "sub" begin
+            for i in 1:2
+                i
+            end
+        end
+        @phases begin
+            for i in 1:3
+                i
+            end
+        end
+    end
+    sub, phased = collect(root4.children)
+    @test only(sub.children).impl.description == "for i in 1:2"
+    @test only(only(phased.children).children).impl.description == "for i in 1:3"
+    finalize_progress!(root4)
+
+    # `nothing` disables progress; the body still runs.
+    r = Treebars.@progress_scope nothing begin
+        @progress "a"
+        t = 0
+        for i in 1:3
+            t += i
+        end
+        @progress "b"
+        @progress "c" for i in 1:2
+            t += i
+        end
+        (t, __progress__)
+    end
+    @test r == (9, nothing)
+
+    # Allocation-free per iteration, with a real node and with `nothing`.
+    scope_sum(node, n) = Treebars.@progress_scope node begin
+        @progress "sum"
+        s = 0.0
+        for i in 1:n
+            s += sqrt(i)
+        end
+        s
+    end
+    for node in (nothing, initialize_progress!(:state; description="perf"))
+        scope_sum(node, 10)
+        small = @allocated scope_sum(node, 1_000)
+        large = @allocated scope_sum(node, 100_000)
+        @test large - small < 1_000
+    end
+
+    # refused: a label in the node slot is no node at all — it would only fail
+    # later, inside `prepare_progress!`, far from the call (the scope's node is
+    # the body's progress parent; phases are `@progress "label"` statements).
+    @test_throws LoadError @eval Treebars.@progress_scope "label" begin end
+    end # let (restores @testset hard scope)
+end
+
+@testitem "@progress_scope emitted as a GlobalRef, standalone and nested in @progress" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # DynamicObjects emits the wrap from its own macro, so the head arrives as
+    # `GlobalRef(Treebars, Symbol("@progress_scope"))`, with the node named by
+    # the literal symbol `__status__` (hence module-scope `@eval`).
+    gr_scope = GlobalRef(Treebars, Symbol("@progress_scope"))
+    gr_progress = GlobalRef(Treebars, Symbol("@progress"))
+    body = Expr(:block,
+                Expr(:macrocall, gr_progress, LineNumberNode(0, :unknown), "inner"),
+                :(for q in 1:3; q; end),
+                :(_sc_seen[] = __progress__))
+    wrap = Expr(:macrocall, gr_scope, LineNumberNode(0, :unknown), :__status__, body)
+    @test Treebars._is_scope_macrocall(wrap)
+
+    txt = @eval begin
+        _sc_seen = Ref{Any}(nothing)
+        __status__ = initialize_progress!(:state; description="PropertyNode")
+        $wrap
+        finalize_progress!(__status__)
+        render_text(__status__)
+    end
+    @test occursin("inner", txt) && !occursin("for q", txt)
+    @test _sc_seen[].impl.description == "inner"
+
+    # Nested in a @progress block, the enclosing walker lowers it in place:
+    # it neither counts the scope's loop nor rebinds its `__progress__`.
+    txt2 = @eval begin
+        _sc_root = initialize_progress!(:state; description="ScopeRoot")
+        __status__ = initialize_progress!(_sc_root; description="NestedProperty")
+        @progress _sc_root begin
+            @progress "outer"
+            $wrap
+        end
+        finalize_progress!(__status__)
+        finalize_progress!(_sc_root)
+        render_text(_sc_root)
+    end
+    @test occursin("outer", txt2) && occursin("inner", txt2) && !occursin("for q", txt2)
+    @test _sc_seen[].impl.description == "inner"
+    @test only(collect(__status__.children)).impl.description == "inner"
+    end # let (restores @testset hard scope)
+end
+
 @testitem "polling ticker script tracks active progress incrementally (no document scan per tick)" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :polling] begin
     let
     # Snag browser-progress-573fb052: on a 16k-node page the 100ms ticker +
