@@ -428,6 +428,18 @@ end
 # User-supplied args of a @progress macrocall (strip macro name + LineNumberNode)
 _progress_user_args(x) = x.args[3:end]
 
+# @progress_scope macrocall recognition (same head shapes as the pair above).
+_is_scope_macrocall(x) =
+    Meta.isexpr(x, :macrocall) && length(x.args) >= 2 &&
+    _is_macro_head(x.args[1], Symbol("@progress_scope"))
+
+# Walker context: the node `__progress__` names, whether nodes created under it
+# are transient, and whether a bare `for` / `Threads.@threads for` becomes a
+# counter (`@progress`, `loops=true`) or stays plain Julia (`@progress_scope`,
+# `loops=false`). Every explicit `@progress` / `@phases` form starts a fresh
+# `loops=true` context, so explicit loop counting works inside a scope body.
+_ctx(progress, transient; loops=true) = (; progress, transient, loops)
+
 progress_expr(x, ctx) = x
 progress_expr(x::Symbol, ctx) =
     x === :__progress__ ? ctx.progress : x
@@ -492,7 +504,7 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
     body = forexpr.args[2]
     sub = gensym(:threadsprogress)
     itr = gensym(:itr)
-    child_ctx = (progress=sub, transient=true)
+    child_ctx = _ctx(sub, true)
     wrapped_body = _wrap_for_body(body, child_ctx)
     desc = description === nothing ? _auto_for_label(lhs, rhs) : description
     newfor = Expr(:for, Expr(:(=), lhs, itr),
@@ -525,11 +537,19 @@ function progress_expr(x::Expr, ctx)
     if _is_phases_macrocall(x)
         return _phases_build(_phases_user_args(x), ctx)
     end
-    # Threads.@threads for — determinate counter, thread-safe increment
-    _is_threads_for(x) && return _threads_for_progress_expr(x, ctx; description=nothing)
-    # Bare for loop — wrap as iterable child (existing behavior)
+    # Nested @progress_scope — lowered in place, so the enclosing walker neither
+    # counts its loops nor rebinds its `__progress__` before it expands.
+    if _is_scope_macrocall(x)
+        node, body = _scope_args(_progress_user_args(x))
+        return _scope_body(body, _ctx(progress_expr(node, ctx), ctx.transient; loops=false))
+    end
+    # Threads.@threads for — determinate counter, thread-safe increment. In a
+    # `@progress_scope` body it falls through to the generic recursion below,
+    # which reaches its `for` and leaves that plain.
+    _is_threads_for(x) && ctx.loops && return _threads_for_progress_expr(x, ctx; description=nothing)
+    # Bare for loop — wrap as iterable child, or keep plain in a scope body
     if x.head === :for
-        return _for_progress_expr(x, ctx; description=nothing)
+        return ctx.loops ? _for_progress_expr(x, ctx; description=nothing) : _plain_for_expr(x, ctx)
     end
     # Anything else: recurse into children
     Expr(x.head, Any[progress_expr(a, ctx) for a in x.args]...)
@@ -576,7 +596,10 @@ _toplevel_three_args(backend, label, body) =
 
 # Rewrite a nested @progress macrocall (not top-level, so no backend allowed).
 # Each length-cased branch dispatches the type test on its label-position arg.
+# An explicit `@progress` counts the loops in its body even inside a
+# `@progress_scope` body, so it lowers in a fresh `loops=true` context.
 function _rewrite_nested_progress(x::Expr, ctx)
+    ctx = _ctx(ctx.progress, ctx.transient)
     args = _progress_user_args(x)
     length(args) == 1 && return _nested_one_arg(args[1], ctx)
     length(args) == 2 && return _nested_two_args(args[1], args[2], ctx)
@@ -603,7 +626,7 @@ _nested_one_arg(a::AbstractString, ctx) =
 # still rejected: nested, it would silently root a SECOND, detached tree.
 _nested_two_args(a, body, ctx) =
     _is_string_literal(a) ? _build_body(body, a, ctx) :
-    _build_body(body, nothing, (progress=progress_expr(a, ctx), transient=ctx.transient))
+    _build_body(body, nothing, _ctx(progress_expr(a, ctx), ctx.transient))
 _nested_two_args(a::QuoteNode, body, ctx) =
     error("@progress: nested form does not accept a backend argument (`:$(a.value)`) — it would " *
           "start a second, detached tree; use `@progress \"label\" body`, or pass a ProgressNode " *
@@ -700,11 +723,20 @@ function _for_progress_expr(x::Expr, ctx; description)
     desc = description === nothing ? _auto_for_label(lhs, rhs) : description
     node = gensym(:iterprogress)
     itr = gensym(:itr)
-    child_ctx = (progress=node, transient=true)
+    child_ctx = _ctx(node, true)
     wrapped_body = _wrap_for_body(body, child_ctx)
     run_expr = :(for $lhs in $IterableProgress($node, $itr); $wrapped_body; end)
     _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
 end
+
+# A bare `for` in a `@progress_scope` body stays plain Julia: no counter node,
+# no `IterableProgress`. Otherwise it is lowered like a counted loop with the
+# enclosing node in the counter's place: the iterator is walked against that
+# node, and the body is transient (an explicit node made per iteration detaches
+# when it finishes) with per-iteration phase markers (`_wrap_for_body`). A
+# compact multi-generator header needs no desugaring, since nothing is counted.
+_plain_for_expr(x::Expr, ctx) =
+    Expr(:for, progress_expr(x.args[1], ctx), _wrap_for_body(x.args[2], merge(ctx, (transient=true,))))
 
 # Shared init for the serial `for` and comprehension forms: evaluate the parent,
 # then the iterable (once), then bind the counter NODE itself to `node` — not an
@@ -718,7 +750,7 @@ function _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
     init_expr = :($_iterable_node($par, $itr; description=$desc, transient=$(ctx.transient)))
     quote
         $par = $(ctx.progress)
-        $itr = $(progress_expr(rhs, (progress=par, transient=ctx.transient)))
+        $itr = $(progress_expr(rhs, _ctx(par, ctx.transient)))
         $(_iterprogress_sandwich(node, init_expr, run_expr))
     end
 end
@@ -738,7 +770,7 @@ function _comprehension_progress_expr(x::Expr, ctx; description)
     desc = description === nothing ? "comprehension over $lhs" : description
     node = gensym(:iterprogress)
     itr = gensym(:itr)
-    child_ctx = (progress=node, transient=true)
+    child_ctx = _ctx(node, true)
     wrapped_elem = progress_expr(elem_body, child_ctx)
     new_comp = Expr(:comprehension, Expr(:generator, wrapped_elem,
         Expr(:(=), lhs, :($IterableProgress($node, $itr)))))
@@ -770,7 +802,7 @@ function _map_progress_expr(x::Expr, label, ctx)
         itrs = callexpr.args[2:end]
         params = lambda.args[1]
         elem_params = Meta.isexpr(params, :tuple) ? params.args : Any[params]
-        wrapped_body = progress_expr(lambda.args[2], (progress=child, transient=ctx.transient))
+        wrapped_body = progress_expr(lambda.args[2], _ctx(child, ctx.transient))
         g = Expr(:->, Expr(:tuple, child, elem_params...), wrapped_body)
     else                                     # Expr(:call, :map, f, itrs...)
         f = x.args[2]
@@ -787,7 +819,7 @@ end
 # Single-stmt wrap (indeterminate child, runs for the duration of `body`)
 function _single_stmt_progress_expr(body, label, ctx)
     node = gensym(:progressnode)
-    child_ctx = (progress=node, transient=ctx.transient)
+    child_ctx = _ctx(node, ctx.transient)
     wrapped = progress_expr(body, child_ctx)
     quote
         $node = $initialize_progress!($(ctx.progress); description=$label, transient=$(ctx.transient))
@@ -873,7 +905,7 @@ function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
     if outer_label !== nothing || force_wrap
         wrapper_desc = outer_label === nothing ? "" : outer_label
         outer = gensym(:progressouter)
-        inner_ctx = (progress=outer, transient=ctx.transient)
+        inner_ctx = merge(ctx, (progress=outer,))
         inner = _emit_phases(phases, inner_ctx)
         return quote
             $outer = $initialize_progress!(
@@ -944,7 +976,7 @@ function _emit_phases(phases, ctx)
     leading_stmts = first(phases)[2]
     if !isempty(pending_syms) && any(s -> !(s isa LineNumberNode), leading_stmts)
         leading_sym = gensym(:leading)
-        leading_ctx = (progress=leading_sym, transient=ctx.transient)
+        leading_ctx = merge(ctx, (progress=leading_sym,))
         prepare_stmts = Any[
             :( $leading_sym = $prepare_progress!(
                 $(ctx.progress); description="", transient=$(ctx.transient),
@@ -963,7 +995,7 @@ function _emit_phases(phases, ctx)
     phase_stmts = Any[]
     for (idx, (lbl, stmts)) in enumerate(labeled)
         sym = pending_syms[idx]
-        phase_ctx = (progress=sym, transient=ctx.transient)
+        phase_ctx = merge(ctx, (progress=sym,))
         idx > 1 && push!(phase_stmts, :( $finalize_progress!($(pending_syms[idx-1])) ))
         push!(phase_stmts, :( $start_progress!($sym) ))
         for s in stmts
@@ -1036,7 +1068,9 @@ Wrap `body` with automatic progress tracking. Supports:
   one with `@progress "label" for`, leave one plain with `@progress nothing
   for`. Comprehensions, `map`, and `while` loops stay plain unless wrapped
   explicitly. The default counter label is `for <vars> in <collection>` in full
-  (or `for <vars>` when that exceeds 60 characters) — never clipped.
+  (or `for <vars>` when that exceeds 60 characters) — never clipped. To keep
+  phases and explicit forms but leave every unmarked loop plain, use
+  [`@progress_scope`](@ref) instead.
 
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 
@@ -1056,11 +1090,73 @@ call and errors, naming this cause.
 """
 macro progress(args...)
     backend, label, body = _parse_toplevel_args(args)
-    ctx = (
-        progress = backend === nothing ? :($(BACKEND)[]) : backend,
-        transient = false,
-    )
+    ctx = _ctx(backend === nothing ? :($(BACKEND)[]) : backend, false)
     esc(_build_body(body, label, ctx))
+end
+
+# The two @progress_scope surfaces share these: the macro itself, and the
+# walker's in-place lowering of one nested in a @progress block (which first
+# walks the node argument, so an `__progress__` there is the enclosing node).
+function _scope_args(args)
+    length(args) == 2 || error("@progress_scope: expected `@progress_scope node body`")
+    node, body = args
+    _is_string_literal(node) && error(
+        "@progress_scope: the first argument is the node the body reports into, not a label — " *
+        "write `@progress_scope node begin @progress $(repr(node)); … end`")
+    node isa QuoteNode && error(
+        "@progress_scope: expects a ProgressNode (or `nothing`), not the backend `:$(node.value)` — " *
+        "create the root with `initialize_progress!(:$(node.value); …)` and pass it")
+    node, body
+end
+
+# A block body splits at its phase markers like a transparent
+# `@progress node begin … end`; any other body is only walked. Either way
+# nothing unmarked is counted: `ctx.loops` is false, and a top-level
+# comprehension, generator or `map` is never instrumented by the walker.
+_scope_body(body, ctx) =
+    Meta.isexpr(body, :block) ? _block_progress_expr(body, nothing, ctx) : progress_expr(body, ctx)
+
+"""
+    @progress_scope node body
+
+Run `body` with `node` as its progress node, instrumenting only what is marked.
+It lowers `body` like `@progress node begin … end`, but a bare `for` /
+`Threads.@threads for` loop is not turned into a counter:
+
+- `__progress__` in `body` names `node`, and inside a phase or nested block the
+  node of that phase or block;
+- `@progress "label"` statements split the body into pre-enumerated phases, and
+  phase markers in a loop body give each iteration its own phases;
+- explicit nested forms (`@progress "label" for …`, `@progress "label" begin …
+  end`, `@progress node body`, [`@phases`](@ref)) lower exactly as under
+  [`@progress`](@ref), including counting the loops in their own bodies;
+- bare loops, comprehensions, generators and `map` calls stay plain Julia: no
+  counter node, no per-iteration cost;
+- `node === nothing` makes every progress call a no-op.
+
+Meant for code that wraps bodies it did not write, where counting every loop
+would cost time on each iteration and add a node per loop run (DynamicObjects
+wraps every unmarked property body in it). Not exported: write
+`Treebars.@progress_scope`. Nested in a `@progress` block it is recognised in
+any of `@progress`'s spellings, and its loops stay plain there too.
+
+```julia
+Treebars.@progress_scope node begin
+    @progress "Load"
+    x = load()
+    for i in eachindex(x)        # plain loop: no counter
+        x[i] = clean(x[i])
+    end
+    @progress "Fit"
+    @progress "chains" for c in 1:4   # explicitly marked: counted
+        fit!(x, c)
+    end
+end
+```
+"""
+macro progress_scope(args...)
+    node, body = _scope_args(args)
+    esc(_scope_body(body, _ctx(node, false; loops=false)))
 end
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1138,7 +1234,7 @@ function _phases_build(args, ctx)
     else
         error("@phases: expected `@phases body` or `@phases node body`")
     end
-    child_ctx = (progress=node, transient=ctx.transient)
+    child_ctx = _ctx(node, ctx.transient)
     marked = _inject_phase_markers(body)
     # Block / single-statement bodies go through `force_wrap=true` so they get a
     # label-less wrapper with its own try/finally: the LAST phase finalizes at
@@ -1205,6 +1301,6 @@ split is over top-level statements only, not recursive.
     the `@phases` block (or use plain `@progress "label"` markers).
 """
 macro phases(args...)
-    ctx = (progress = :($(BACKEND)[]), transient = false)
+    ctx = _ctx(:($(BACKEND)[]), false)
     esc(_phases_build(args, ctx))
 end
