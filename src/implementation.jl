@@ -569,13 +569,12 @@ isrunning(node::ProgressNode) = true
 initialize_progress!(::Val{:state}; description="Running...", N=nothing, pending=false, kwargs...) = ProgressNode(
     StateProgress(; description, N, pending), (;propagates=false, labels=ThreadsafeDict{Symbol,Any}())
 )
-function initialize_progress!(sp::StateProgress, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
+# A child's counter total arrives positionally or as `N=`; `nothing` (or
+# omitting it) makes the child indeterminate.
+initialize_progress!(sp::StateProgress, N::Union{Integer,Nothing}; kwargs...) =
+    initialize_progress!(sp; N=_positional_N(N, kwargs), kwargs...)
+function initialize_progress!(sp::StateProgress; description="Running...", N::Union{Integer,Nothing}=nothing, transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
     child = StateProgress(; description, N, pending, _phase_member)
-    child.message = value
-    child
-end
-function initialize_progress!(sp::StateProgress; description="Running...", transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
-    child = StateProgress(; description, pending, _phase_member)
     child.message = value
     child
 end

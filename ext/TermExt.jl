@@ -47,8 +47,15 @@ function initialize_progress!(::Val{:term}; width=120, max_rows=32, kwargs...)
     ProgressNode(bar, (; lock, thread, max_rows, propagates=false, labels=Dict{Symbol,Any}()))
 end
 
+# A child's counter total arrives positionally or as `N=`, as on `:state`;
+# `nothing` (or omitting it) makes a label job.
+initialize_progress!(node::TermProgressNode, N::Union{Integer,Nothing}; kwargs...) =
+    initialize_progress!(node; N=Treebars._positional_N(N, kwargs), kwargs...)
+initialize_progress!(node::TermProgressNode; N::Union{Integer,Nothing}=nothing, kwargs...) =
+    _initialize_job!(node, N; kwargs...)
+
 # Initialize a child progress job with N steps
-function initialize_progress!(node::TermProgressNode, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
+function _initialize_job!(node::TermProgressNode, N::Integer; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
     pbar = root(node).impl
     lock = root(node).meta.lock
     pjob = Base.lock(lock) do
@@ -63,7 +70,7 @@ function initialize_progress!(node::TermProgressNode, N::Integer; description="R
 end
 
 # Initialize a child label job (no N, displays key:value)
-function initialize_progress!(node::TermProgressNode; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
+function _initialize_job!(node::TermProgressNode, ::Nothing; description="Running...", transient=false, propagates=false, key=nothing, value="", kwargs...)
     pbar = root(node).impl
     lock = root(node).meta.lock
     pjob = Base.lock(lock) do

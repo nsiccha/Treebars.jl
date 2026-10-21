@@ -1357,9 +1357,7 @@ function htmx_ws_progress(content; url::AbstractString, id::AbstractString,
 end
 
 _ws_progress_root(::Nothing, N; description) = initialize_progress!(:state; description, N)
-_ws_progress_root(parent::ProgressNode, ::Nothing; description) =
-    initialize_progress!(parent; description, transient=false)
-_ws_progress_root(parent::ProgressNode, N::Integer; description) =
+_ws_progress_root(parent::ProgressNode, N; description) =
     initialize_progress!(parent, N; description, transient=false)
 
 function _validate_ws_progress(id, interval, min_interval, buffer)
