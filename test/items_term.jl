@@ -159,3 +159,24 @@ end
         fail_progress!(froot.impl, ErrorException("boom"))
     end
 end
+
+# Snag consumer-instrum-6aa1c5bc: the counter total spells the same on `:term`
+# as on `:state` — positionally, as `N=`, or `nothing` for a label job.
+@testitem "term backend child counter total: positional, N= keyword, or nothing" setup=[TermTestImports] tags=[:unit, :term] begin
+    let
+        root = initialize_progress!(:term)
+        kw = initialize_progress!(root; description="term-kw", N=4)
+        @test kw.impl.N == 4
+        @test initialize_progress!(root, 3; description="term-positional").impl.N == 3
+        label = initialize_progress!(root, nothing; description="term-nothing")
+        @test isnothing(label.impl.N)
+        @test is_running(label)
+        update_progress!(kw, 1)
+        txt = render_text(root)
+        @test occursin("term-kw", txt) && occursin("(1/4)", txt)
+        @test occursin("term-nothing", txt)
+        @test_throws ArgumentError initialize_progress!(root, 3; N=4)
+        @test_throws ArgumentError initialize_progress!(root, "label")
+        finalize_progress!(root.impl)
+    end
+end

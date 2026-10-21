@@ -1,9 +1,15 @@
 """
-    initialize_progress!(kind::Symbol, N; description="Running...", kwargs...)
-    initialize_progress!(parent::ProgressNode, N; description="Running...", kwargs...)
+    initialize_progress!(kind::Symbol[, N]; description="Running...", kwargs...)
+    initialize_progress!(parent::ProgressNode[, N]; description="Running...", transient=false, kwargs...)
 
 Create a progress root (from a backend symbol like `:state` or `:term`) or a child
 node (from an existing `ProgressNode`). Returns a `ProgressNode`. No-op when `nothing`.
+
+`N` is the counter total, given positionally or as the keyword `N=` (not both):
+an `Integer` makes a determinate counter, `nothing` or no total an indeterminate
+node. `transient=true` detaches a child from its parent once it finishes (a
+failed transient child stays attached). An argument shape no method accepts
+throws an `ArgumentError`, as does a backend symbol whose package is not loaded.
 
 !!! warning "Prefer `@progress` or `with_progress` instead"
     Calling `initialize_progress!` / `update_progress!` / `finalize_progress!` manually
@@ -66,16 +72,39 @@ initialize_progress!(kind::Symbol, args...; kwargs...) = initialize_progress!(Va
 initialize_progress!(kind::Val, args...; description="Running...", transient=false, kwargs...) = initialize_progress!(
     initialize_progress!(kind; kwargs...), args...; description, transient, propagates=true
 )
-# Error fallbacks
-initialize_progress!(p, args...; kwargs...) = @error "No implementation loaded for initialize_progress!($(typeof(p)), args...; kwargs...)"
-initialize_progress!(p::Val; kwargs...) = @error "No implementation loaded for initialize_progress!($(typeof(p)); kwargs...)"
+# Error fallbacks. An argument shape no backend accepts throws at the call:
+# logging and returning `nothing` used to hand back a placeholder node that
+# rendered as "Nothing" and silently dropped every later update.
+_argtypes(args) = join(map(a -> string(typeof(a)), args), ", ")
+initialize_progress!(p, args...; kwargs...) = throw(ArgumentError(
+    "initialize_progress!: no method accepts a $(typeof(p)) parent with positional arguments " *
+    "($(_argtypes(args))). A child takes an optional counter total, positionally or as `N=`: " *
+    "an `Integer` for a determinate counter, `nothing` (or no total) for an indeterminate node. " *
+    "A custom backend defines `initialize_progress!` for its own node type."))
+initialize_progress!(::Val{K}; kwargs...) where {K} = throw(ArgumentError(
+    "initialize_progress!: no progress backend :$K is loaded. `:state` is built in; `:term` needs `using Term`."))
+
+# The counter total of a child node, given positionally. Backends also accept it
+# as `N=` (the only spelling `with_prepared_phases` and `prepare_progress!`
+# kwargs can forward); passing both is ambiguous, so it throws.
+function _positional_N(N, kwargs)
+    haskey(kwargs, :N) && throw(ArgumentError(
+        "initialize_progress!: the counter total was given both positionally ($(repr(N))) " *
+        "and as `N=$(repr(kwargs[:N]))`; pass it once"))
+    N
+end
 
 # Function-form update: update_progress!(f::Function, progress, ...) merges f() into kwargs
 update_progress!(f::Function, ::Nothing, args...; kwargs...) = nothing
 update_progress!(f::Function, args...; kwargs...) = update_progress!(args...; kwargs..., f()...)
 
-# Fallback errors
-update_progress!(p, args...; kwargs...) = @error "No implementation loaded for update_progress!($(typeof(p)), args...; kwargs...)"
+# Fallback errors. `update_progress!` runs in the body, so an unsupported
+# argument throws there. `fail_progress!` / `finalize_progress!` run on the
+# cleanup path (`catch` / `finally`), where throwing would replace the exception
+# being propagated, so they only log.
+update_progress!(p, args...; kwargs...) = throw(ArgumentError(
+    "update_progress!: no method accepts a $(typeof(p)) node with arguments ($(_argtypes(args))). " *
+    "Pass a counter position `i::Integer`, an `IncrementBy(n)`, a message string, or `nothing` (labels only)."))
 fail_progress!(p, args...; kwargs...) = @debug "No implementation loaded for fail_progress!($(typeof(p)), args...; kwargs...)"
 finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for finalize_progress!($(typeof(p)), args...; kwargs...)"
 
@@ -85,7 +114,9 @@ finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for
 
 Create a child progress node in the **pending** state — appears in the tree but
 not yet started. Call [`start_progress!`](@ref) to transition it to running.
-Used by `@progress begin … end` to pre-enumerate phase markers.
+Used by `@progress begin … end` to pre-enumerate phase markers. Takes the
+arguments of [`initialize_progress!`](@ref), including the counter total
+(`prepare_progress!(parent, 5; …)` or `prepare_progress!(parent; N=5, …)`).
 """
 prepare_progress!(::Nothing, args...; kwargs...) = nothing
 

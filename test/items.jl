@@ -317,6 +317,77 @@ end
     end # let (restores @testset hard scope)
 end
 
+# Snag consumer-instrum-6aa1c5bc: `N=` on a child was silently dropped and a
+# positional `nothing` logged an error and attached a "Nothing" placeholder.
+@testitem "child counter total: positional, N= keyword, or nothing" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+    @test initialize_progress!(root; description="kw", N=5).impl.N == 5
+    @test prepare_progress!(root; description="prepared kw", N=4).impl.N == 4
+    @test prepare_progress!(root, 3; description="prepared positional").impl.N == 3
+
+    indeterminate = initialize_progress!(root, nothing; description="spinner")
+    @test indeterminate.impl isa StateProgress
+    @test isnothing(indeterminate.impl.N)
+    @test indeterminate.impl.description == "spinner"
+    @test isnothing(initialize_progress!(root; description="kw nothing", N=nothing).impl.N)
+
+    # A counter given through the kwargs with_prepared_phases forwards.
+    with_prepared_phases(root, ["a", "b"]; N=100) do phases
+        @test all(p -> p.impl.N == 100, phases)
+        with_prepared_progress(phases[1]) do p
+            update_progress!(p, 10)
+            @test occursin("(10/100)", render_text(p))
+        end
+    end
+
+    # with_progress forwards both spellings; a transient indeterminate child
+    # renders under its own description and detaches once it finishes.
+    with_progress(root, nothing; description="transient child", transient=true) do t
+        @test occursin("transient child", render_text(root))
+        @test !occursin("Nothing", render_text(root))
+    end
+    @test !occursin("transient child", render_text(root))
+    with_progress(root; description="kw child", N=7) do c
+        update_progress!(c, 3)
+        @test occursin("(3/7)", render_text(c))
+    end
+
+    # Giving the total twice is ambiguous, whichever positional value.
+    @test_throws ArgumentError initialize_progress!(root, 5; N=7)
+    @test_throws ArgumentError initialize_progress!(root, nothing; N=7)
+    @test_throws TypeError initialize_progress!(root; N=2.5)
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
+@testitem "unsupported lifecycle arguments throw instead of logging" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
+    let
+    root = initialize_progress!(:state; description="Root")
+    # Each call used to `@error`-log and carry on: initialize returned a
+    # placeholder node rendering "Nothing", update silently did nothing.
+    @test_logs initialize_progress!(root, nothing)  # supported: no log either
+    @test_throws ArgumentError initialize_progress!(root, "label")
+    @test_throws ArgumentError initialize_progress!(root, 2.5)
+    @test_throws ArgumentError initialize_progress!(:no_such_backend)
+    @test_throws ArgumentError with_progress(_ -> nothing, :no_such_backend; description="x")
+    @test_throws ArgumentError update_progress!(root, 0.5)
+    @test length(root.children) == 1
+    @test !occursin("Nothing", render_text(root))
+
+    # The message names the supported spellings.
+    err = try initialize_progress!(root, "label") catch e; e end
+    @test occursin("N=", err.msg) && occursin("nothing", err.msg)
+
+    # Under with_progress the throw fails the node that saw it and propagates.
+    @test_throws ArgumentError with_progress(root; description="bad update") do p
+        update_progress!(p, 0.5)
+    end
+    @test is_failed(only(c for c in root.children if c.impl.description == "bad update"))
+    finalize_progress!(root)
+    end # let (restores @testset hard scope)
+end
+
 @testitem "update counter" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :lifecycle] begin
     let
     root = initialize_progress!(:state; description="Root")

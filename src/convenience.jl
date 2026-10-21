@@ -1,7 +1,27 @@
 """
-    with_progress(f, kind, N; kwargs...)
+    with_progress(f, kind::Symbol[, N]; description="Running...", kwargs...)
+    with_progress(f, parent::ProgressNode[, N]; description="Running...", transient=false, kwargs...)
 
 Initialize progress, call `f(progress_node)`, finalize on completion or fail on error.
+Returns `f`'s value, not the node.
+
+The arguments are those of [`initialize_progress!`](@ref): `N` is the counter
+total, positionally or as `N=` (an `Integer` for a determinate counter, `nothing`
+or no total for an indeterminate node), and `transient=true` detaches the child
+from `parent` once it finishes. `parent=nothing` disables progress: `f` receives
+`nothing` and every lifecycle call on it is a no-op.
+
+```julia
+with_progress(parent, length(draws); description="Draws") do p
+    for d in draws
+        simulate(d)
+        update_progress!(p, IncrementBy(1))
+    end
+end
+with_progress(parent; description="Pathfinder", transient=true) do p
+    update_progress!(p, "iteration 3")
+end
+```
 """
 function with_progress(f, args...; kwargs...)
     progress = initialize_progress!(args...; kwargs...)
@@ -211,9 +231,7 @@ the per-element `child` as `__progress__` for the do-body (see [`@progress`](@re
 """
 function progress_map(f, parent, itrs...; description="Running...", transient=false, kwargs...)
     N = all(_has_length, itrs) ? minimum(length, itrs) : nothing
-    loop = isnothing(N) ?
-        initialize_progress!(parent; description, transient) :
-        initialize_progress!(parent, N; description, transient)
+    loop = initialize_progress!(parent, N; description, transient)
     try
         map(itrs...) do xs...
             child = initialize_progress!(loop; description="", kwargs...)
