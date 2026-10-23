@@ -361,7 +361,10 @@ server-rendered duration text; skipped nodes and never-entered reused nodes
 carry no duration.
 It is also the keyed reconciler behind [`htmx_render_board`](@ref): board
 polls, WebSocket frames and `window.treebarUpdateBoard(html)` update items in
-place by key instead of replacing the board. Every live update (poll swap,
+place by key instead of replacing the board. A push source feeds a
+[`polling_fetchindex`](@ref) poller through
+`window.treebarUpdatePoller(el, html)` and `window.treebarPollerLost(el, why)`
+(see there). Every live update (poll swap,
 WebSocket frame, board update) keeps the viewer's choices: a nested phase-plan
 disclosure the viewer opened or closed (`phase_overview=true` / `:collapsed`)
 stays so on the replacement markup.

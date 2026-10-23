@@ -112,6 +112,33 @@ HTMXObjects' job ledger (`HTMXObjects.track_job!`), so hand-rolled pollers show
 on HTMXObjects' runtime dashboard and job boards. Pass `track_job=false` to opt
 out.
 
+#### Feeding a poller from a push source
+
+A server-sent-events stream or another socket can deliver a poller's answers
+instead of its polls. The source hands each answer — the response a poll
+would have received — to the page script:
+
+```js
+treebarUpdatePoller(el, html)   // apply one pushed answer
+treebarUpdatePoller(el)         // heartbeat: the shown answer is still current
+treebarPollerLost(el, why)      // the source failed; `why` empty = unreachable
+```
+
+`el` is the `.treebar-poller` wrapper or any element inside it (the wrapper
+is never replaced while the poller is live). The answer is applied exactly as
+htmx applies a poll answer, so the finished result terminalizes the poller as
+usual. From the first call, Treebars suspends the poller's own polls; while
+the viewer has paused it, Treebars holds the newest pushed answer and shows it
+on resume. `treebarPollerLost` hands the poller back to its own polls, which
+retry by themselves. Both functions return `false` once the poller has
+finished, failed or left the page, so the source stops pushing to it. A page
+without [`htmx_treebar_script`](@ref) has no `treebarUpdatePoller`, and its
+pollers keep polling.
+
+The source confirms each poller at least every five poll intervals (at least
+5s) while it runs, with an answer or a heartbeat; a poller it leaves quiet
+longer reads as [stale](#freshness-how-current-the-live-view-is).
+
 ### Live boards — `htmx_render_board`
 
 [`htmx_render_board`](@ref) renders a keyed, changing collection of progress
@@ -162,9 +189,10 @@ state is old, the region says so, with no setup beyond the page assets:
   error color, and a quiet poller opens its panel. A single failed poll that
   the next one recovers from shows nothing.
 
-A lost region keeps retrying (polls keep their timer, and the htmx `ws`
-extension reconnects after an abnormal close). It stays marked lost until an
-update succeeds, then clears at once.
+A lost region keeps retrying (polls keep their timer, the htmx `ws`
+extension reconnects after an abnormal close, and a poller whose
+[push source](#feeding-a-poller-from-a-push-source) failed returns to its own
+polls). It stays marked lost until an update succeeds, then clears at once.
 
 The notice appears in the poller badge, in a live board's header, and at the
 top of each WebSocket frame ([`htmx_ws_progress`](@ref) /
