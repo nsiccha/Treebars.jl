@@ -223,7 +223,7 @@ end
 interrupt_requested(::Nothing) = false
 
 """
-    htmx_render(node; article=false, scoped=true, max_finished=nothing, phase_overview=false, kwargs...)
+    htmx_render(node; article=false, scoped=true, max_finished=nothing, phase_overview=false, texts=nothing, kwargs...)
 
 Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
 lives in the HTMXObjects package extension — loading `HTMXObjects` activates
@@ -254,6 +254,20 @@ open/closed choice per plan survives live updates when
 nodes. The same opt-in is supported by `htmx_render_children`,
 `htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`, and
 `polling_fetchindex` (HTTP and WebSocket).
+
+`texts`, a [`TreebarTexts`](@ref) such as `treebar_texts(:de)`, is the
+language of every word the tree shows: durations ("— 6 s bisher"), pills,
+the overview and the words [`htmx_treebar_script`](@ref) writes between
+updates. Left at `nothing`, it follows the page language the HTMXObjects
+route being answered declares (`__lang__ = "de"`; `de` and `de-*` are German,
+anything else English), on an HTMXObjects that provides `page_lang()`, and
+English otherwise. Every HTML renderer takes the same keyword:
+`htmx_render_children`, `polling_fetchindex` (HTTP and WebSocket),
+`htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`,
+`htmx_render_board`, `htmx_ws_render_board` and `ws_board`. A non-English
+render carries the script's words in a `data-treebar-texts` attribute on its
+outermost element (or on the poller, WebSocket frame or board around it);
+English markup has none.
 """
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
@@ -285,7 +299,7 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
 
 # htmx_render_children — implemented in HTMXObjectsExt
 """
-    htmx_render_children(node; scoped=true, max_finished=nothing)
+    htmx_render_children(node; scoped=true, max_finished=nothing, texts=nothing)
 
 Render the children of a `ProgressNode` as an HTML fragment, classifying them
 into pending / running / finished / reused / skipped / failed groups and
@@ -308,7 +322,8 @@ the pills toggle visibility scoped to this children container. Inside a
 `scoped=false` so the wrapper's descendant CSS rules win.
 
 Use [`htmx_render`](@ref) for full-node rendering (it calls
-`htmx_render_children` internally for every level of the tree).
+`htmx_render_children` internally for every level of the tree). `texts` is the
+language of the pills and placeholders; see [`htmx_render`](@ref).
 """
 function htmx_render_children end
 
@@ -382,9 +397,9 @@ coalesces into one frame. The producer form below wakes its sender this way.
 ws_progress(ws, p; kwargs...) = @error "No implementation loaded for ws_progress. Load HTTP to enable WebSocket progress."
 
 """
-    ws_progress(produce, ws; id, description="Working...", N=nothing,
-                parent=nothing, interval=0.1, min_interval=0.016, buffer=64)
-    ws_progress(produce, ws, progress; id, interval=0.1, min_interval=0.016, buffer=64)
+    ws_progress(produce, ws; id, description=nothing, N=nothing,
+                parent=nothing, interval=0.1, min_interval=0.016, buffer=64, texts=nothing)
+    ws_progress(produce, ws, progress; id, interval=0.1, min_interval=0.016, buffer=64, texts=nothing)
 
 Run `produce(publish, progress)` while streaming HTML updates to a matching
 [`htmx_ws_progress`](@ref) view. Load `HTMXObjects` and `HTTP` to activate it.
@@ -415,7 +430,9 @@ that wants the reason visible in the browser publishes its own escaped
 alert fragment through `publish` before rethrowing. Disconnecting stops
 delivery but lets the producer finish; blocked publishers are released.
 The provided-node form owns that node's lifecycle; `parent=` instead
-creates a dedicated child node.
+creates a dedicated child node. `description` defaults to the texts' `working`
+("Working..."). `texts` (see [`htmx_render`](@ref)) is resolved when the route
+calls `ws_progress`, so every frame speaks the answer's language.
 """
 ws_progress(produce::Function, ws; kwargs...) =
     throw(ArgumentError("Load HTMXObjects and HTTP to stream partial results with ws_progress."))
@@ -424,14 +441,17 @@ ws_progress(produce::Function, ws, progress; kwargs...) =
 
 """
     htmx_ws_progress(content; url, id, progress=nothing,
-                     description="Working...", N=nothing, collapsed=false)
+                     description=nothing, N=nothing, collapsed=false, texts=nothing)
 
 Render the initial content and an open, unobtrusive progress tree, connecting
 to `url` through the htmx WebSocket extension. Pair this with the producer form
 of [`ws_progress`](@ref), using the same unique `id` on both routes. The content
 stays mounted; progress and published updates have separate stable targets.
 `collapsed=true` starts the tree closed; the viewer's choice survives updates.
-An optional `progress` renders an existing node; otherwise show a pending node.
+An optional `progress` renders an existing node; otherwise show a pending node
+described by `description` (default: the texts' `working`, "Working...").
+`texts` is the language of the tree and its "Progress" summary; see
+[`htmx_render`](@ref).
 
 Include `htmx_treebar_styles()` and `htmx_treebar_script()` once in the host
 page's `extra_head`; HTMXObjects' `htmx()` supplies the WebSocket extension.
@@ -442,7 +462,7 @@ function htmx_ws_progress end
 
 # htmx_ws_render fallback
 """
-    htmx_ws_render(node; id="treebar-progress")
+    htmx_ws_render(node; id="treebar-progress", texts=nothing)
 
 Default `render` for [`ws_progress`](@ref) when `HTMXObjects` is loaded.
 Wraps [`htmx_render`](@ref) in a `<div id=… class="treebar-ws-frame">` so the
@@ -455,9 +475,9 @@ htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_rend
 
 """
     htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
-                      empty="No running jobs.", id="treebar-board",
+                      empty=nothing, id="treebar-board",
                       linger_ms=3000, expanded=false, live=poll_url !== nothing,
-                      phase_overview=false)
+                      phase_overview=false, texts=nothing)
 
 Render a keyed, changing collection of progress trees — a live "running jobs"
 board — as an HTMX `Node`. Implementation lives in the HTMXObjects package
@@ -505,7 +525,8 @@ per-client state on the server.
 The header shows the running/queued counts and, when `live`, a Pause button
 (same mechanism as the poller's): a paused board issues no polls, drops pushed
 frames, freezes its clocks and keeps lingering items. `empty` is shown while the
-list is empty. `id` must be a valid CSS id; the reconciler matches updates to
+list is empty (default: the texts' `no_jobs`, "No running jobs."). `texts` is
+the language of the board's words; see [`htmx_render`](@ref). `id` must be a valid CSS id; the reconciler matches updates to
 the live board by it. For WebSocket push see [`ws_board`](@ref).
 
 Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
