@@ -647,12 +647,14 @@ htmx_treebar_script() = h.script(Raw("""
     // Failure never stops a region: htmx keeps its `every` timer, and the ws
     // extension reconnects after an abnormal close, so the region heals by
     // itself when the server returns. Regions: a .treebar-poller (the
-    // requests of its own .treebar-poller-inner), a live .treebar-board (its
+    // requests of its own .treebar-poller-inner, or the answers a push
+    // source hands to treebarUpdatePoller), a live .treebar-board (its
     // .treebar-board-poll requests, or the boards a WebSocket pushes), and a
     // WebSocket source carrying .treebar-ws-frame frames.
     var STALE_MS = 5000, LOST_MS = 5000;
-    function markOk(r){
-        r._tbOkAt = Date.now();
+    // `at` is when the server confirmed the region, if not just now.
+    function markOk(r, at){
+        r._tbOkAt = at === undefined ? Date.now() : at;
         r._tbFailSince = 0;
         r._tbSettled = false;
     }
@@ -783,6 +785,78 @@ htmx_treebar_script() = h.script(Raw("""
     document.addEventListener('htmx:wsError', function(evt){
         socketRegions(evt.target).forEach(function(r){ markFail(r, '', true); });
     });
+    // --- Pushed pollers -----------------------------------------------------
+    // A push source (a server-sent-events stream, a custom socket) can feed
+    // a poller in place of its own polls. window.treebarUpdatePoller(el,
+    // html) applies one pushed answer, the response a poll would have
+    // received, exactly as htmx applies a poll answer (so terminalization
+    // and every htmx:afterSwap listener run unchanged), and confirms the
+    // poller live. Called without html it only confirms that the shown
+    // answer is still current: a heartbeat. The first call puts the poller
+    // in push mode: its own polls are suspended (see the pause hook below)
+    // and a poll already in flight is aborted, so a late poll answer cannot
+    // replace a newer pushed one. While the viewer has paused the poller,
+    // the newest pushed answer is held and shown on resume; meanwhile the
+    // shown state ages as a paused polled one does.
+    // window.treebarPollerLost(el, why) ends push mode: the poller falls
+    // back to its own polls, which retry by themselves, and reads
+    // "Connection lost" (empty `why`) or "Updates failing (why)" once those
+    // have failed for 5s too. `el` is the poller wrapper or any element in
+    // it. Both return false once it is no longer a live poller (finished,
+    // failed or removed), which tells the source to stop pushing to it.
+    var heldPollers = new Set();
+    // The polling inner of the live poller `el` is in, or null. A finished
+    // poller nested in a live one must not resolve to the outer one.
+    function pushTarget(el){
+        var p = el.closest('.treebar-poller, .treebar-terminal');
+        if (!p || !p.isConnected || !p.classList.contains('treebar-poller')) return null;
+        return p.querySelector(':scope > .treebar-poller-inner[hx-trigger]');
+    }
+    function applyPushed(inner, html, at){
+        var p = inner.parentElement;
+        // The settle delay htmx gives the inner's own hx-swap="outerHTML".
+        if (html != null) htmx.swap(inner, html,
+            {swapStyle: 'outerHTML', settleDelay: htmx.config.defaultSettleDelay},
+            {select: inner.getAttribute('hx-select'), contextElement: inner});
+        markOk(p, at);
+    }
+    window.treebarUpdatePoller = function(el, html){
+        var inner = pushTarget(el);
+        if (!inner) return false;
+        var p = inner.parentElement, at = Date.now();
+        if (!p._tbPushed){
+            p._tbPushed = true;
+            htmx.trigger(inner, 'htmx:abort');
+        }
+        if (p.dataset.paused === '1'){
+            p._tbHeld = {html: html != null ? html : p._tbHeld && p._tbHeld.html, at: at};
+            heldPollers.add(p);
+        } else applyPushed(inner, html, at);
+        return true;
+    };
+    window.treebarPollerLost = function(el, why){
+        var inner = pushTarget(el);
+        if (!inner) return false;
+        var p = inner.parentElement;
+        if (p._tbPushed){
+            p._tbPushed = false;
+            // The resumed polls bring the next answer.
+            p._tbHeld = undefined;
+            heldPollers.delete(p);
+            markFail(p, why || '', true);
+        }
+        return true;
+    };
+    // Run by the ticker: show what was held for a poller the viewer resumed.
+    function flushHeld(){
+        heldPollers.forEach(function(p){
+            if (p.isConnected && p.dataset.paused === '1') return;
+            heldPollers.delete(p);
+            var held = p._tbHeld, inner = pushTarget(p);
+            p._tbHeld = undefined;
+            if (inner) applyPushed(inner, held.html, held.at);
+        });
+    }
     // Lazy prune: removals and terminalizations drop out on the next tick.
     function runningAlive(el){
         if (!el.isConnected || el.dataset.treebarStatus !== 'running'){ liveRunning.delete(el); return false; }
@@ -808,6 +882,7 @@ htmx_treebar_script() = h.script(Raw("""
         });
     }
     function tickAll(){
+        flushHeld();
         liveRunning.forEach(function(el){ if (runningAlive(el)) tick(el); });
         syncAllBadges();
         paintRegions();
@@ -1060,7 +1135,8 @@ htmx_treebar_script() = h.script(Raw("""
         if (item) item.dataset.open = d.open ? '1' : '0';
     }, true);
     // Pause: cancel a poller's own `every Xs` poll request while its wrapper
-    // is data-paused. Scoped to the .treebar-poller-inner element, so the
+    // is data-paused, or while a push source feeds it (see "Pushed pollers").
+    // Scoped to the .treebar-poller-inner element, so the
     // Stop/cancel request (a different element) still fires when paused. The
     // `every` timer keeps rescheduling, so resume needs no re-arming. Keyed
     // on closest('.treebar-poller') → self-contained per poller (nested
@@ -1069,7 +1145,7 @@ htmx_treebar_script() = h.script(Raw("""
         var el = evt.detail && evt.detail.elt;
         if (el && el.classList.contains('treebar-poller-inner')){
             var p = el.closest('.treebar-poller');
-            if (p && p.dataset.paused === '1') evt.preventDefault();
+            if (p && (p.dataset.paused === '1' || p._tbPushed)) evt.preventDefault();
         }
         // A board's poll element pauses the same way, keyed on its board.
         if (el && el.classList.contains('treebar-board-poll')){
@@ -1787,6 +1863,18 @@ The badge also says how current the tree is: after five intervals (at least
 failed for 5s straight (server down, gateway 5xx) it reads "Connection lost ·
 updated … · retrying", dims the tree and holds its clocks. Polling never
 stops on failure, and the first successful poll clears the notice.
+
+A push source (a server-sent-events stream, a custom socket) can feed the
+poller instead of its polls: `window.treebarUpdatePoller(el, html)` applies
+one pushed answer (the response a poll would have received) exactly as a poll
+answer, and `window.treebarUpdatePoller(el)` confirms the shown answer is still
+current. While pushed, the poller's own polls are suspended, a paused poller
+holds the newest pushed answer until resume, and the badge stays live as long
+as the source confirms it at least every five intervals (at least 5s).
+`window.treebarPollerLost(el, why)` hands the poller back to its polls; if
+those fail too, it reads "Connection lost" (`why` empty) or "Updates failing
+(why)". `el` is the `.treebar-poller` wrapper or any element in it; both
+return `false` once the poller has finished, failed or left the page.
 
 The inner's `hx-select` is top-level-only: each branch excludes matches
 nested inside another match, so a poll response containing a nested poller
