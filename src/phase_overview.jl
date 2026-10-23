@@ -281,8 +281,9 @@ _overview_enabled(mode) = _overview_mode(mode).depth >= 0
 # disclosure key. The key hashes the plan's internal key, so it is the same in
 # every snapshot of a live view — unaffected by plans that appear later or by
 # labels and counts that change — and a viewer's open/closed choice can follow
-# each plan across updates.
-function _overview_entries(nodes, mode)
+# each plan across updates. Captions are written in `texts` (`render_text`
+# keeps the English default).
+function _overview_entries(nodes, mode, texts::TreebarTexts=_EN_TEXTS)
     (; depth, open) = _overview_mode(mode)
     limit = depth
     limit < 0 && return ()
@@ -298,8 +299,8 @@ function _overview_entries(nodes, mode)
             push!(rendered, 0)
             continue
         end
-        name = something(plan.label, "Phase plan $(length(entries) + 1)")
-        push!(entries, (; plan, depth, caption="$name · $(plan.items) prepared items",
+        name = something(plan.label, _fill_text(texts.phase_plan; n=length(entries) + 1))
+        push!(entries, (; plan, depth, caption=_fill_text(texts.prepared_items; name, n=plan.items),
             parent=isnothing(parent) ? nothing : rendered[parent.plan],
             open=depth == 0 || open, key=string(hash(repr(plan_key)); base=36)))
         push!(rendered, length(entries))

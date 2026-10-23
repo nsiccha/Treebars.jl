@@ -172,6 +172,40 @@ top of each WebSocket frame ([`htmx_ws_progress`](@ref) /
 normally after its last update, with nothing still running, is settled and
 never goes stale.
 
+### Words in the page's language — `treebar_texts`
+
+Every word Treebars writes on a page comes from a [`TreebarTexts`](@ref)
+value: durations ("— 6s so far"), pills ("3 finished"), the poller's badge,
+pause control and Stop button, the freshness notes, the phase overview and
+the job board. [`treebar_texts`](@ref) builds one for `:en` (the default) or
+`:de`, with any single text replaceable by keyword:
+
+```julia
+htmx_render(root; texts=treebar_texts(:de))           # "— 6 s bisher", "3 abgeschlossen"
+treebar_texts(:de; stop="Anhalten")                    # one word changed
+```
+
+Every HTML renderer takes `texts=`: [`htmx_render`](@ref),
+[`htmx_render_children`](@ref), [`polling_fetchindex`](@ref) (HTTP and
+WebSocket), [`htmx_ws_render`](@ref), [`htmx_ws_progress`](@ref), the
+producer form of [`ws_progress`](@ref), [`htmx_render_board`](@ref),
+[`htmx_ws_render_board`](@ref) and [`ws_board`](@ref). Left out, it follows
+the page language the HTMXObjects route being answered declares
+(`__lang__ = "de"` on its mount chain, the declaration that also writes
+`<html lang>`): `de` and every `de-*` tag select German, anything else
+English. That needs an HTMXObjects that exposes the answer's language
+(`HTMXObjects.page_lang()`); on one without it, `texts=` left out means
+English.
+
+German durations put a space before the unit and use a decimal comma
+(`3,9 s`, `1 min 23 s`). The words the page script writes between updates —
+the ticking duration, the badge's status word and pause label, the freshness
+notes, a board item that ended — travel with the region as a
+`data-treebar-texts` attribute, so [`htmx_treebar_script`](@ref) needs no
+setting. English markup carries no such attribute and is unchanged.
+[`render_text`](@ref) and the `:term` backend always write English: they are
+read by developers, not by the app's audience.
+
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides
