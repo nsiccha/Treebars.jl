@@ -2539,6 +2539,164 @@ naming the enclosing node.
 end
 
 """
+Snag `progress-unbound-6f79e2f4`: a label — a phase marker's, a labelled
+wrapper's, a loop's, a comprehension's, a `map`'s — is evaluated once in the
+enclosing scope, before the node it describes exists, exactly like a loop
+iterator. The walker spliced labels unwalked, so a bare `__progress__` there
+was an `UndefVarError`. DynamicObjects' always-on body rewrite threads
+`__progress__` into every property read, including one written in a label.
+"""
+@testitem "@progress walks labels: a bare __progress__ there is the node the labelled node is created under" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    seen = Any[]
+    note(p) = (push!(seen, p); p === nothing ? "nothing" : p.impl.description)
+    inner = Any[]
+    here(p) = (push!(inner, p); 1)
+
+    root = initialize_progress!(:state; description="Root")
+
+    # Phase markers: `__progress__` is the node the phases are prepared under.
+    @progress root begin
+        @progress "a in $(note(__progress__))"
+        here(__progress__)
+    end
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "a in Root"
+
+    @test (Treebars.@progress_scope root begin
+        @progress "b in $(note(__progress__))"
+        here(__progress__)
+    end) == 1
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "b in Root"
+
+    # Inside a labelled wrapper, its markers' labels see that wrapper.
+    @progress root begin
+        @progress "outer" begin
+            @progress "c in $(note(__progress__))"
+            here(__progress__)
+        end
+    end
+    @test seen[end].impl.description == "outer"
+    @test seen[end].parent === root
+    @test inner[end].parent === seen[end]
+
+    # Markers in a plain loop body: each iteration's label sees that
+    # iteration's (label-less) wrapper, created under the scope node.
+    Treebars.@progress_scope root begin
+        for i in 1:2
+            @progress "d$i in $(note(__progress__))"
+            here(__progress__)
+        end
+    end
+    @test seen[end-1] !== seen[end]
+    @test all(k -> seen[k].parent === root && inner[k].parent === seen[k], length(seen)-1:length(seen))
+
+    # The same under a counted `@progress for`: the wrapper sits under the counter.
+    @progress root for i in 1:2
+        @progress "e$i in $(note(__progress__))"
+        here(__progress__)
+    end
+    counter = seen[end].parent
+    @test counter.parent === root
+    @test all(k -> seen[k].parent === counter && inner[k].parent === seen[k], length(seen)-1:length(seen))
+
+    # Labelled wrapper, single statement, loop, comprehension, @threads, map.
+    Treebars.@progress_scope root begin
+        @progress "f in $(note(__progress__))" begin
+            here(__progress__)
+        end
+    end
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "f in Root"
+
+    @progress root begin
+        @progress "g in $(note(__progress__))" here(__progress__)
+    end
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "g in Root"
+
+    Treebars.@progress_scope root begin
+        @progress "h in $(note(__progress__))" for i in 1:2
+            here(__progress__)
+        end
+    end
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "h in Root"
+
+    @test (@progress root begin
+        @progress "i in $(note(__progress__))" [here(__progress__) for x in 1:2]
+    end) == [1, 1]
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "i in Root"
+
+    hits = Threads.Atomic{Int}(0)
+    @progress root begin
+        @progress "j in $(note(__progress__))" Threads.@threads for i in 1:2
+            Threads.atomic_add!(hits, 1)
+        end
+    end
+    @test hits[] == 2
+    @test seen[end] === root
+    @test any(c -> c.impl.description == "j in Root", root.children)
+
+    @test (@progress root begin
+        @progress "k in $(note(__progress__))" map(1:2) do x
+            x + 1
+        end
+    end) == [2, 3]
+    @test seen[end] === root
+    @test any(c -> c.impl.description == "k in Root", root.children)
+
+    # A standalone call's label sees the call's own target node.
+    @progress root "l in $(note(__progress__))" for i in 1:1
+        here(__progress__)
+    end
+    @test seen[end] === root
+    @test inner[end].parent === root
+    @test inner[end].impl.description == "l in Root"
+
+    # A disabled scope binds `nothing`, and the body still runs.
+    @test (Treebars.@progress_scope nothing begin
+        @progress "m in $(note(__progress__))"
+        2
+    end) == 2
+    @test seen[end] === nothing
+
+    # Labels stay eager: every phase label is evaluated at enumeration,
+    # before the first phase body runs.
+    order = String[]
+    logged(tag, p) = (push!(order, tag); note(p))
+    @progress root begin
+        @progress "n1 $(logged("label1", __progress__))"
+        push!(order, "body1")
+        @progress "n2 $(logged("label2", __progress__))"
+        push!(order, "body2")
+    end
+    @test order == ["label1", "label2", "body1", "body2"]
+    finalize_progress!(root)
+    text = render_text(root)
+    @test occursin("a in Root", text) && occursin("n2 Root", text)
+
+    # A user-qualified `M.__progress__` in a label is a real global: untouched.
+    has(f, x) = f(x) || (x isa Expr && any(a -> has(f, a), x.args))
+    qualified = macroexpand(@__MODULE__, quote
+        @progress root begin
+            @progress "q $(M.__progress__)"
+            1
+        end
+    end)
+    @test has(x -> x == QuoteNode(:__progress__), qualified)
+    end # let (restores @testset hard scope)
+end
+
+"""
 Snag `progress-label-m-6bd4c70c`: the map-sugar spliced the `map` call's own
 keyword block (`map(xs; kw...)`, a `:parameters` node) among `progress_map`'s
 positional arguments, so even an empty `;` failed to lower

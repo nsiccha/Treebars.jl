@@ -453,6 +453,15 @@ progress_expr(x, ctx) = x
 progress_expr(x::Symbol, ctx) =
     x === :__progress__ ? ctx.progress : x
 
+# A label — a phase marker's, a labelled wrapper's, a loop's or a map's — is
+# evaluated once in the enclosing scope, before the node it describes exists,
+# exactly like a loop iterator (todo `02kt4z4`). Walk it against that enclosing
+# context, so a bare `__progress__` there names the node the labelled node is
+# created under: for phase markers, the node their phases are prepared under
+# (snag `progress-unbound-6f79e2f4`; spliced unwalked before, it escaped as an
+# undefined global).
+_label_expr(label, ctx) = progress_expr(label, ctx)
+
 # True iff `x` is a `Threads.@threads` (qualified or bare) applied to a for loop.
 function _is_threads_for(x)
     Meta.isexpr(x, :macrocall) || return false
@@ -515,7 +524,7 @@ function _threads_for_progress_expr(x::Expr, ctx; description)
     itr = gensym(:itr)
     child_ctx = _ctx(sub, true)
     wrapped_body = _wrap_for_body(body, child_ctx)
-    desc = description === nothing ? _auto_for_label(lhs, rhs) : description
+    desc = description === nothing ? _auto_for_label(lhs, rhs) : _label_expr(description, ctx)
     newfor = Expr(:for, Expr(:(=), lhs, itr),
         quote
             try
@@ -752,14 +761,17 @@ _plain_for_expr(x::Expr, ctx) =
 # `IterableProgress` wrapper — so `__progress__` in the body is a local whose
 # type is inferred whenever the parent's is. `run_expr` iterates
 # `IterableProgress(node, itr)`, which is type-stable either way. The iterable
-# is walked against the parent: it runs before the loop's node exists, so a
-# bare `__progress__` there names the enclosing node (todo `02kt4z4`).
+# and the label are walked against the parent: both run before the loop's node
+# exists, so a bare `__progress__` there names the enclosing node (todo
+# `02kt4z4`, snag `progress-unbound-6f79e2f4`).
 function _iterable_progress_expr(node, itr, rhs, ctx, desc, run_expr)
     par = gensym(:parent)
-    init_expr = :($_iterable_node($par, $itr; description=$desc, transient=$(ctx.transient)))
+    par_ctx = _ctx(par, ctx.transient)
+    init_expr = :($_iterable_node($par, $itr;
+        description=$(_label_expr(desc, par_ctx)), transient=$(ctx.transient)))
     quote
         $par = $(ctx.progress)
-        $itr = $(progress_expr(rhs, _ctx(par, ctx.transient)))
+        $itr = $(progress_expr(rhs, par_ctx))
         $(_iterprogress_sandwich(node, init_expr, run_expr))
     end
 end
@@ -821,7 +833,7 @@ function _map_progress_expr(x::Expr, label, ctx)
         a = gensym(:args)
         g = Expr(:->, Expr(:tuple, child, Expr(:..., a)), Expr(:call, f, Expr(:..., a)))
     end
-    desc = label === nothing ? "map(...)" : label
+    desc = label === nothing ? "map(...)" : _label_expr(label, ctx)
     # The collections and the keyword block are evaluated in the enclosing
     # scope: walk them there.
     itrs = Any[progress_expr(i, ctx) for i in itrs]
@@ -844,7 +856,8 @@ function _single_stmt_progress_expr(body, label, ctx)
     child_ctx = _ctx(node, ctx.transient)
     wrapped = progress_expr(body, child_ctx)
     quote
-        $node = $initialize_progress!($(ctx.progress); description=$label, transient=$(ctx.transient))
+        $node = $initialize_progress!($(ctx.progress);
+            description=$(_label_expr(label, ctx)), transient=$(ctx.transient))
         try
             $wrapped
         catch _e
@@ -925,7 +938,7 @@ function _block_progress_expr(block::Expr, outer_label, ctx; force_wrap=false)
     # which needs a per-iteration LABEL-LESS wrapper). A label-less wrapper uses
     # description="" so `_is_bare_wrapper`/`_renders_self` auto-inline it at render.
     if outer_label !== nothing || force_wrap
-        wrapper_desc = outer_label === nothing ? "" : outer_label
+        wrapper_desc = outer_label === nothing ? "" : _label_expr(outer_label, ctx)
         outer = gensym(:progressouter)
         inner_ctx = merge(ctx, (progress=outer,))
         inner = _emit_phases(phases, inner_ctx)
@@ -965,7 +978,9 @@ function _emit_phases(phases, ctx)
     labels_sym = gensym(:phase_labels)
     plan_identity = QuoteNode((:macro, gensym(:phase_plan)))
     phase_keys = QuoteNode(Tuple(eachindex(labeled)))
-    labels_expr = Expr(:tuple, (lbl for (lbl, _) in labeled)...)
+    # Evaluated at enumeration, under `ctx.progress`: that is the node a label's
+    # `__progress__` names.
+    labels_expr = Expr(:tuple, (_label_expr(lbl, ctx) for (lbl, _) in labeled)...)
 
     prepare_stmts = Any[
         :( $labels_sym = $labels_expr ),
@@ -1096,6 +1111,11 @@ Wrap `body` with automatic progress tracking. Supports:
 
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 
+Inside the body, `__progress__` names the active node. A label (a marker's or a
+labeled form's) and a loop's iterator are evaluated once, before their own node
+exists, so there `__progress__` names the node that one is created under — for
+phase markers, the node their phases are prepared under.
+
 The `backend` argument is only accepted at the outermost call (defaults to
 `Treebars.BACKEND[]`). Nested `@progress` calls use the enclosing progress node —
 or an explicit one, `@progress node body`, mirroring [`@phases`](@ref).
@@ -1146,7 +1166,8 @@ It lowers `body` like `@progress node begin … end`, but a bare `for` /
 `Threads.@threads for` loop is not turned into a counter:
 
 - `__progress__` in `body` names `node`, and inside a phase or nested block the
-  node of that phase or block;
+  node of that phase or block; in a label or a loop's iterator, which run before
+  their node exists, it names the node that one is created under;
 - `@progress "label"` statements split the body into pre-enumerated phases, and
   phase markers in a loop body give each iteration its own phases;
 - explicit nested forms (`@progress "label" for …`, `@progress "label" begin …
