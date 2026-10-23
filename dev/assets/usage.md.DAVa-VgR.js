@@ -85,7 +85,7 @@ import{_ as i,o as a,c as e,an as n}from"./chunks/framework.CoJ6B9QU.js";const g
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">    Parse: 0 pending · 0 running · 2 finished · 0 reused · 0 failed · 0 skipped</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">    Build: 0 pending · 0 running · 2 finished · 0 reused · 0 failed · 0 skipped</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">▶ Public synthetic run [1.5s]</span></span>
-<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">├─ ✓ Model first [0.4s]</span></span>
+<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">├─ ✓ Model first [0.3s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  ├─ ✓ Compile [0.1s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  │  ├─ ✓ Parse [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  │  └─ ✓ Build [0s]</span></span>
@@ -99,7 +99,7 @@ import{_ as i,o as a,c as e,an as n}from"./chunks/framework.CoJ6B9QU.js";const g
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">  Sample: 0 pending · 0 running · 2 finished · 0 reused · 0 failed · 0 skipped</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">  ▸ Compile · 2 prepared items</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">▶ Public synthetic run [1.6s]</span></span>
-<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">├─ ✓ Model first [0.4s]</span></span>
+<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">├─ ✓ Model first [0.3s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  ├─ ✓ Compile [0.1s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  │  ├─ ✓ Parse [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">│  │  └─ ✓ Build [0s]</span></span>
