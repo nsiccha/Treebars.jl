@@ -194,3 +194,134 @@ end
     end
     end
 end
+
+@testitem "Pushed pollers: answers, heartbeats, pause hold, loss, terminal (browser)" setup=[TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or chromium,
+    # and network for htmx 2.0.8 from jsdelivr — the URL HTMXObjects' page
+    # shell loads by default). Real htmx runs the poller's `every 200ms`
+    # trigger; the page records every poll the Treebars script let through
+    # and then cancels it, so no request leaves the page. A push source is
+    # played by calls to treebarUpdatePoller / treebarPollerLost on a fixed
+    # schedule in Chrome's virtual time (which also drives Date.now).
+    if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires google-chrome or chromium")
+        html(x) = repr(MIME"text/html"(), x)
+        ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+        job = initialize_progress!(:state; description="Job", N=10)
+        start_progress!(job)
+        # A poll answer at each progress step, as the server renders it.
+        answer(i) = (update_progress!(job, i); html(ext._polling_running(job; label="Background job",
+            poll_url="/poll", poll_interval="200ms", cancel_url="")))
+        answers = Dict(i => answer(i) for i in (0, 3, 5, 6, 8, 9))
+        done = html(ext._polling_wrap(ext._polling_inner_done(h.p(id="result")("Done: 42")); terminal=true))
+        templates = [h.template(id="answer-$i")(Raw(a)) for (i, a) in answers]
+        driver = raw"""
+        var poller = document.querySelector('.treebar-poller');
+        var attempts = 0;
+        document.addEventListener('htmx:beforeRequest', function(evt){
+            if (!evt.detail.elt.classList.contains('treebar-poller-inner')) return;
+            if (!evt.defaultPrevented) attempts += 1;
+            evt.preventDefault();
+        });
+        function answer(i){ return document.getElementById('answer-' + i).innerHTML; }
+        var calls = {};
+        function push(t, i){ setTimeout(function(){ calls[t] = treebarUpdatePoller(poller, i === undefined ? undefined : answer(i)); }, t); }
+        function at(t, fn){ setTimeout(fn, t); }
+        // A finished poller nested in this one must not resolve to it.
+        at(500, function(){
+            var nested = document.createElement('div');
+            nested.className = 'treebar-terminal';
+            poller.querySelector(':scope > .treebar-poller-inner').appendChild(nested);
+            calls.nested = treebarUpdatePoller(nested, answer(9));
+            nested.remove();
+            calls.outside = treebarUpdatePoller(document.body, answer(9));
+        });
+        // Pushes from 1s: answers and heartbeats, well past the 5s a poller
+        // without polls used to read as stale.
+        push(1000, 3); push(2000, 5); push(3000); push(4000); push(5000); push(6000, 6);
+        // Paused 7s–11.2s: an answer and a heartbeat arrive and are held.
+        at(7000, function(){ poller.dataset.paused = '1'; });
+        push(7500, 8); push(10000);
+        at(11200, function(){ poller.dataset.paused = '0'; });
+        push(12000, 9);
+        // The source fails at 12.5s; the resumed polls fail too (cancelled
+        // here, never answered) until the source is back at 18s.
+        at(12500, function(){ calls.lost = treebarPollerLost(poller, ''); });
+        push(18000, 9);
+        // The result arrives by push; the finished poller takes no more.
+        at(19000, function(){ calls.done = treebarUpdatePoller(poller, document.getElementById('done').innerHTML); });
+        at(19200, function(){
+            calls.after = treebarUpdatePoller(poller, answer(9));
+            calls.afterLost = treebarPollerLost(poller, '');
+        });
+        var rows = [];
+        function sample(t){
+            setTimeout(function(){
+                var bar = poller.querySelector('.treebar-poller-inner progress.treebar-progress');
+                var span = poller.querySelector('.treebar-freshness');
+                rows.push([t, attempts, bar ? bar.getAttribute('value') : '',
+                    poller.dataset.treebarFreshness || 'live', span && !span.hidden ? span.textContent : '',
+                    poller.className].join('|'));
+            }, t);
+        }
+        [950, 1050, 6950, 7600, 11100, 11350, 12450, 13000, 17600, 18100, 18900, 19100].forEach(sample);
+        setTimeout(function(){
+            var out = document.createElement('pre'); out.id = 'result-rows';
+            out.textContent = rows.join('\n') + '\nhtmx|' + htmx.version + '\ncalls|' + JSON.stringify(calls) +
+                '\nresult|' + document.getElementById('result').textContent;
+            document.body.appendChild(out);
+        }, 20000);
+        """
+        dir = mktempdir()
+        file = joinpath(dir, "pushed.html")
+        write(file, "<!DOCTYPE html>" * html(h.html(
+            h.head(h.meta(charset="utf-8"),
+                h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js")(),
+                htmx_treebar_styles(), htmx_treebar_script()),
+            h.body(Raw(answers[0]), templates..., h.template(id="done")(Raw(done)), h.script(Raw(driver))))))
+        profile = joinpath(dir, "profile")
+        dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=21000 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+        result = match(r"<pre id=\"result-rows\">([^<]*)</pre>", dom)
+        @test result !== nothing
+        lines = result === nothing ? String[] : split(result.captures[1], '\n')
+        rows = Dict(parse(Int, first(r)) => r[2:end] for r in split.(lines, '|') if all(isdigit, first(r)))
+        extra = Dict(first(r) => join(r[2:end], '|') for r in split.(lines, '|') if !all(isdigit, first(r)))
+        row(t) = get(rows, t, fill("missing", 5))
+        attempts(t) = parse(Int, row(t)[1])
+        @test get(extra, "htmx", "") == "2.0.8"
+        # Before any push the poller polls.
+        @test attempts(950) >= 3
+        # 1.05s: the first push shows its answer and suspends the polls.
+        @test row(1050)[2:4] == ["3", "live", ""]
+        # 6.95s: pushes and heartbeats keep the poller live, with no poll.
+        @test row(6950)[2:4] == ["6", "live", ""]
+        @test attempts(6950) == attempts(1050)
+        # 7.6s: paused, the pushed answer is held.
+        @test row(7600)[2] == "6"
+        # 11.1s: the shown answer ages while paused (last shown at 6s).
+        @test row(11100)[2:4] == ["6", "stale", "Updated 5s ago"]
+        # 11.35s: resumed, the held answer shows at once, confirmed when the
+        # source last spoke (10s).
+        @test row(11350)[2:4] == ["8", "live", ""]
+        @test attempts(12450) == attempts(1050)
+        # 13s: the source failed; the poller polls again (a blip so far).
+        @test attempts(13000) > attempts(12450)
+        @test row(13000)[2:3] == ["9", "live"]
+        # 17.6s: the polls have failed too for 5s: lost.
+        @test row(17600)[3:4] == ["lost", "Connection lost · updated 5s ago · retrying"]
+        # 18.1s: the source is back: live, polls suspended again.
+        @test row(18100)[3:4] == ["live", ""]
+        @test attempts(18900) == attempts(18100)
+        # 19.1s: the pushed result terminalizes the poller.
+        @test row(19100)[5] == "treebar-terminal"
+        @test get(extra, "result", "") == "Done: 42"
+        @test get(extra, "calls", "") == """{"1000":true,"2000":true,"3000":true,"4000":true,"5000":true,"6000":true,"7500":true,"10000":true,"12000":true,"18000":true,"nested":false,"outside":false,"lost":true,"done":true,"after":false,"afterLost":false}"""
+        finalize_progress!(job)
+    end
+    end
+end
