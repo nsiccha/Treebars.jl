@@ -3122,6 +3122,144 @@ end
     end # let (restores @testset hard scope)
 end
 
+@testitem "swap listener refreshes once per swap, terminalizes on every announcement (browser)" setup=[TreebarsTestImports] tags=[:unit, :polling] begin
+    let
+    # Snag treebars-reancho-05fcadfc: htmx 2 announces each swap on every
+    # element its answer has settled so far, all with one shared detail, so
+    # an answer with N out-of-band elements fires htmx:oobAfterSwap N(N+3)/2
+    # times and htmx:afterSwap N+1 times. The script refreshed its live sets
+    # on every announcement: 161 out-of-band cells beside 200 running spans
+    # cost 1.95 s per answer. It now refreshes once per swap (and again after
+    # a terminalization), while terminalization, which reads the one field
+    # the announcements differ in (detail.elt), still sees each of them: a
+    # poller finishes even when its terminal content is not the first
+    # element the answer or WebSocket frame settled.
+    # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or chromium,
+    # and network for htmx 2.0.8 from jsdelivr). Answers are applied with
+    # htmx.swap and the shared detail a request's answer carries, frames as
+    # the ws extension applies them, so no request or socket leaves the page.
+    # A live poller's badge sync rewrites its pause button on every refresh,
+    # so that button's mutations count refreshes.
+    if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires google-chrome or chromium")
+        html(x) = repr(MIME"text/html"(), x)
+        ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+        jobs = [initialize_progress!(:state; description="Job $i", N=10) for i in 1:3]
+        foreach(start_progress!, jobs)
+        pollers = [html(ext._polling_running(job; label="Job", poll_url="/poll",
+            poll_interval="10s", cancel_url="")) for job in jobs]
+        done_answer = html(ext._polling_inner_done(h.p(id="result-answer")("Done")))
+        # Targeted by selector: an id-matched replacement keeps the replaced
+        # element's attributes until htmx settles it.
+        done_frame = html(h.div(class="treebar-terminal-content",
+            hx_swap_oob="outerHTML:#frame-inner")(h.p(id="result-frame")("Done")))
+        driver = raw"""
+        document.addEventListener('htmx:beforeRequest', function(evt){ evt.preventDefault(); });
+        var counts = {oob: 0, swap: 0};
+        document.addEventListener('htmx:oobAfterSwap', function(){ counts.oob += 1; });
+        document.addEventListener('htmx:afterSwap', function(){ counts.swap += 1; });
+        var pollers = document.querySelectorAll('.treebar-poller');
+        var live = pollers[0], byAnswer = pollers[1], byFrame = pollers[2];
+        var refreshes = new MutationObserver(function(){});
+        refreshes.observe(live.querySelector('.treebar-pause'), {childList: true});
+        var sink = document.getElementById('sink');
+        function cells(n, k){
+            var s = '';
+            for (var i = 0; i < n; i++) s += '<template><td id="c' + i + '" hx-swap-oob="true">' + k + i + '</td></template>';
+            return s;
+        }
+        function items(n, k){
+            var s = '';
+            for (var i = 0; i < n; i++) s += '<div id="f' + i + '" hx-swap-oob="true">' + k + i + '</div>';
+            return s;
+        }
+        function template(id){ return document.getElementById(id).innerHTML; }
+        // One answer, as a request's would be swapped: its out-of-band
+        // elements, then its main swap. Reports announcements and refreshes.
+        function answer(target, html, style){
+            counts.oob = counts.swap = 0;
+            refreshes.takeRecords();
+            htmx.swap(target, html, {swapStyle: style}, {eventInfo: {target: target}});
+            return [counts.oob, counts.swap, refreshes.takeRecords().length].join(',');
+        }
+        // One frame, as the ws extension swaps a message: each top-level
+        // element out of band over one settle info, and no htmx:afterSwap.
+        var api;
+        htmx.defineExtension('treebars-test-api', {init: function(a){ api = a; }});
+        function frame(target, html){
+            counts.oob = counts.swap = 0;
+            refreshes.takeRecords();
+            var settleInfo = api.makeSettleInfo(target);
+            Array.from(api.makeFragment(html).children).forEach(function(child){
+                api.oobSwap(api.getAttributeValue(child, 'hx-swap-oob') || 'true', child, settleInfo);
+            });
+            api.settleImmediately(settleInfo.tasks);
+            return [counts.oob, counts.swap, refreshes.takeRecords().length].join(',');
+        }
+        function ended(p){ return p.className + (p.querySelector(':scope > .treebar-badge') ? '+badge' : ''); }
+        setTimeout(function(){
+            var rows = [];
+            rows.push('n20|' + answer(sink, cells(20, 'a'), 'none'));
+            rows.push('n80|' + answer(sink, cells(80, 'b'), 'none'));
+            rows.push('cell|' + document.getElementById('c79').textContent);
+            // A poll answer with out-of-band cells: the terminal content is
+            // the last element its main swap settles.
+            rows.push('answer|' + answer(byAnswer.querySelector('.treebar-poller-inner'),
+                cells(20, 'c') + template('done-answer'), 'outerHTML'));
+            // A frame whose terminal content follows other elements.
+            byFrame.querySelector('.treebar-poller-inner').id = 'frame-inner';
+            rows.push('frame|' + frame(sink, items(20, 'd') + template('done-frame')));
+            rows.push('item|' + document.getElementById('f19').textContent);
+            rows.push('pollers|' + [live, byAnswer, byFrame].map(ended).join(' '));
+            rows.push('results|' + ['result-answer', 'result-frame'].map(function(id){
+                var r = document.getElementById(id); return r ? r.textContent : '';
+            }).join(' '));
+            rows.push('htmx|' + htmx.version);
+            var out = document.createElement('pre'); out.id = 'result-rows';
+            out.textContent = rows.join('\n');
+            document.body.appendChild(out);
+        }, 500);
+        """
+        dir = mktempdir()
+        file = joinpath(dir, "announcements.html")
+        write(file, "<!DOCTYPE html>" * html(h.html(
+            h.head(h.meta(charset="utf-8"),
+                h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js")(),
+                htmx_treebar_styles(), htmx_treebar_script()),
+            h.body(Raw.(pollers)..., h.div(id="sink")(),
+                h.table(h.tbody(h.tr([h.td(id="c$i")() for i in 0:79]...))),
+                h.div([h.div(id="f$i")() for i in 0:19]...),
+                h.template(id="done-answer")(Raw(done_answer)), h.template(id="done-frame")(Raw(done_frame)),
+                h.script(Raw(driver))))))
+        profile = joinpath(dir, "profile")
+        dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=2000 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+        result = match(r"<pre id=\"result-rows\">([^<]*)</pre>", dom)
+        @test result !== nothing
+        rows = Dict(first(r) => join(r[2:end], '|') for r in split.(result === nothing ? String[] : split(result.captures[1], '\n'), '|'))
+        @test get(rows, "htmx", "") == "2.0.8"
+        # Rows read: oobAfterSwap announcements, afterSwap announcements,
+        # refreshes. 20 and 80 cells: N(N+3)/2 and N+1 announcements (htmx's
+        # own count, unchanged), one refresh per swap.
+        @test get(rows, "n20", "") == "230,21,21"
+        @test get(rows, "n80", "") == "3320,81,81"
+        @test get(rows, "cell", "") == "b79"
+        # The terminal content each poller received ended it, and a refresh
+        # followed: one more than the swaps. A frame announces only out of
+        # band, so its terminal content is seen there or never.
+        @test get(rows, "answer", "") == "230,21,22"
+        @test get(rows, "frame", "") == "252,0,22"
+        @test get(rows, "item", "") == "d19"
+        @test get(rows, "pollers", "") == "treebar-poller+badge treebar-terminal treebar-terminal"
+        @test get(rows, "results", "") == "Done Done"
+        foreach(finalize_progress!, jobs)
+    end
+    end
+end
+
 @testitem "interrupt flag: subtree scope, later children, siblings, nothing" setup=[TreebarsTestImports] tags=[:unit, :interrupt] begin
     let
     root = initialize_progress!(:state; description="Job")
