@@ -531,17 +531,19 @@ htmx_treebar_script() = h.script(Raw("""
         // integer minute/hour, so those ticks are mostly no-ops.
         if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
     }
+    // True when it turned a live poller into a finished one.
     function terminalizePoller(evt){
         var el = evt && evt.detail && evt.detail.elt;
-        if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return;
+        if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return false;
         var p = el.parentElement;
-        if (!p || !p.classList.contains('treebar-poller')) return;
+        if (!p || !p.classList.contains('treebar-poller')) return false;
         p.classList.replace('treebar-poller', 'treebar-terminal');
         ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped', 'showReused', 'treebarFreshness'].forEach(function(key){
             delete p.dataset[key];
         });
         var badge = p.querySelector(':scope > .treebar-badge');
         if (badge) badge.remove();
+        return true;
     }
     // Mirror the live inner into the wrapper's badge: the badge lives on the
     // never-swapped wrapper (so the pause control keeps focus and state across
@@ -888,7 +890,6 @@ htmx_treebar_script() = h.script(Raw("""
         paintRegions();
     }
     function reanchorAndTick(evt){
-        terminalizePoller(evt);
         // Scope the synchronous refresh to the swapped target; the observer
         // below backstops every other insertion path (OOB inserts outside
         // the target, ws frames, in-place morphs), so this never needs a
@@ -969,8 +970,30 @@ htmx_treebar_script() = h.script(Raw("""
         }
         carryViewerState(removed, added);
     });
-    document.addEventListener('htmx:afterSwap', reanchorAndTick);
-    document.addEventListener('htmx:oobAfterSwap', reanchorAndTick);
+    // htmx 2 announces each swap on every element its answer has settled so
+    // far, all with one shared detail: an answer with N out-of-band elements
+    // fires htmx:afterSwap N+1 times and htmx:oobAfterSwap N(N+3)/2 times (its
+    // k-th out-of-band swap k+1 times). Announcements of one swap differ only
+    // in detail.elt, which only terminalization reads, so that runs on every
+    // announcement; the refresh reads detail.target and runs once per swap,
+    // and again after a terminalization, which it must follow. Without a
+    // detail.target the refresh is scoped by detail.elt, so each of those
+    // announcements refreshes. An answer then costs work linear in its swaps,
+    // not in their square.
+    function onSwapAnnounced(){
+        var refreshed = new WeakSet();
+        return function(evt){
+            var d = evt && evt.detail;
+            var ended = terminalizePoller(evt);
+            if (d && d.target){
+                if (!ended && refreshed.has(d)) return;
+                refreshed.add(d);
+            }
+            reanchorAndTick(evt);
+        };
+    }
+    document.addEventListener('htmx:afterSwap', onSwapAnnounced());
+    document.addEventListener('htmx:oobAfterSwap', onSwapAnnounced());
 
     // --- Keyed board (htmx_render_board) -----------------------------------
     // Every update — a poll response, a WebSocket frame, treebarUpdateBoard —
