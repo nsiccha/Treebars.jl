@@ -31,6 +31,22 @@ struct ProtocolPending end
 Base.isready(::ProtocolPending) = false
 Base.fetch(::ProtocolPending) = :resolved_value
 
+# Failing IP for §12's end-to-end check: a quarto-style terminal compute
+# failure — slow enough to observe the running poller first, then terminally
+# failed on the next call.
+@dynamicstruct struct _PauseFailProbe
+    "Render '$key'"
+    fail_ip(key) = begin
+        @progress "Pipeline" begin
+            @progress "Load"
+            sleep(0.2)
+            @progress "Quarto"
+            sleep(0.2)
+            error("quarto did not produce /tmp/$key.pdf")
+        end
+    end
+end
+
 ext = Base.get_extension(Treebars, :HTMXObjectsExt)
 ext === nothing && error("FAIL: HTMXObjectsExt did NOT load (Base.get_extension returned nothing)")
 println("OK  extension loaded: ", ext)
@@ -334,6 +350,53 @@ check("terminal failure keeps the recorded error first with no live chrome", () 
     occursin("class=\"treebar-poller\"", html) && error("live poller wrapper survived")
     occursin("treebar-badge", html) && error("badge chrome survived on terminal failure")
     occursin("hx-trigger", html) && error("poll ticker survived")
+end)
+
+# The same contract through the real `polling_fetchindex` catch (the
+# compute-at-most-once rethrow), not the composed pieces: a fresh key renders
+# the running poller, then — after the quarto-style failure lands — the same
+# key renders the terminal failure fragment. Snag treebars-pause-l-19b2227a:
+# the failure fragment carries no live poller identity, no pause control, and
+# no poll transport, and the recorded error article sits INSIDE the terminal
+# content ahead of the kept tree.
+check("terminal failure through polling_fetchindex renders no live chrome", () -> begin
+    probe = _PauseFailProbe()
+    rendered = Ref(false)
+    node1 = Treebars.polling_fetchindex(probe.fail_ip, "sect12";
+        poll_url="/poll", label="probe") do _
+        rendered[] = true
+        "done"
+    end
+    html1 = ext.node_to_html(node1)
+    occursin("class=\"treebar-poller\"", html1) || error("fresh key did not render a running poller: $html1")
+    rendered[] && error("render_result called while compute in flight")
+    sleep(1.0)  # let the 0.4s compute fail terminally
+    HTMXObjects.ERROR_DIR[] = mktempdir()  # contain safely's disk log
+    node2 = Logging.with_logger(Logging.NullLogger()) do
+        Treebars.polling_fetchindex(probe.fail_ip, "sect12";
+            poll_url="/poll", label="probe") do _
+            rendered[] = true
+            "done"
+        end
+    end
+    rendered[] && error("render_result called on the failure path")
+    html = ext.node_to_html(node2)
+    occursin("class=\"treebar-terminal\"", html) || error("terminal wrapper missing: $html")
+    occursin("treebar-terminal-content", html) || error("terminal content marker missing")
+    occursin("aria-invalid", html) || error("recorded error article missing")
+    occursin("treebar-frozen", html) || error("kept failure tree missing")
+    occursin("data-treebar-status=\"failed\"", html) || error("failed node not visible in kept tree")
+    occursin("class=\"treebar-poller\"", html) && error("live poller wrapper survived")
+    occursin("treebar-poller-inner", html) && error("live poller inner survived")
+    occursin("treebar-badge", html) && error("badge chrome survived")
+    occursin("treebar-pause", html) && error("pause control survived")
+    occursin("hx-get", html) && error("poll transport survived")
+    occursin("hx-trigger", html) && error("poll ticker survived")
+    pos(pat) = first(findfirst(pat, html))
+    (pos("treebar-terminal-content") < pos("aria-invalid")) ||
+        error("error article escaped the terminal content: $html")
+    (pos("aria-invalid") < pos("treebar-frozen")) ||
+        error("kept tree renders ahead of the error article: $html")
 end)
 
 # --- 13. `parent=` passthrough on polling_fetchindex (snag hang-pdf-embed-c-d79aad34) ---
