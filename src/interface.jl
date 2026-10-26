@@ -483,7 +483,7 @@ htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_rend
     htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
                       empty=nothing, id="treebar-board",
                       linger_ms=3000, expanded=false, live=poll_url !== nothing,
-                      phase_overview=false, texts=nothing)
+                      phase_overview=false, texts=nothing, pause=nothing)
 
 Render a keyed, changing collection of progress trees — a live "running jobs"
 board — as an HTMX `Node`. Implementation lives in the HTMXObjects package
@@ -530,7 +530,10 @@ per-client state on the server.
 
 The header shows the running/queued counts and, when `live`, a Pause button
 (same mechanism as the poller's): a paused board issues no polls, drops pushed
-frames, freezes its clocks and keeps lingering items. `empty` is shown while the
+frames, freezes its clocks and keeps lingering items. `pause=false` leaves the
+button out; left at `nothing`, it follows the page exactly as
+[`polling_fetchindex`](@ref)'s `pause` does (an HTMXObjects route declaring
+`__progress_pause__ = false` renders no Pause), and shows otherwise. `empty` is shown while the
 list is empty (default: the texts' `no_jobs`, "No running jobs."). `texts` is
 the language of the board's words; see [`htmx_render`](@ref). `id` must be a valid CSS id; the reconciler matches updates to
 the live board by it. For WebSocket push see [`ws_board`](@ref).
@@ -553,7 +556,8 @@ function htmx_render_board end
     htmx_ws_render_board(entries; id="treebar-board", kwargs...)
 
 [`htmx_render_board`](@ref) as an HTML string for a WebSocket frame: no poll
-element, Pause shown. The client script reconciles each frame into the live
+element, Pause shown unless `pause=false` or the page declares
+`__progress_pause__ = false`. The client script reconciles each frame into the live
 board with the same `id` (the htmx `ws` extension's `htmx:wsBeforeMessage`),
 exactly as it does poll responses. For other transports (SSE, a hand-written
 socket) call `window.treebarUpdateBoard(html)` with the frame.
@@ -567,7 +571,8 @@ WebSocket variant of a polled [`htmx_render_board`](@ref), mirroring
 [`ws_progress`](@ref): every `interval` seconds, call the zero-argument
 function `entries()` and push the full board snapshot
 ([`htmx_ws_render_board`](@ref), `kwargs...` forwarded) until the client goes
-away or `until()` returns `true` (one final frame is sent then). The page renders
+away or `until()` returns `true` (one final frame is sent then). `texts` and
+`pause` are resolved once, when the route calls it, for every frame. The page renders
 the initial board with the same `id` inside the `ws-connect` element:
 
 ```julia
