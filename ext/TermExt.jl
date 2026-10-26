@@ -104,6 +104,10 @@ function update_progress!(node::TermProgressNode, msg::AbstractString; kwargs...
     Treebars._update_labels!(node; kwargs...)
 end
 
+# A note is written in English, like every terminal word
+update_progress!(node::TermProgressNode, note::Treebars.TreebarNote; kwargs...) =
+    update_progress!(node, Treebars._note_text(note, Treebars._EN_TEXTS); kwargs...)
+
 # Update with IncrementBy
 function update_progress!(node::TermProgressNode, inc::IncrementBy; kwargs...)
     _update_job!(node.impl, inc)

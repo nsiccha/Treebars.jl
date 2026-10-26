@@ -8,7 +8,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     htmx_render_board, htmx_ws_render_board, ws_board,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_reused, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
     _flatten_displayed_children, _shows_interrupt_request
-import Treebars: TreebarTexts, _EN_TEXTS, _lang_texts, _fill_text, _duration_text
+import Treebars: TreebarTexts, _EN_TEXTS, _lang_texts, _fill_text, _duration_text, _note_text, _isempty_text
 import Treebars: add_child!
 import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
 import Treebars: current_dispatch_parent
@@ -1298,15 +1298,16 @@ function _htmx_render(node::ProgressNode{<:StateProgress}, t::TreebarTexts; arti
                 h.div(class="treebar-header")(
                     h.span(class="treebar-description")("$(sp.description):"),
                     h.span(class="treebar-count")("$(sp.i) / $(sp.N)"),
-                    !isempty(sp.message) ? h.span(class="treebar-message")(sp.message) : "",
+                    _isempty_text(sp.message) ? "" : h.span(class="treebar-message")(_note_text(sp.message, t)),
                     duration_node,
                     interrupt_node,
                 ),
                 h.progress(value=string(sp.i), max=string(sp.N), class="treebar-progress")(),
                 children_node,
             )
-        elseif !isempty(sp.message)
-            header_text = isempty(sp.description) ? sp.message : "$(sp.description) $(sp.message)"
+        elseif !_isempty_text(sp.message)
+            message = _note_text(sp.message, t)
+            header_text = isempty(sp.description) ? message : "$(sp.description) $(message)"
             h.div(class=node_class)(
                 h.div(class="treebar-header")(header_text,
                     get(node.meta, :annotation, false) ? "" : duration_node, interrupt_node),
@@ -1439,9 +1440,9 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     if isempty(children) && (is_finished(sp) || is_failed(sp) || is_skipped(sp) || is_reused(sp))
         return ""
     end
-    if isempty(children) && !isempty(sp.message)
+    if isempty(children) && !_isempty_text(sp.message)
         return h.div(
-            h.span(sp.message; class="u-text-muted"),
+            h.span(_note_text(sp.message, t); class="u-text-muted"),
             h.span(" "; aria_busy="true"),
         )
     end
@@ -2215,7 +2216,7 @@ function _root_renders_duration(status)
     sp isa StateProgress || return false
     return lock(sp.lock) do
         !isnothing(sp.N) && return true
-        !isempty(sp.message) && return !get(status.meta, :annotation, false)
+        !_isempty_text(sp.message) && return !get(status.meta, :annotation, false)
         !isempty(sp.description)
     end
 end

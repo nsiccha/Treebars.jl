@@ -179,3 +179,163 @@ end
     @test occursin("finished", render_text(batch; phase_overview=true))
     end
 end
+
+# Notes a package writes into progress nodes (`treebar_notes`, snag
+# consumer-written-813ef5a6): DynamicObjects' "from disk: 26.9 MB",
+# "queued · #2" and "(cached)" follow the page language; English stays as the
+# plain strings wrote it.
+
+@testsnippet PackageNotes begin
+    const notes = treebar_notes(
+        en = (from_disk = "from disk: {size}", cached = "(cached)", rows = "{n} rows"),
+        de = (from_disk = "aus dem Zwischenspeicher ({size})", cached = "(zwischengespeichert)"))
+    note_text(x, t) = Treebars._note_text(x, t)
+    # DynamicObjects' `_format_size` (DO 6c729ef, src/DynamicObjects.jl:905), the
+    # English a `ByteSize` must reproduce exactly.
+    format_size(n) = n < 1024 ? "$n B" :
+        n < 1024^2 ? string(round(n / 1024, digits=1), " KB") :
+        n < 1024^3 ? string(round(n / 1024^2, digits=1), " MB") :
+        string(round(n / 1024^3, digits=1), " GB")
+end
+
+@testitem "Package notes: tables, values, refusals, app wording" setup=[TreebarsTestImports, PackageNotes] tags=[:unit, :render] begin
+    let
+    en, de = treebar_texts(:en), treebar_texts(:de)
+    for n in (0, 1, 1023, 1024, 870_400, 1_048_575, 1_048_576, 28_206_694, 2^30, 5 * 2^30 + 123)
+        @test note_text(notes(:from_disk; size=ByteSize(n)), en) == "from disk: " * format_size(n)
+    end
+    @test note_text(notes(:from_disk; size=ByteSize(28_206_694)), de) == "aus dem Zwischenspeicher (26,9 MB)"
+    @test note_text(notes(:from_disk; size=ByteSize(512)), de) == "aus dem Zwischenspeicher (512 B)"
+    @test note_text(notes(:cached), en) == "(cached)"
+    @test note_text(notes(:cached), de) == "(zwischengespeichert)"
+    # A language that leaves a text out falls back to English.
+    @test note_text(notes(:rows; n=3), de) == "3 rows"
+    # Treebars' own words.
+    @test note_text(treebar_note(:queued_position; position=2), en) == "queued · #2"
+    @test note_text(treebar_note(:queued_position; position=2), de) == "wartet · Nr. 2"
+    @test note_text(treebar_note(:queued), de) == "wartet"
+    @test note_text("as written", de) == "as written"
+    @test en.locale === :en && de.locale === :de
+
+    # Refusals: a typo or an English-only value fails where it is written.
+    @test_throws ArgumentError treebar_notes(de = (cached = "x",))
+    @test_throws ArgumentError treebar_notes(en = (;))
+    @test_throws ArgumentError treebar_notes(en = "(cached)")
+    @test_throws ArgumentError treebar_notes(en = (cached = 1,))
+    @test_throws ArgumentError treebar_notes(en = (cached = "x",), ge = (cached = "y",))
+    @test_throws ArgumentError treebar_notes(en = (cached = "x",), de = (cachd = "y",))
+    @test_throws ArgumentError treebar_notes(en = (cached = "x",), de = (cached = "{n} y",))
+    @test_throws ArgumentError notes(:nonsense)
+    @test_throws ArgumentError notes(:from_disk)
+    @test_throws ArgumentError notes(:cached; size=ByteSize(1))
+    @test_throws ArgumentError notes(:rows; n=1.5)
+    @test_throws ArgumentError notes(:rows; n=true)
+    # An integer is allowed and written as given.
+    @test note_text(notes(:from_disk; size=12), en) == "from disk: 12"
+    @test_throws ArgumentError ByteSize(-1)
+    @test_throws ArgumentError treebar_note(:nonsense)
+    @test_throws ArgumentError treebar_note(:locale)
+    @test_throws ArgumentError treebar_note(:queued_position)
+    @test_throws ArgumentError treebar_note(:queued; position=1)
+
+    # An app rewords a package's texts in its own texts, checked against the table.
+    app = treebar_texts(:de, notes => (from_disk = "von der Festplatte ({size})",); stop="Anhalten")
+    @test app.stop == "Anhalten" && app.locale === :de
+    @test note_text(notes(:from_disk; size=ByteSize(28_206_694)), app) == "von der Festplatte (26,9 MB)"
+    @test note_text(notes(:cached), app) == "(zwischengespeichert)"
+    merged = treebar_texts(:de, notes => (cached = "(gecacht)",), notes => (from_disk = "Platte {size}",))
+    @test note_text(notes(:cached), merged) == "(gecacht)"
+    @test note_text(notes(:from_disk; size=ByteSize(1)), merged) == "Platte 1 B"
+    other = treebar_notes(en = (cached = "(other)",))
+    @test note_text(other(:cached), app) == "(other)"
+    @test_throws ArgumentError treebar_texts(:de, notes => (nonsense = "x",))
+    @test_throws ArgumentError treebar_texts(:de, notes => (cached = "{size}",))
+    @test_throws ArgumentError treebar_texts(:de, notes => (cached = 1,))
+    @test_throws ArgumentError treebar_texts(:de, notes => "x")
+    @test_throws ArgumentError treebar_texts(:de, :cached => (cached = "x",))
+    @test treebar_texts(:de) == de
+    @test treebar_texts(:de, notes => (cached = "x",)) == treebar_texts(:de, notes => (cached = "x",))
+    end
+end
+
+@testitem "Package notes render in the page's language; English is unchanged" setup=[TreebarsTestImports, PackageNotes] tags=[:unit, :render] begin
+    let
+    html(x) = repr(MIME"text/html"(), x)
+    ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+    de = treebar_texts(:de)
+    size = 28_206_694
+    # DynamicObjects' three notes, once as the strings it writes today and once as notes.
+    strings = (load="from disk: " * format_size(size), queue="queued · #2", hit="(cached)")
+    noted = (load=notes(:from_disk; size=ByteSize(size)),
+             queue=treebar_note(:queued_position; position=2), hit=notes(:cached))
+    root = initialize_progress!(:state; description="Bedarfskarte Lieferflächen")
+    start_progress!(root)
+    load = initialize_progress!(root; description="Lieferflächenbedarf je Blockseite")
+    queued = prepare_progress!(root; description="Zusammenfassung")
+    hit = initialize_progress!(root; description="Blockseiten")
+    finalize_progress!(hit)
+    counted = initialize_progress!(root, 4; description="Dateien")
+    bare = initialize_progress!(root; description="")
+    hidden = initialize_progress!(root; description="Prüfen")
+    initialize_progress!(hidden; description="x", displayed=false)
+    function write!(m)
+        update_progress!(load, m.load); update_progress!(queued, m.queue)
+        update_progress!(hit, m.hit); update_progress!(counted, m.load)
+        update_progress!(bare, m.queue); update_progress!(hidden, m.load)
+    end
+    # Two renders differ only in the elapsed times.
+    still(s) = replace(s, r"data-elapsed-ms=\"\d+\"" => "", r"[\d.]+(ms|s)\b" => "T")
+    write!(strings)
+    plain_html, plain_text = html(htmx_render(root)), render_text(root)
+    plain_state = Treebars.progress_state(root)
+    write!(noted)
+    @test still(html(htmx_render(root))) == still(plain_html)
+    @test still(html(htmx_render(root; texts=treebar_texts(:en)))) == still(plain_html)
+    @test still(render_text(root)) == still(plain_text)
+    @test Treebars.progress_state(load)["message"] == strings.load
+    @test still(repr(Treebars.progress_state(root))) == still(repr(plain_state))
+    @test occursin("Lieferflächenbedarf je Blockseite from disk: 26.9 MB", plain_html)
+
+    german = html(htmx_render(root; texts=de))
+    for words in ("Lieferflächenbedarf je Blockseite aus dem Zwischenspeicher (26,9 MB)",
+                  "Zusammenfassung wartet · Nr. 2", "Blockseiten (zwischengespeichert)",
+                  "<span class=\"treebar-message\">aus dem Zwischenspeicher (26,9 MB)</span>")
+        @test occursin(words, german)
+    end
+    for words in ("from disk", "26.9", "queued", "(cached)")
+        @test !occursin(words, german)
+    end
+    # A message-only node whose children all flatten away shows its note muted.
+    @test occursin("aus dem Zwischenspeicher (26,9 MB)", html(htmx_render_children(hidden; texts=de)))
+    # A note is content: the node renders, and its duration shows.
+    @test !Treebars._is_bare_wrapper(bare)
+    @test ext._root_renders_duration(load)
+    # `render_text` is for developers and stays English.
+    @test occursin("— from disk: 26.9 MB", render_text(root))
+
+    # Left out, `texts` follows the answer's page language (HTMXObjects page_lang()).
+    if isdefined(HTMXObjects, :_with_page_lang)
+        @test occursin("aus dem Zwischenspeicher (26,9 MB)",
+            HTMXObjects._with_page_lang(() -> html(htmx_render(root)), "de"))
+        @test occursin("from disk: 26.9 MB",
+            HTMXObjects._with_page_lang(() -> html(htmx_render(root)), "en"))
+    end
+    # A poller and a WebSocket frame fill notes the same way.
+    poller = html(ext._polling_running(root; label="Lieferflächen", poll_url="/poll",
+        poll_interval="200ms", cancel_url="", texts=de))
+    @test occursin("aus dem Zwischenspeicher (26,9 MB)", poller) && !occursin("from disk", poller)
+    @test occursin("wartet · Nr. 2", htmx_ws_render(root; id="lauf", texts=de))
+    finalize_progress!(root)
+    end
+end
+
+@testitem "Package notes on the :term backend are English" setup=[TermTestImports, PackageNotes] tags=[:unit, :term] begin
+    let
+        root = initialize_progress!(:term)
+        child = initialize_progress!(root, 2; description="load")
+        update_progress!(child, notes(:from_disk; size=ByteSize(28_206_694)))
+        @test child.impl.columns[end].msg[] == "from disk: 26.9 MB"
+        finalize_progress!(child.impl)
+        finalize_progress!(root.impl)
+    end
+end

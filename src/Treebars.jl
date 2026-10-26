@@ -14,14 +14,15 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     request_interrupt!, interrupt_requested, throw_if_interrupted, ProgressInterrupted,
     round2, short_string, Fraction,
     render_text, phase_overview,
-    TreebarTexts, treebar_texts
+    TreebarTexts, treebar_texts, TreebarNotes, TreebarNote, treebar_notes, treebar_note, ByteSize
 
 BACKEND = Ref{Any}(nothing)
 
 include("threadsafe.jl")
 include("interface.jl")
-include("implementation.jl")
+# Before implementation.jl: a node's message can be a `TreebarNote`.
 include("texts.jl")
+include("implementation.jl")
 include("phase_overview.jl")
 function round2 end
 function short_string end
