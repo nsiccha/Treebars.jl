@@ -42,7 +42,7 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         parts = String[_state_marker(node)]
         isempty(sp.description) || push!(parts, sp.description)
         isnothing(sp.N)         || push!(parts, "($(sp.i)/$(sp.N))")
-        isempty(sp.message)     || push!(parts, "— $(sp.message)")
+        _isempty_text(sp.message) || push!(parts, "— $(_note_text(sp.message, _EN_TEXTS))")
         # A pending, skipped, or never-entered reused node has no started_at,
         # so `duration` would report a meaningless 0s — omit it rather than
         # imply the phase has run. For a skipped or reused node that 0s would
