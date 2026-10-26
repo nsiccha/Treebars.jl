@@ -38,9 +38,12 @@ initialize_progress!(::Nothing, args...; kwargs...) = nothing
 """
     update_progress!(node, i; kwargs...)
     update_progress!(node, message::AbstractString; kwargs...)
+    update_progress!(node, note::TreebarNote; kwargs...)
 
 Update progress on `node`. Pass an integer to set the counter, a string for a status
-message, or keyword arguments to create/update labeled child nodes. No-op when `nothing`.
+message, a [`TreebarNote`](@ref) for a message written in the page's language
+([`treebar_notes`](@ref)), or keyword arguments to create/update labeled child nodes.
+No-op when `nothing`.
 
 See [`@progress`](@ref) and [`with_progress`](@ref) for wrappers that handle the
 full initialize/update/finalize lifecycle automatically.

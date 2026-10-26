@@ -310,7 +310,7 @@ mutable struct StateProgress
     description::String
     N::Union{Int,Nothing}
     i::Int
-    message::String
+    message::Union{String,TreebarNote}  # a note is written in the renderer's language
     running::Bool
     failed::Bool
     reused::Bool
@@ -355,7 +355,7 @@ end
 # Non-`StateProgress` impls are never treated as bare. Defined here (after the
 # StateProgress struct) so the type is in scope for the method signature.
 _is_bare_wrapper(node::ProgressNode{<:StateProgress}) =
-    isempty(node.impl.description) && isempty(node.impl.message) && isnothing(node.impl.N)
+    isempty(node.impl.description) && _isempty_text(node.impl.message) && isnothing(node.impl.N)
 _is_bare_wrapper(::ProgressNode) = false
 
 # Render-time first-seen dedup for one render PASS (not a lifecycle op). DO
@@ -575,7 +575,7 @@ initialize_progress!(sp::StateProgress, N::Union{Integer,Nothing}; kwargs...) =
     initialize_progress!(sp; N=_positional_N(N, kwargs), kwargs...)
 function initialize_progress!(sp::StateProgress; description="Running...", N::Union{Integer,Nothing}=nothing, transient=false, propagates=false, key=nothing, value="", pending=false, _phase_member=nothing, kwargs...)
     child = StateProgress(; description, N, pending, _phase_member)
-    child.message = value
+    child.message = value isa TreebarNote ? value : String(value)
     child
 end
 
@@ -610,7 +610,12 @@ function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
 end
 function update_progress!(sp::StateProgress, msg::AbstractString)
     lock(sp.lock) do
-        sp.message = msg
+        sp.message = String(msg)
+    end
+end
+function update_progress!(sp::StateProgress, note::TreebarNote)
+    lock(sp.lock) do
+        sp.message = note
     end
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
@@ -704,7 +709,7 @@ function progress_state(sp::StateProgress)
             "description" => sp.description,
             "N" => sp.N,
             "i" => sp.i,
-            "message" => sp.message,
+            "message" => _note_text(sp.message, _EN_TEXTS),
             "running" => sp.running,
             "failed" => sp.failed,
             # A bypassed phase is terminal but never started, so neither

@@ -239,6 +239,38 @@ setting. English markup carries no such attribute and is unchanged.
 [`render_text`](@ref) and the `:term` backend always write English: they are
 read by developers, not by the app's audience.
 
+#### Notes a package writes — `treebar_notes`
+
+A package that writes a note into a node — DynamicObjects' "from disk:
+26.9 MB" while it loads a cached value — writes it once, often on a background
+task and into a node every viewer shares, so it cannot know the page's
+language. It writes a [`TreebarNote`](@ref) instead of a string, and each
+renderer writes the note in the language of its texts. The package declares its
+words once, English required, in a [`treebar_notes`](@ref) table:
+
+```julia
+const progress_notes = treebar_notes(
+    en = (from_disk = "from disk: {size}", cached = "(cached)"),
+    de = (from_disk = "aus dem Zwischenspeicher ({size})", cached = "(zwischengespeichert)"))
+
+update_progress!(node, progress_notes(:from_disk; size = ByteSize(n)))  # "aus dem Zwischenspeicher (26,9 MB)"
+update_progress!(node, progress_notes(:cached))
+update_progress!(node, treebar_note(:queued_position; position = 2))     # Treebars' own words: "wartet · Nr. 2"
+```
+
+A note's values are strings and integers, written as given, and
+[`ByteSize`](@ref), which uses the language's decimal separator. A language
+that leaves a text out falls back to English, and [`render_text`](@ref) and the
+`:term` backend write the English text. An app rewords a package's texts in the
+texts it renders with, checked against the package's table:
+
+```julia
+treebar_texts(:de, progress_notes => (from_disk = "von der Festplatte ({size})",))
+```
+
+An unknown language or text, a `{placeholder}` the English text does not take,
+or a missing or unsupported value (a float, `true`) throws an `ArgumentError`.
+
 ## HTTP / WebSocket (`ws_progress`)
 
 When `HTTP` is loaded, the `HTTPExt` package extension provides
