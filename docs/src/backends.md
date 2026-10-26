@@ -101,7 +101,11 @@ Three states are handled automatically:
   first-load region shows progress immediately. Pass `chrome=:quiet` to
   collapse a poller beside already-visible content to the strip (hover/focus
   re-expands it); a poller diverted into HTMXObjects' live-refresh reporter
-  is quiet automatically.
+  is quiet automatically. Pass `pause=false` to leave out the pause/play
+  control; left out, it follows the page: a visitor-facing HTMXObjects app
+  declares `__progress_pause__ = false` once on its root struct, and every
+  poller and live board on its pages, the automatic ones included, renders
+  without it.
 - **Failed** — renders the exception as an `<article>` with the error message;
   polling stops naturally because the error article has no `hx-trigger`.
 - **Completed** — calls the `render_result` callback and terminalizes the stable
@@ -166,7 +170,8 @@ long as the server lists it). Running
 items tick locally between polls; queued items render dim, like pending nodes
 (`meta=(position=3,)` reads "queued · #3"). The header carries the
 running/queued count and a Pause button that stops the board's polls and
-freezes it.
+freezes it (`pause=false`, or the page's `__progress_pause__ = false`, leaves
+it out).
 
 For push instead of polling, [`ws_board`](@ref) sends the same full snapshots
 over a WebSocket (the htmx `ws` extension hands each frame to the same

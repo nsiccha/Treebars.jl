@@ -27,6 +27,26 @@ _texts(texts::TreebarTexts) = texts
 _texts(texts) = throw(ArgumentError(string(
     "texts must be a TreebarTexts, e.g. treebar_texts(:de); got ", repr(texts))))
 
+# Whether a live region shows its pause/play control (`pause=`): the poller
+# badge's ❚❚ and a live board's Pause. An explicit Bool wins; left out, the
+# HTMXObjects answer being rendered decides, exactly as for `texts`: the
+# `__progress_pause__` its route's mount chain declares, read through
+# `HTMXObjects.page_progress_pause()` (`nothing` when the chain declares none).
+# An HTMXObjects generation without that accessor, a chain that declares
+# nothing, or a render outside any answer shows the control. A visitor-facing
+# app declares `__progress_pause__ = false` once on its root (snag
+# visitor-apps-can-148cfaf6). Resolved once per public entry point and threaded
+# down, like the texts.
+_page_pause() = isdefined(HTMXObjects, :page_progress_pause) ? HTMXObjects.page_progress_pause() : nothing
+_pause(::Nothing) = _page_pause_value(_page_pause())
+_pause(pause::Bool) = pause
+_pause(pause) = throw(ArgumentError(string(
+    "pause must be true, false, or nothing to follow the page's `__progress_pause__`; got ", repr(pause))))
+_page_pause_value(::Nothing) = true
+_page_pause_value(pause::Bool) = pause
+_page_pause_value(pause) = throw(ArgumentError(string(
+    "HTMXObjects.page_progress_pause() must return true, false or nothing; got ", repr(pause))))
+
 # The words `htmx_treebar_script` writes itself — a ticking duration, the
 # badge's status mirror and pause label, the freshness notes, a board item
 # that ended, the board's Pause label, and the duration units — as the JSON
@@ -1800,8 +1820,9 @@ end
 function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
         empty=nothing, id="treebar-board", linger_ms::Integer=3000,
         expanded::Bool=false, live::Bool=!isnothing(poll_url), phase_overview::Union{Bool,Symbol}=false,
-        texts=nothing)
+        texts=nothing, pause=nothing)
     t = _texts(texts)
+    show_pause = _pause(pause)
     empty = something(empty, t.no_jobs)
     # First occurrence of a key wins: the client matches items by key, so a
     # duplicate would make two DOM items fight over one identity.
@@ -1826,7 +1847,7 @@ function htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
         h.div(class="treebar-board-header")(
             _board_count(unique_entries, t),
             live ? _freshness_span() : "",
-            live ? _board_pause_button(t) : "",
+            (live && show_pause) ? _board_pause_button(t) : "",
         ),
         Treebars._overview_enabled(phase_overview) ? _phase_overview_html(
             [node for e in unique_entries for node in (_board_get(e, :node, nothing),)
@@ -1840,12 +1861,14 @@ end
 htmx_ws_render_board(entries; kwargs...) =
     node_to_html(htmx_render_board(entries; live=true, kwargs..., poll_url=nothing))
 
-# The texts are resolved once, in the route's task, for every frame.
-function ws_board(ws::WebSocket, entries; interval=1.0, until=() -> false, texts=nothing, kwargs...)
+# The texts and the pause control are resolved once, in the route's task, for
+# every frame.
+function ws_board(ws::WebSocket, entries; interval=1.0, until=() -> false, texts=nothing, pause=nothing, kwargs...)
     t = _texts(texts)
+    show_pause = _pause(pause)
     while true
         stop = until()
-        frame = htmx_ws_render_board(entries(); texts=t, kwargs...)
+        frame = htmx_ws_render_board(entries(); texts=t, pause=show_pause, kwargs...)
         try
             send(ws, frame)
         catch
@@ -1858,7 +1881,7 @@ function ws_board(ws::WebSocket, entries; interval=1.0, until=() -> false, texts
 end
 
 """
-    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, texts=nothing, kwargs...)
+    polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, texts=nothing, pause=nothing, kwargs...)
 
 Generic fetchindex + HTMX polling pattern. Renders the running progress
 inside a `.treebar-poller` wrapper containing a `.treebar-poller-inner`
@@ -1988,6 +2011,15 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   and the kept tree. Left at `nothing` it follows the page language of the
   HTMXObjects answer (`__lang__`, see [`htmx_render`](@ref)); the wrapper
   carries the words the page script writes between polls.
+- `pause`: whether the badge shows its ❚❚ pause/play control. Left at
+  `nothing` it follows the page, like `texts`: under an HTMXObjects route whose
+  mount chain declares `__progress_pause__ = false` (read through
+  `HTMXObjects.page_progress_pause()`, on an HTMXObjects that provides it) the
+  poller has no pause control, which is what a visitor-facing app wants, since
+  pausing only freezes the display while the work runs on. Otherwise the
+  control shows. `true` / `false` decide for this poller; anything else throws
+  `ArgumentError`. The status word, bar, elapsed time, freshness note and any
+  Stop button stay either way.
 - `kwargs...`: passed through to `fetchindex`
 """
 # Resolve the `parent=:auto` default: the request's dispatch node first (the
@@ -2007,9 +2039,10 @@ function _polling_default_parent(req)
     end
     current_dispatch_parent()
 end
-function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, phase_overview::Union{Bool,Symbol}=false, texts=nothing, kwargs...)
+function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, poll_url=nothing, label=nothing, force=false, poll_interval="200ms", cancel_url="", sync=false, keep_progress=true, error_obj=nothing, req=nothing, parent=:auto, chrome=:auto, track_job=true, phase_overview::Union{Bool,Symbol}=false, texts=nothing, pause=nothing, kwargs...)
     chrome in (:auto, :quiet) || throw(ArgumentError("polling_fetchindex: chrome must be :auto or :quiet, got $(repr(chrome))"))
     t = _texts(texts)
+    show_pause = _pause(pause)
     if !isnothing(poll_context)
         poll_url = HTMXObjects.query_url(poll_context; force=false)
         force = poll_context.force
@@ -2043,7 +2076,7 @@ function polling_fetchindex(render_result, ip, keys...; poll_context=nothing, po
             track_job && !sync && _is_unresolved_handle(rv) &&
                 _track_job(rv, status, ip; label, req)
             _polling_resolve(rv, status; label, poll_url, poll_interval, cancel_url, render_result, sync, keep_progress,
-                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome, phase_overview, texts=t)
+                             ip_ctx=_ip_ctx(ip, keys, kwargs), chrome=chrome, phase_overview, texts=t, pause=show_pause)
         end
     catch err
         (keep_progress && !sync) || rethrow()
@@ -2079,10 +2112,10 @@ _is_unresolved_handle(rv) = _is_handle(rv) && !Base.isready(rv)
 # incompatible object does not satisfy that protocol and is not normalized here.
 
 # Keep the old Task contract working while DynamicObjects consumers migrate.
-_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS) =
+_polling_resolve(rv::Task, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS, pause::Bool=true) =
     istaskfailed(rv) ? throw(rv.result) :
-    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts) :
-        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview, texts)
+    sync ? _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts, pause) :
+        _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview, texts, pause)
 
 # Report a hand-rolled poller's in-flight compute to HTMXObjects' job ledger
 # (`HTMXObjects.track_job!`), so it shows on the runtime dashboard and job
@@ -2132,11 +2165,11 @@ end
 # the client terminalizes the stable wrapper in place. With keep_progress
 # (default, but not on the sync loopback), the frozen tree is appended below
 # the result in a collapsed <details>.
-function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS)
+function _polling_resolve(rv, status; sync=false, keep_progress=true, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx="", chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS, pause::Bool=true)
     if _is_unresolved_handle(rv)
         return sync ?
-            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts) :
-            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview, texts)
+            _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts, pause) :
+            _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome, phase_overview, texts, pause)
     end
     # A READY handle must never reach render_result raw — resolve it here. This is
     # the guard that `e6f140f` dropped (it deleted `_assert_resolved` and traded
@@ -2144,7 +2177,7 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
     # ready handle). A compatible ready handle is a legal completion race, so it
     # is normalized silently rather than diagnosed as package skew.
     if _is_handle(rv)
-        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts)
+        return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts, pause)
     end
     body = render_result(rv)
     (keep_progress && !sync) ?
@@ -2225,7 +2258,7 @@ end
 _label_restates_root(label, status) =
     !isnothing(label) && _status_root_description(status) == string(label)
 
-function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS)
+function _polling_running(status; label, poll_url, poll_interval, cancel_url, chrome=:auto, phase_overview::Union{Bool,Symbol}=false, texts::TreebarTexts=_EN_TEXTS, pause::Bool=true)
     t = texts
     stop_btn = isempty(cancel_url) ? "" : h.a(t.stop; role="button", class="outline secondary treebar-stop",
         hx_get=cancel_url, hx_target="closest div", hx_swap="outerHTML")
@@ -2241,7 +2274,7 @@ function _polling_running(status; label, poll_url, poll_interval, cancel_url, ch
         h.article(h.header(_fill_text(t.running_header; label), stop_btn), _polling_status_tree(status, t; scoped=false, phase_overview))
     end
     _polling_wrap(_polling_inner_running(poll_url, poll_interval, inner_body);
-                  pausable=true, badge=_poll_badge(label, status, t), chrome=chrome, texts=t)
+                  pausable=true, badge=_poll_badge(label, status, t; pause), chrome=chrome, texts=t)
 end
 
 # The live tree inside a poller. A missing status keeps `htmx_render`'s own
@@ -2295,11 +2328,13 @@ _badge_elapsed(::Nothing, t::TreebarTexts) = t.badge_starting
 _badge_elapsed(node::ProgressNode, t::TreebarTexts) =
     node.impl isa StateProgress ? _initial_duration_text(node.impl, t) : ""
 
-function _poll_badge(label, status, t::TreebarTexts)
+function _poll_badge(label, status, t::TreebarTexts; pause::Bool=true)
     h.span(class="treebar-badge")(
         h.span(class="treebar-badge-strip", aria_hidden="true")(),
         h.span(class="treebar-badge-panel")(
-            _pause_button(t),
+            # `pause=false`: no control at all (a visitor-facing page; see
+            # `_pause`). The mirror tolerates its absence.
+            pause ? _pause_button(t) : "",
             # No badge label when there is none to show, or when it would
             # restate the root header one line below (dedup, see above).
             (isnothing(label) || _label_restates_root(label, status)) ? "" :
