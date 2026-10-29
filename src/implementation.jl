@@ -63,6 +63,9 @@ mutable struct ProgressNode{I,M,C}
             impl, meta, parent, children, Threads.Atomic{Bool}(false)
         )
         isnothing(parent) || push!(parent.children, rv)
+        # Like every lifecycle change below: an open snapshot file may be due
+        # an update (src/snapshot.jl).
+        _snapshot_changed()
         rv
     end
 end
@@ -584,7 +587,7 @@ end
 # `started_at` either, and backfilling one would invent a duration (and a
 # negative one, since `finalized_at` is earlier).
 function start_progress!(sp::StateProgress)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.started_at = now()
@@ -592,36 +595,46 @@ function start_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
+    _snapshot_changed()
+    rv
 end
 
 function update_progress!(sp::StateProgress, i::Integer)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         if isnothing(sp.N)
             sp.message = string(i)
         else
             sp.i = clamp(i, 0, sp.N)
         end
     end
+    _snapshot_changed()
+    rv
 end
 function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
     end
+    _snapshot_changed()
+    rv
 end
 function update_progress!(sp::StateProgress, msg::AbstractString)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         sp.message = String(msg)
     end
+    _snapshot_changed()
+    rv
 end
 function update_progress!(sp::StateProgress, note::TreebarNote)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         sp.message = note
     end
+    _snapshot_changed()
+    rv
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
 
 function fail_progress!(sp::StateProgress, args...; kwargs...)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         sp.failed = true
         sp.running = false
@@ -630,9 +643,11 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
         sp.finalized_at = t
         _record_phase_transition!(sp, previous)
     end
+    _snapshot_changed()
+    rv
 end
 function finalize_progress!(sp::StateProgress)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         # A reused node is already terminal. Wrappers (`with_prepared_progress`,
         # the next phase marker) finalize the phase they entered after its body
         # called `reuse_progress!`; that must neither move `finalized_at` nor
@@ -645,13 +660,15 @@ function finalize_progress!(sp::StateProgress)
         sp.finalized_at = t
         _record_phase_transition!(sp, previous)
     end
+    _snapshot_changed()
+    rv
 end
 # Terminate a pending node WITHOUT backfilling `started_at` — the one thing
 # that separates "never ran" from "ran instantaneously". Guarded on pending so
 # it is idempotent and can never downgrade a node that actually ran: a running
 # node finalizes or fails, a terminal node stays as it is.
 function skip_progress!(sp::StateProgress)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         if isnothing(sp.started_at) && isnothing(sp.finalized_at)
             sp.running = false
@@ -659,13 +676,15 @@ function skip_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
+    _snapshot_changed()
+    rv
 end
 # Terminate a pending or running node as reused. `started_at` is left as it is:
 # unset for a phase reused before it was entered (no work, no duration), set for
 # one reused from inside its body. Guarded on non-terminal, so it is idempotent
 # and never relabels a node that already finished, failed, or was skipped.
 function reuse_progress!(sp::StateProgress)
-    lock(sp.lock) do
+    rv = lock(sp.lock) do
         previous = isnothing(sp.phase_member) ? 0 : _phase_state_index(sp)
         if isnothing(sp.finalized_at)
             sp.running = false
@@ -674,6 +693,8 @@ function reuse_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
+    _snapshot_changed()
+    rv
 end
 
 # Backends without a reused state (Term.jl) degrade to their closest terminal

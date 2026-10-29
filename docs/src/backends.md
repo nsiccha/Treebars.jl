@@ -38,6 +38,51 @@ Each node exposes lifecycle queries — see [`is_pending`](@ref),
 [`is_running`](@ref), [`is_finished`](@ref), [`is_failed`](@ref),
 [`is_skipped`](@ref), [`is_reused`](@ref), [`duration`](@ref).
 
+### Following a run from another process — `snapshot_progress`
+
+A run with no browser and no terminal (a script on a remote host, a batch
+job) can keep its tree in a file that any shell reads while it runs:
+
+```julia
+root = initialize_progress!(:state; description="Sampling")
+snapshot_progress(root, "fit.progress") do
+    run_fit(; progress=root)
+end
+```
+
+```console
+$ cat fit.progress
+treebars snapshot · live · pid 4242 on gordito · written 2026-10-29T18:45:02Z (unix 1793299502) · every 2s
+▶ Sampling [3m 12s]
+├─ ✓ Prepare model [41s]
+└─ ▶ Warmup (812/1000) [2m 31s] · ETA ~35s
+```
+
+Below the first line is exactly what [`render_text`](@ref) shows. The file is
+replaced whole (a temp file, then a rename) at most once per `interval`
+seconds, and never appended to, so it stays the size of the tree however long
+the run takes. A background task writes it, and so does any thread that
+changes the tree once the last write is `interval` old, so a run whose threads
+never yield still updates it. Closing the snapshot (the do-block does it) writes
+it once more marked `final`. Pass `phase_overview=true` to add the phase
+counts, which keep finished transient phases counted after they left the tree.
+
+The package's `bin/treebars` script follows a snapshot:
+
+```console
+$ treebars show fit.progress     # the snapshot, then "-- live · written 1s ago"
+$ treebars watch fit.progress    # redraw every second until it is final
+```
+
+`show` reports a live snapshot as stale when it has not been written for far
+longer than its interval: the run stopped without closing it, or all its
+threads are busy in a step that changes nothing in the tree.
+
+There is no signal to make a running process print its tree on demand. Julia
+has no public way to run Julia code from a signal handler, and on Linux it uses
+`SIGUSR1` and `SIGUSR2` itself. The file already is the on-demand view: it is
+never more than `interval` seconds behind the tree.
+
 ## HTMXObjects.jl integration
 
 When `HTMXObjects` is loaded, `StateProgress` trees can be rendered as HTML.
