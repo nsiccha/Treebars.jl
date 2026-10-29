@@ -1,6 +1,6 @@
 module Treebars
 
-using Dates: DateTime, Millisecond, now, canonicalize, CompoundPeriod, value
+using Dates: Dates, DateTime, Millisecond, now, canonicalize, CompoundPeriod, value
 using OrderedCollections: OrderedSet, OrderedDict
 
 export @progress, @phases, @with_progress, with_progress, with_prepared_progress, with_prepared_phases, progress_map,
@@ -13,7 +13,7 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     prepare_progress!, start_progress!, skip_progress!, reuse_progress!,
     request_interrupt!, interrupt_requested, throw_if_interrupted, ProgressInterrupted,
     round2, short_string, Fraction,
-    render_text, phase_overview,
+    render_text, phase_overview, snapshot_progress, ProgressSnapshot,
     TreebarTexts, treebar_texts, TreebarNotes, TreebarNote, treebar_notes, treebar_note, ByteSize
 
 BACKEND = Ref{Any}(nothing)
@@ -28,6 +28,7 @@ function round2 end
 function short_string end
 include("formatting.jl")
 include("text.jl")
+include("snapshot.jl")
 include("convenience.jl")
 include("busy_retry.jl")
 include("dispatch_parent.jl")
@@ -64,5 +65,8 @@ Common kwargs:
 See the HTMXObjects extension source for the full call signature.
 """
 function polling_fetchindex end
+
+# A snapshot file the program never closed is marked final when Julia exits.
+__init__() = atexit(_close_open_snapshots)
 
 end # module Treebars

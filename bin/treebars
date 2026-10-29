@@ -1,0 +1,93 @@
+#!/bin/sh
+# treebars — read a progress snapshot that Treebars.snapshot_progress keeps up
+# to date, from any shell, while the run that writes it goes on.
+#
+#   treebars show FILE             print the snapshot once, with its age
+#   treebars watch FILE [SECONDS]  redraw it every SECONDS (default 1) until
+#                                  the run closes it
+#
+# The snapshot's first line names its state (live or final), the process that
+# wrote it and when. A live snapshot that has not been written for much longer
+# than its interval is reported as stale: the run stopped without closing it,
+# or all of its threads are busy in a step that changes nothing in its tree.
+# Staleness is judged by the file's age alone, because the reader may not see
+# the writer's process (another host, another PID namespace).
+set -u
+
+usage() {
+    echo "usage: treebars show FILE | treebars watch FILE [SECONDS]" >&2
+    exit 2
+}
+
+# "3s", "4m 10s", "2h 5m" for a number of seconds.
+age_text() {
+    awk -v s="$1" 'BEGIN {
+        if (s < 60) printf "%ds", s
+        else if (s < 3600) printf "%dm %ds", s / 60, s % 60
+        else printf "%dh %dm", s / 3600, (s % 3600) / 60
+    }'
+}
+
+# Print the status line for a snapshot's first line ($1) and set $state to
+# live, stale, final or unknown.
+status() {
+    case $1 in
+        "treebars snapshot · "*) ;;
+        *)
+            state=unknown
+            echo "-- not a treebars snapshot: its first line is \"$1\""
+            return ;;
+    esac
+    unix=$(printf '%s\n' "$1" | sed -n 's/.*(unix \([0-9]*\)).*/\1/p')
+    age=$(( $(date +%s) - unix ))
+    [ "$age" -lt 0 ] && age=0
+    case $1 in
+        *" · final · "*)
+            state=final
+            echo "-- final · written $(age_text "$age") ago" ;;
+        *)
+            interval=$(printf '%s\n' "$1" | sed -n 's/.* · every \([0-9.]*\)s$/\1/p')
+            if awk -v a="$age" -v i="$interval" 'BEGIN { exit !(a > 3 * i + 5) }'; then
+                state=stale
+                echo "-- stale · last written $(age_text "$age") ago, expected every ${interval}s:" \
+                    "the run stopped without closing it, or is busy in a step that changes nothing"
+            else
+                state=live
+                echo "-- live · written $(age_text "$age") ago"
+            fi ;;
+    esac
+}
+
+# Print the snapshot in $1 and its status line; set $state (missing when there
+# is no file yet).
+show() {
+    if [ ! -f "$1" ]; then
+        state=missing
+        echo "no snapshot at $1 yet"
+        return
+    fi
+    # One read: the run may replace the file between two.
+    snapshot=$(cat "$1")
+    printf '%s\n' "$snapshot"
+    status "$(printf '%s\n' "$snapshot" | head -n 1)"
+}
+
+[ $# -ge 2 ] || usage
+file=$2
+case $1 in
+    show)
+        [ $# -eq 2 ] || usage
+        show "$file"
+        [ "$state" != missing ] ;;
+    watch)
+        [ $# -le 3 ] || usage
+        every=${3:-1}
+        while :; do
+            printf '\033[H\033[2J'
+            show "$file"
+            [ "$state" = final ] && exit 0
+            sleep "$every"
+        done ;;
+    *)
+        usage ;;
+esac
