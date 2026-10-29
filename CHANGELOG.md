@@ -11,6 +11,26 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.3
+
+- A phase marker's label may be a conditional choosing between string
+  literals: `@progress fast ? "Quick fit" : "Full fit"`, or an `if` /
+  `elseif` / `else` chain whose every branch is a string. It is evaluated once,
+  before any phase runs, like an interpolated label, and works wherever
+  `@progress "label"` does (`begin` blocks, loop bodies, `@progress_scope`,
+  DynamicObjects property bodies). Before, the marker was read as a wrapper
+  around plain code: no phase appeared and its time went to the previous
+  phase, with no warning.
+- A one-argument `@progress x` inside a `@progress` block that would do
+  nothing now fails at macro expansion, naming `@progress "$(x)"` for a
+  computed label, `@progress "label" x` for a node of its own, or plain `x`.
+  This applies when `x` is a name, a call, an index, or a conditional that is
+  not between strings, and `x` contains no loop or nested `@progress`. Such a
+  form used to run as plain code and add no node. One-argument loops, `map`,
+  comprehensions, `begin … end` blocks, assignments (`@progress name = …`,
+  DynamicObjects' property marker), definitions and macro calls are lowered as
+  before.
+
 ## 0.1.2
 
 - A `@progress node begin … end` block (and `Treebars.@progress_scope node

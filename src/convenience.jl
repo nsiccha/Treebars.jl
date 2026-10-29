@@ -329,6 +329,7 @@ fail_progress!(p::IterableProgress, args...; kwargs...) = fail_progress!(p.progr
 #
 # Nested forms (found during AST descent; backend not allowed here):
 #     @progress "label"               — phase marker (must be direct stmt of enclosing begin block)
+#     @progress c ? "a" : "b"         — phase marker with a conditional label (same rule)
 #     @progress "label" for … end     — labeled child for-loop
 #     @progress for … end             — bare for-loop, auto-labeled (as before)
 #     @progress "label" begin … end   — labeled sub-block with its own phases
@@ -405,6 +406,27 @@ _phases_user_args(x) = x.args[3:end]
 # the source level.
 _is_string_literal(x) = x isa AbstractString || Meta.isexpr(x, :string)
 
+# A conditional that chooses between string literals — `c ? "a" : "b"`, or an
+# `if` / `elseif` / `else` chain — is a label too: its value is a string on
+# every path, so it is evaluated once at enumeration exactly like
+# `"$(c ? "a" : "b")"`. Each branch must be the string itself (a ternary arm, or
+# an `if` branch holding nothing but it) or another such conditional, and the
+# chain needs its `else`: without it one path yields `nothing`. Only the macro
+# form `@progress c ? "a" : "b"` is a marker — a bare conditional statement is
+# ordinary code (snag `phase-marker-wit-1fcdd284`).
+_is_string_conditional(x) =
+    Meta.isexpr(x, (:if, :elseif)) && length(x.args) == 3 &&
+    all(_is_label_branch, @view x.args[2:3])
+_is_label_branch(x) = _is_label_value(_branch_value(x))
+_is_label_value(x) = _is_string_literal(x) || _is_string_conditional(x)
+# The value of an `if` branch: the block's only statement, else not a label.
+_branch_value(x) = x
+function _branch_value(x::Expr)
+    x.head === :block || return x
+    stmts = filter(a -> !(a isa LineNumberNode), x.args)
+    length(stmts) == 1 ? only(stmts) : nothing
+end
+
 # Index of a block's TAIL statement (last non-LineNumberNode arg), if any. A
 # bare string literal there is the block's VALUE, not a phase marker: the
 # parser folds a mid-block `"s"; stmt` into `Core.@doc` (so a user-written
@@ -423,13 +445,15 @@ _tail_index(block::Expr) = findlast(a -> !(a isa LineNumberNode), block.args)
 # whether it acts as a marker. A bare string literal ALSO acts as a marker
 # (the `@phases` injection path, plus for-bodies, where the parser leaves
 # bare strings intact) — EXCEPT in tail position (`is_tail`, from
-# `_tail_index`), where it is the block's value. Returns either `nothing` or
-# the raw label expression (which downstream code splices into
-# `description=$label`).
+# `_tail_index`), where it is the block's value. The macro form also takes a
+# conditional between string literals (`_is_string_conditional`). Returns
+# either `nothing` or the raw label expression (which downstream code splices
+# into `description=$label`).
 function _phase_marker_label(x, is_tail::Bool=false)
     _is_string_literal(x) && return is_tail ? nothing : x
     if x isa Expr && _is_progress_macrocall(x) && length(x.args) == 3
-        return _phase_marker_label(x.args[3], false)
+        label = x.args[3]
+        return _is_string_conditional(label) ? label : _phase_marker_label(label, false)
     end
     return nothing
 end
@@ -592,8 +616,8 @@ end
 # named only the arity, which points at adding a body — exactly the wrong fix for
 # a marker (snag `used-an-inline-p-baab62f1`).
 _toplevel_one_arg(a) =
-    _is_string_literal(a) ? error("""
-        @progress $(a isa AbstractString ? repr(a) : string(a)) reached expansion as a STANDALONE call. Either:
+    _is_label_value(a) ? error("""
+        @progress $(a isa AbstractString ? repr(a) : _source(a)) reached expansion as a STANDALONE call. Either:
           • it was meant as a PHASE MARKER inside a `@progress [begin … end]` block — then the \
         enclosing block did not recognise it, because a marker must be spelled `@progress "label"` \
         or `Treebars.@progress "label"`. Import the macro with `using Treebars: @progress` (from a \
@@ -626,10 +650,63 @@ end
 
 # Length-1 nested form: a body expression. A bare string here is a stray
 # phase marker (markers are consumed by _block_progress_expr before reaching
-# this walker).
-_nested_one_arg(a, ctx) = _build_body(a, nothing, ctx)
-_nested_one_arg(a::AbstractString, ctx) =
-    error("@progress \"$(a)\" phase marker must be a direct statement of an enclosing @progress [begin … end] block")
+# this walker), and so is a conditional between strings. An argument the
+# wrapper would do nothing with is refused rather than dropped: written as a
+# marker with a computed label (`@progress lbl`, `@progress string("Fit ", k)`)
+# it used to vanish, its time going to the previous phase (snag
+# `phase-marker-wit-1fcdd284`).
+_nested_one_arg(a, ctx) =
+    _is_string_conditional(a) ? _stray_marker_error(_source(a)) :
+    _wraps_nothing(a) ? _wraps_nothing_error(a) :
+    _build_body(a, nothing, ctx)
+_nested_one_arg(a::AbstractString, ctx) = _stray_marker_error("\"$(a)\"")
+
+_stray_marker_error(src) =
+    error("@progress $(src) phase marker must be a direct statement of an enclosing @progress [begin … end] block")
+
+# Source text for an error message. Julia prints `c ? a : b` as a multi-line
+# `if … else … end`, so a conditional whose arms are not blocks (the ternary's
+# shape) is printed back as a ternary.
+_source(a) = string(a)
+_source(a::Expr) = _ternary_source(Base.remove_linenums!(deepcopy(a)))
+_ternary_source(a) = string(a)
+_ternary_source(a::AbstractString) = repr(a)
+_ternary_source(a::Expr) =
+    a.head === :if && length(a.args) == 3 && !any(x -> Meta.isexpr(x, :block), @view a.args[2:3]) ?
+        join(_ternary_source.(a.args), " ? ", " : ") : string(a)
+
+# True iff `@progress a` lowers exactly as `a` would without it. With no label,
+# `_build_body` only walks a body that is not one of its shapes, and that walk
+# differs from the enclosing one only in counting loops (an explicit `@progress`
+# counts them even in a `@progress_scope` body) — so an argument with no `for`
+# and no nested progress form in its source gains nothing from the wrapper.
+# Interpolated strings stay out (a stray interpolated marker is lowered as
+# before), and so do assignments, definitions and macro calls: `@progress name
+# = …` is DynamicObjects' property marker, and a macro's arguments are its own.
+_wraps_nothing(a) = true    # a name, a literal, a QuoteNode
+_wraps_nothing(a::Expr) =
+    !(_is_string_literal(a) || _is_body_shape(a) ||
+      a.head in (:(=), :function, :macrocall) || _contains_walked(a))
+
+_contains_walked(x) = false
+_contains_walked(x::Expr) =
+    x.head === :for || _is_progress_macrocall(x) || _is_phases_macrocall(x) ||
+    _is_scope_macrocall(x) || any(_contains_walked, x.args)
+
+function _wraps_nothing_error(a)
+    src = _source(a)
+    error("""
+        @progress $src does nothing. Inside a `@progress` block a one-argument `@progress` is \
+        either a phase marker, whose label must be a string (`@progress "label"`, \
+        `@progress "Fit \$(k)"`, or a conditional between strings such as \
+        `@progress c ? "a" : "b"`), or a body it instruments (a loop, `map`, a comprehension, \
+        a `begin … end` block). `$src` is neither, so it would run as plain code and no node \
+        would appear. Write
+          • `@progress "\$($src)"` for a phase labelled with its value;
+          • `@progress "label" $src` to run it in a node of its own; or
+          • `$src` without `@progress` to run it as plain code.
+        """)
+end
 
 # Length-2 nested form: `"label" body`, or `node body` for an explicit target.
 # The node arm mirrors `@phases node body` (`_phases_build`) exactly, including
@@ -649,6 +726,12 @@ _nested_two_args(a::QuoteNode, body, ctx) =
     error("@progress: nested form does not accept a backend argument (`:$(a.value)`) — it would " *
           "start a second, detached tree; use `@progress \"label\" body`, or pass a ProgressNode " *
           "to attach the body elsewhere")
+
+# The body shapes `_build_body` lowers into a node of their own even without a
+# label. LOCKSTEP: the arms of `_build_body` below.
+_is_body_shape(body) =
+    _is_threads_for(body) || _is_map_call(body) ||
+    Meta.isexpr(body, (:for, :comprehension, :generator, :block))
 
 # Dispatch on body shape
 function _build_body(body, label, ctx)
@@ -1120,6 +1203,18 @@ Wrap `body` with automatic progress tracking. Supports:
   (or `for <vars>` when that exceeds 60 characters) — never clipped. To keep
   phases and explicit forms but leave every unmarked loop plain, use
   [`@progress_scope`](@ref) instead.
+
+  A marker's label is a string literal, plain or interpolated, or a conditional
+  choosing between string literals (a ternary, or an `if` / `elseif` / `else`
+  chain whose every branch is a string). Any other one-argument `@progress x`
+  in the block — a name, a call, an index — would do nothing, so it is an error
+  at macro expansion that names the interpolated form for a computed label:
+
+  ```julia
+  @progress "Fit chain \$(c)"                   # interpolated label
+  @progress fast ? "Quick fit" : "Full fit"    # conditional label
+  @progress "\$(label_for(c))"                  # a label computed by any expression
+  ```
 
 - **any other labeled expression** — wrapped as an indeterminate spinner child.
 

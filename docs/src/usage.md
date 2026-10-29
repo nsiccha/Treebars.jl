@@ -72,6 +72,18 @@ pipeline is visible from the outset:
 end
 ```
 
+A marker's label is a string literal, plain or interpolated, or a conditional
+choosing between string literals. Labels are evaluated once, before the first
+phase runs, so they may only use values in scope at the start of the block.
+Any other one-argument `@progress x` in the block, such as a name or a call, is
+an error at macro expansion that names the interpolated form:
+
+```julia
+@progress "Fit chain $(c)"                    # interpolated label
+@progress quick ? "Quick fit" : "Full fit"    # conditional label
+@progress "$(label_for(c))"                   # a label computed by any expression
+```
+
 Inside a phase body, the local `__progress__` refers to the current phase's
 node — useful for nesting substatus from called functions under the active
 phase (e.g. `fetchindex!(__progress__, ip; …)`).
