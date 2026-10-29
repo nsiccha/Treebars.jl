@@ -1282,6 +1282,158 @@ instead of the string, violating the §1 value-preserving contract).
 end
 
 """
+A phase marker's label may be a conditional between string literals. Before
+snag `phase-marker-wit-1fcdd284`, `@progress cond ? "a" : "b"` was read as a
+one-argument wrapper: the ternary ran as plain code, no phase appeared, and its
+time went to the previous phase, with no warning. Other one-argument forms that
+would do nothing (`@progress lbl`, `@progress string(…)`) now fail at expansion
+naming `@progress "\$(…)"`; the wrappers that do something stay as they were.
+"""
+@testitem "@progress phase markers take a conditional label; one-arg forms that do nothing are refused" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    labels(node) = [c.impl.description for c in node.children]
+    flag = false
+    k = 3
+
+    # Ternary, nested ternary, `if`/`elseif`/`else` chain and an interpolated
+    # arm, in a begin block — including the tail position, where the macro
+    # form keeps its marker meaning.
+    root = initialize_progress!(:state; description="Root")
+    ret = @progress root begin
+        @progress "eins"
+        a = 1
+        @progress flag ? "zwei (a)" : "zwei (b)"
+        b = a + 1
+        @progress flag ? "drei a" : k > 2 ? "drei b" : "drei c"
+        @progress if flag
+            "vier (if)"
+        elseif k == 3
+            "vier (elseif $k)"
+        else
+            "vier (else)"
+        end
+        b * 10
+        @progress flag ? "tail a" : "tail b"
+    end
+    finalize_progress!(root)
+    @test labels(root) == ["eins", "zwei (b)", "drei b", "vier (elseif 3)", "tail b"]
+    @test !occursin("·", render_text(root))          # every phase was entered
+
+    # Each phase starts at its own marker: the time between markers is billed to
+    # the phase it belongs to, not to the one before (the reported symptom).
+    timed = initialize_progress!(:state; description="Timed")
+    @progress timed begin
+        @progress "first"
+        @progress flag ? "second (a)" : "second (b)"
+        sleep(0.2)
+    end
+    finalize_progress!(timed)
+    first, second = timed.children
+    @test second.impl.description == "second (b)"
+    @test Treebars.duration(second) >= Millisecond(150)
+    @test Treebars.duration(first) < Treebars.duration(second)
+
+    # Labels stay eager: the conditional is evaluated once, before any phase runs.
+    evals = Ref(0)
+    pick() = (evals[] += 1; true)
+    eager = initialize_progress!(:state; description="Eager")
+    seen = Ref{Any}(nothing)
+    @progress eager begin
+        @progress "load"
+        seen[] = labels(eager)
+        @progress pick() ? "fit" : "skip"
+    end
+    finalize_progress!(eager)
+    @test seen[] == ["load", "fit"]
+    @test evals[] == 1
+
+    # In a `for` body: each iteration's phases carry its own conditional label.
+    loop = initialize_progress!(:state; description="Loop")
+    snaps = String[]
+    @progress loop for i in 1:3
+        @progress isodd(i) ? "odd $i" : "even $i"
+        push!(snaps, Treebars.progress_state(loop)["children"][1]["children"][1]["children"][1]["description"])
+    end
+    finalize_progress!(loop)
+    @test snaps == ["odd 1", "even 2", "odd 3"]
+
+    # Under `Treebars.@progress_scope` (DynamicObjects' property-body wrap).
+    scope = initialize_progress!(:state; description="Scope")
+    Treebars.@progress_scope scope begin
+        @progress flag ? "scope a" : "scope b"
+        @progress "scope c"
+    end
+    finalize_progress!(scope)
+    @test labels(scope) == ["scope b", "scope c"]
+
+    # A conditional that is not a label stays out: an arm that is not a string,
+    # an `if` without `else`, an arm with more than the string.
+    @test !Treebars._is_string_conditional(:(c ? "a" : b))
+    @test !Treebars._is_string_conditional(:(if c; "a"; end))
+    @test !Treebars._is_string_conditional(:(if c; work(); "a"; else; "b"; end))
+    @test Treebars._is_string_conditional(:(c ? "a $x" : "b"))
+
+    # Refused at expansion, naming the fixes: a one-argument `@progress x` that
+    # lowers exactly like `x`.
+    expansion_error(ex) = try
+        macroexpand(@__MODULE__, ex); nothing
+    catch e
+        sprint(showerror, e)
+    end
+    for (arg, shown) in ((:lbl, "lbl"), (:(string("Fit ", k)), "string(\"Fit \", k)"),
+                         (:(names[k]), "names[k]"), (:(flag ? "a" : lbl), "flag ? \"a\" : lbl"))
+        msg = expansion_error(:(@progress p begin
+            @progress "a"
+            @progress $arg
+        end))
+        @test msg !== nothing
+        @test occursin("@progress $shown does nothing", msg)
+        @test occursin("@progress \"\$($shown)\"", msg)
+        @test occursin("@progress \"label\" $shown", msg)
+    end
+    # The same inside a `@progress_scope` body.
+    @test occursin("does nothing", something(expansion_error(:(Treebars.@progress_scope p begin
+        @progress lbl
+    end)), ""))
+
+    # A conditional marker that is not a direct statement errors like a stray
+    # string marker does; so does one that reaches expansion standalone.
+    stray = expansion_error(:(@progress p begin
+        @progress "a"
+        if flag
+            @progress flag ? "x" : "y"
+        end
+    end))
+    @test occursin("@progress flag ? \"x\" : \"y\" phase marker must be a direct statement", something(stray, ""))
+    @test occursin("STANDALONE", something(expansion_error(:(@progress flag ? "x" : "y")), ""))
+
+    # Unchanged: wrappers that do something, and shapes owned by others.
+    for ex in (
+            :(@progress p begin @progress "a"; @progress x = 1; end),        # DynamicObjects' marker shape
+            :(@progress p begin @progress "a"; @progress f() = 1; end),
+            :(@progress p begin @progress "a"; @progress @time 1 + 1; end),   # another macro's arguments
+            :(@progress p begin @progress "a"; @progress [i for i in 1:3]; end),
+            :(@progress p begin @progress "a"; @progress map(identity, 1:3); end),
+            :(@progress p begin @progress "a"; @progress begin x = 1 end; end),
+            :(@progress p begin @progress "a"; if flag; @progress "inner $k"; end; end))
+        @test expansion_error(ex) === nothing
+    end
+    # In a `@progress_scope` body a one-argument wrapper around a loop is not a
+    # no-op — it counts the loop — so it is kept.
+    counted = initialize_progress!(:state; description="Counted")
+    Treebars.@progress_scope counted begin
+        @progress "a"
+        @progress if !flag
+            for i in 1:3
+            end
+        end
+    end
+    finalize_progress!(counted)
+    @test occursin("for i in 1:3 (3/3)", render_text(counted))
+    end # let (restores @testset hard scope)
+end
+
+"""
 Each top-level statement of the block becomes its own pre-enumerated,
 timed phase (label = shortened source). All statements share one try-scope
 so assignments stay visible across phases, and the block is value-preserving.
