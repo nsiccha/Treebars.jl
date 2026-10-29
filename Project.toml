@@ -1,7 +1,7 @@
 name = "Treebars"
 uuid = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
 authors = ["Nikolas Siccha <nikolassiccha@gmail.com>"]
-version = "0.1.1"
+version = "0.1.2"
 
 [deps]
 Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"

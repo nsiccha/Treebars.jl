@@ -965,12 +965,13 @@ end
 # single try/catch so assignments flow naturally across phase boundaries
 # (no per-phase `try` scope means no surprise `UndefVarError` for
 # variables set in one phase and used in the next). The previous phase
-# is finalized at the start of the next; the last running phase is
-# cleaned up by the caller's `finally` on the enclosing progress node
-# (the labeled-block wrapper at L389-405, or the property-body lifecycle
-# in callers like DynamicObjects). This keeps the user's last-stmt
-# value as the block's tail. Mirrors `_run_prepared_phases` for the
-# dynamic form.
+# is finalized at the start of the next; the phase still running when
+# the block exits is finalized by the block's own `finally`, so it ends
+# with its statements even when the block runs on a node it did not
+# create and does not finalize (`@progress node begin … end` on a
+# caller's node; snag `last-phase-of-a-5a5f5db6`). A `try` evaluates to
+# its body, so the user's last statement stays the block's value.
+# Mirrors `_run_prepared_phases` for the dynamic form.
 function _emit_phases(phases, ctx)
     labeled = [(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
     pending_syms = [gensym(:phase) for _ in labeled]
@@ -1059,13 +1060,20 @@ function _emit_phases(phases, ctx)
             end
             rethrow()
         finally
-            # The early-exit path this block exists for: a `return`/`break` out
-            # of the user's body runs no `catch`, so before this every phase
-            # below the exit point stayed pending forever — under a parent the
-            # enclosing `finally` had already marked ✓. Runs on the throw path
-            # too, after the catch has moved the running phase.
+            # Every exit ends every phase. The phase control was in (the last
+            # one on a normal exit, the one a `return`/`break` left) finishes
+            # here, not when some enclosing node does: a block on a caller's
+            # node would otherwise leave it `▶` running while the caller works
+            # on. Phases below the exit point were never entered and are
+            # skipped — a `return`/`break` runs no `catch`, so before this they
+            # stayed pending forever under a parent already marked ✓. On the
+            # throw path the catch has already failed the running phase.
             for _p in $phases_tuple
-                $is_pending(_p) && $skip_progress!(_p)
+                if $is_running(_p)
+                    $finalize_progress!(_p)
+                elseif $is_pending(_p)
+                    $skip_progress!(_p)
+                end
             end
         end
     end
@@ -1097,6 +1105,10 @@ Wrap `body` with automatic progress tracking. Supports:
       evaluate(x)
   end
   ```
+
+  Each phase finishes at the next marker and the last one when the block ends,
+  also when the block runs on a node it was given (`@progress node begin … end`)
+  that the caller goes on using.
 
   Plain `for` / `Threads.@threads for` loops *inside* the block — at any depth,
   including nested in `if` / `while` / another `for` — automatically become
