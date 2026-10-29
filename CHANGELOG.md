@@ -11,6 +11,16 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.2
+
+- A `@progress node begin … end` block (and `Treebars.@progress_scope node
+  begin … end`) finishes its last phase when the block ends. Before, a block
+  that ran its phases on a node it did not create left that phase `▶` running,
+  its time growing, until something finalized the node, so a caller that kept
+  working under the node showed the block's last phase as the current one. On
+  an early `return` or `break` the phase control was in finishes the same way.
+  A dependant that relies on this states `[compat] Treebars = "0.1.2"`.
+
 ## 0.1.1
 
 - `snapshot_progress(node, path; interval=2, phase_overview=false)` keeps the

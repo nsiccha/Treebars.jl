@@ -1479,15 +1479,15 @@ forever under a FINISHED parent. The macro's `finally` now terminates them.
     # The two that ran carry a start; the two bypassed are terminal-but-unstarted.
     @test [c["skipped"] for c in phases] == [false, false, true, true]
     @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
-    @test [c["finalized_at"] !== nothing for c in phases] == [true, false, true, true]
+    @test [c["finalized_at"] !== nothing for c in phases] == [true, true, true, true]
     @test all(c -> c["failed"] == false, phases)            # skipped ≠ failed
 
-    # Phase 2 — the one control was INSIDE when it returned — is still running,
-    # and that is unchanged, pre-existing behaviour, not an early-return artifact:
-    # `_emit_phases` emits no trailing finalize, so the LAST in-flight phase is
-    # terminated by the parent's `finalize_progress!` on the normal path too.
-    # Asserted so a future change to that contract shows up here deliberately.
-    @test phases[2]["running"] == true && phases[2]["skipped"] == false
+    # Phase 2 — the one control was INSIDE when it returned — finished at the
+    # return, while `root` (the caller's node) is still running. It used to stay
+    # running until the parent's finalize reached it (snag
+    # `last-phase-of-a-5a5f5db6`).
+    @test phases[2]["running"] == false && phases[2]["skipped"] == false
+    @test snap["running"] == true
     end # let (restores @testset hard scope)
 end
 
@@ -1524,6 +1524,67 @@ never saw). Only the phase that actually threw is failed now.
     @test [c["skipped"] for c in phases] == [false, false, true, true]
     # The failed phase DID run, so it keeps a real start; the bypassed two do not.
     @test [c["started_at"] === nothing for c in phases] == [false, false, true, true]
+    end # let (restores @testset hard scope)
+end
+
+"""
+A block on a node the caller owns and keeps using ends its last phase when the
+block ends, not when the caller later finalizes the node (snag
+`last-phase-of-a-5a5f5db6`).
+"""
+@testitem "@progress block on a caller's node — its last phase ends with the block" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :macro] begin
+    let
+    # The reported shape: a function runs its phases on the node it is given,
+    # returns, and the caller keeps working under that node.
+    function _inner(progress)
+        @progress progress begin
+            @progress "eins"
+            a = 1
+            @progress "zwei"
+            a + 1
+        end
+    end
+    root = initialize_progress!(:state; description="root")
+    @test _inner(root) == 2                          # the tail value is kept
+    eins, zwei = collect(root.children)
+    @test is_finished(eins) && is_finished(zwei)
+    @test is_running(root)                           # the caller's node is left alone
+    ended = zwei.impl.finalized_at
+    sleep(0.05)                                      # the caller works on …
+    @test zwei.impl.finalized_at == ended            # … and zwei's time does not grow
+    txt = render_text(root)
+    @test occursin("▶ root", txt) && occursin("✓ eins", txt) && occursin("✓ zwei", txt)
+    finalize_progress!(root)
+
+    # `@progress_scope` (DynamicObjects' wrap of every unmarked property body)
+    # lowers the same block.
+    scope_root = initialize_progress!(:state; description="scope")
+    Treebars.@progress_scope scope_root begin
+        @progress "load"
+        @progress "fit"
+        nothing
+    end
+    @test all(is_finished, collect(scope_root.children)) && is_running(scope_root)
+    finalize_progress!(scope_root)
+
+    # An unlabelled block nested in a phase ends its own last phase at its own
+    # end, while the enclosing phase is still running.
+    seen = Ref{Any}(nothing)
+    outer_root = initialize_progress!(:state; description="outer")
+    @progress outer_root begin
+        @progress "outer"
+        @progress begin
+            @progress "inner a"
+            @progress "inner b"
+            nothing
+        end
+        seen[] = (is_running(__progress__), map(is_finished, collect(__progress__.children)))
+    end
+    @test seen[] == (true, [true, true])
+    finalize_progress!(outer_root)
+
+    # Progress disabled: the block runs and keeps its value.
+    @test _inner(nothing) == 2
     end # let (restores @testset hard scope)
 end
 
@@ -1697,10 +1758,22 @@ end
     end
     cached, computed = collect(macro_root.children)
     @test is_reused(cached)          # the "Computed" marker's finalize kept it
-    # The last phase stays running until its parent finalizes (no trailing
-    # finalize in `_emit_phases`, pinned by the early-return item above).
+    # The last phase ends with the block, before its parent finalizes.
+    @test is_finished(computed) && is_running(macro_root)
     finalize_progress!(macro_root)
     @test is_reused(cached) && is_finished(computed)
+
+    # A reuse in the LAST phase survives the block's own finalize too.
+    last_root = initialize_progress!(:state; description="Last")
+    @progress last_root begin
+        @progress "Computed"
+        sum(1:3)
+        @progress "Cached"
+        reuse_progress!(__progress__)
+    end
+    computed, cached = collect(last_root.children)
+    @test is_finished(computed) && is_reused(cached) && cached.impl.started_at !== nothing
+    finalize_progress!(last_root)
     finalize_progress!(root)
     end # let (restores @testset hard scope)
 end
