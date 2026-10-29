@@ -2,6 +2,7 @@ module HTMXObjectsExt
 import HTMXObjects
 import Treebars
 import HTMXObjects: h, Node, Raw, fetchindex
+import HTTP
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
@@ -1978,6 +1979,14 @@ naturally — no custom OOB / HX-Retarget gymnastics.
   `<details>`. On failure the tree (with the failed node) is shown in an open
   `<details>` beside the recorded error. Set `false` for the old result-only /
   propagate-on-failure behavior; ignored on the `sync` path.
+- `sync`: resolve now — wait for the compute and return the final fragment,
+  with no poller (default `false`). The result is still wrapped in the
+  `.treebar-terminal` `<div>`s: `sync` skips polling, not the wrapper. So it is
+  not a way to hand a caller the raw value: a `render_result` that returns an
+  `HTTP.Response` or an HTMXObjects `MIMEResponse` / `JSONResponse` has it
+  written into the HTML, and a warning says so once. To answer with the raw
+  value, resolve the IP yourself (`fetchindex` / `fetch`) and return it from
+  the route.
 - `error_obj` / `req`: route context threaded to `safely` on the failure path
   (its `obj` for `__on_error__`/`__error__`, its `req` for log metadata).
   Auto-derived from `poll_context`; pass explicitly otherwise. Both optional.
@@ -2181,10 +2190,24 @@ function _polling_resolve(rv, status; sync=false, keep_progress=true, label, pol
         return _polling_resolve(fetch(rv), status; sync, keep_progress, label, poll_url, poll_interval, cancel_url, render_result, ip_ctx, chrome, phase_overview, texts, pause)
     end
     body = render_result(rv)
+    _warn_wrapped_response(body)
     (keep_progress && !sync) ?
         _polling_wrap(_polling_inner_done(body, _kept_progress(status, texts; open=false, phase_overview)); terminal=true) :
         _polling_wrap(_polling_inner_done(body); terminal=true)
 end
+
+# A callback that returns a finished answer (a response, not content) has it
+# serialized into the poller's HTML, so the caller gets markup where it expected
+# JSON or markdown and fails far downstream ("invalid JSON at byte 1", as two
+# Bruno routes did with `sync=true`). The fix is the caller's — return the raw
+# value from the route instead — so this only says so, once.
+_warn_wrapped_response(@nospecialize(body)) = nothing
+_warn_wrapped_response(body::Union{HTTP.Response,HTMXObjects.MIMEResponse}) = _warn_wrapped(body)
+# `JSONResponse` exists only on newer HTMXObjects.
+@static if isdefined(HTMXObjects, :JSONResponse)
+    _warn_wrapped_response(body::HTMXObjects.JSONResponse) = _warn_wrapped(body)
+end
+_warn_wrapped(body) = @warn "polling_fetchindex: render_result returned a $(nameof(typeof(body))), which is written into the poller's HTML instead of being returned. To answer with it, resolve the IP yourself (fetchindex / fetch) and return it from the route." maxlog=1
 
 # Frozen progress tree kept in the final (non-polling) response so a finished or
 # failed run can be inspected after polling stops. scoped=true → the
