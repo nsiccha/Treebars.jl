@@ -325,3 +325,217 @@ end
     end
     end
 end
+
+@testitem "Pushed pollers: a poll in flight at the first push ends without an error (browser)" setup=[TreebarsTestImports] tags=[:unit, :render] begin
+    let
+    # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or chromium,
+    # and network for htmx 2.0.8 from jsdelivr). Real htmx runs each poller's
+    # `every 200ms` trigger and handles its responses; only XMLHttpRequest is
+    # replaced, so each poll stays out until the schedule ends it, in Chrome's
+    # virtual time. Every console.error is attributed to the poller whose
+    # request caused it. The first poll of each poller leaves around 200ms.
+    if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires google-chrome or chromium")
+        html(x) = repr(MIME"text/html"(), x)
+        ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+        job = initialize_progress!(:state; description="Job", N=10)
+        start_progress!(job)
+        answer(name, i) = (update_progress!(job, i); html(ext._polling_running(job;
+            label="Background job", poll_url="/poll/$name", poll_interval="200ms", cancel_url="")))
+        names = ("plain", "paused", "heartbeat", "failed", "unpushed", "back", "backlate", "nested")
+        templates = [h.template(id="answer-$name-$i")(Raw(answer(name, i))) for name in names for i in (3, 5, 9)]
+        done = html(ext._polling_wrap(ext._polling_inner_done(h.p(id="result")("Done: 42")); terminal=true))
+        body = h.div(
+            [h.div(id="slot-$name")(Raw(answer(name, 0))) for name in names]...,
+            h.div(id="oob")("untouched"))
+        driver = raw"""
+        var errors = {}, sent = {}, out = {}, aborted = 0, current = 'page', reached = 0;
+        var ce = console.error;
+        console.error = function(msg){
+            (errors[current] = errors[current] || []).push(String(msg));
+            return ce.apply(console, arguments);
+        };
+        function run(name, fn){ var was = current; current = name; try { fn(); } finally { current = was; } }
+        function pollerOf(url){ var m = /\/poll\/(\w+)/.exec(url || ''); return m ? m[1] : url; }
+        function FakeXhr(){ this.upload = {addEventListener: function(){}}; this.heads = ''; this.status = 0; this.response = ''; }
+        FakeXhr.prototype = {
+            overrideMimeType: function(){}, setRequestHeader: function(){}, addEventListener: function(){},
+            getAllResponseHeaders: function(){ return this.heads; },
+            getResponseHeader: function(){ return null; },
+            open: function(verb, url){ this.url = url; this.name = pollerOf(url); },
+            send: function(){
+                sent[this.name] = (sent[this.name] || 0) + 1;
+                out[this.name] = this;
+                // A poller nobody pushes to, against a server that is down.
+                if (this.name === 'unpushed'){ var x = this; setTimeout(function(){ fail('unpushed', x); }, 0); }
+            },
+            abort: function(){ aborted += 1; var x = this; run(this.name, function(){ x.onabort(); }); }
+        };
+        window.XMLHttpRequest = FakeXhr;
+        function respond(name, status, text, heads){
+            var x = out[name]; out[name] = null;
+            x.status = status; x.response = text; x.heads = heads || '';
+            run(name, function(){ x.onload(); });
+        }
+        function fail(name, x){ x = x || out[name]; out[name] = null; run(name, function(){ x.onerror(); }); }
+        function tpl(name, i){ return document.getElementById('answer-' + name + '-' + i).innerHTML; }
+        function poller(name){ return document.querySelector('#slot-' + name + ' > .treebar-poller'); }
+        function innerOf(name){ return poller(name).querySelector(':scope > .treebar-poller-inner'); }
+        function bar(name){ var b = poller(name).querySelector('.treebar-poller-inner progress.treebar-progress'); return b ? b.getAttribute('value') : ''; }
+        function push(name, i){ return treebarUpdatePoller(poller(name), i === undefined ? undefined : tpl(name, i)); }
+        function at(t, fn){ setTimeout(fn, t); }
+        var kept = {}, rows = {};
+        function row(key, value){ rows[key] = value; }
+        // What a page's own listener sees of a poll answer.
+        document.addEventListener('htmx:beforeOnLoad', function(evt){
+            var d = evt.detail || {};
+            if (d.xhr && d.xhr.status === 286) reached += 1;
+        });
+
+        // plain: the push replaces the polling element; the late answer has
+        // nowhere to go, and its out-of-band content must not land either.
+        at(1000, function(){ push('plain', 3); row('plainShown', bar('plain')); });
+        at(1500, function(){ respond('plain', 200, tpl('plain', 9) + '<div id="oob" hx-swap-oob="true">late</div>'); });
+        at(1700, function(){ row('plainAfter', bar('plain')); row('oob', document.getElementById('oob').textContent); });
+
+        // paused: the first pushed answer is held, so the polling element
+        // stays on the page and the late answer would replace it.
+        at(500, function(){ poller('paused').dataset.paused = '1'; kept.paused = innerOf('paused'); });
+        at(1000, function(){ push('paused', 3); });
+        at(1500, function(){ respond('paused', 200, tpl('paused', 9)); });
+        at(1700, function(){ row('pausedKept', kept.paused.isConnected); row('pausedAfter', bar('paused')); poller('paused').dataset.paused = '0'; });
+        at(1900, function(){ row('pausedResumed', bar('paused')); });
+
+        // heartbeat: a first call with no html leaves the polling element on
+        // the page too. The late answer is the operation's last (status 286):
+        // the page's listeners must not take the operation for finished, and
+        // htmx must not stop the element's polls, so the poller still gets
+        // that answer when it is handed back.
+        at(1000, function(){ kept.heartbeat = innerOf('heartbeat'); push('heartbeat'); });
+        at(1500, function(){ respond('heartbeat', 286, document.getElementById('done').innerHTML); });
+        at(1700, function(){ row('heartbeatKept', kept.heartbeat.isConnected); row('heartbeatAfter', bar('heartbeat')); row('reached', reached); row('heartbeatSent', sent.heartbeat); });
+        at(2000, function(){ treebarPollerLost(poller('heartbeat'), ''); });
+        at(2500, function(){ row('heartbeatResumedPolls', sent.heartbeat); respond('heartbeat', 200, tpl('heartbeat', 5)); });
+        at(2700, function(){ row('heartbeatPolled', bar('heartbeat')); });
+
+        // failed: the late poll fails while the push source is alive and the
+        // viewer has paused. That is real, so htmx reports it, but it says
+        // nothing about the source: the poller reads stale, never lost.
+        at(500, function(){ poller('failed').dataset.paused = '1'; });
+        at(1000, function(){ push('failed', 3); });
+        at(1500, function(){ fail('failed'); });
+
+        // back: handed back while the abandoned poll is still out. The push
+        // replaced the polling element, so its late answer is dropped and
+        // the new element polls by itself.
+        at(1000, function(){ push('back', 3); });
+        at(1200, function(){ treebarPollerLost(poller('back'), ''); });
+        at(1500, function(){ row('backSent', sent.back); respond_old('back', 9); });
+        at(1700, function(){ row('backAfter', bar('back')); });
+        at(1900, function(){ respond('back', 200, tpl('back', 5)); });
+        at(2100, function(){ row('backPolled', bar('back')); });
+        var abandoned = {};
+        at(990, function(){ abandoned.back = out.back; });
+        function respond_old(name, i){
+            var x = abandoned[name];
+            x.status = 200; x.response = tpl(name, i);
+            run(name, function(){ x.onload(); });
+        }
+
+        // backlate: handed back with the polling element still on the page.
+        // The answer that then arrives is an ordinary poll answer.
+        at(1000, function(){ push('backlate'); });
+        at(1200, function(){ treebarPollerLost(poller('backlate'), ''); });
+        at(1500, function(){ respond('backlate', 200, tpl('backlate', 5)); });
+        at(1700, function(){ row('backlateAfter', bar('backlate')); });
+        at(2100, function(){ row('backlateSent', sent.backlate); });
+
+        // nested: a request of an element inside the inner of a pushed poller
+        // is not that poller's poll.
+        at(900, function(){
+            var n = document.createElement('div');
+            n.id = 'nested-el'; n.setAttribute('hx-get', '/nested'); n.setAttribute('hx-trigger', 'load');
+            // The inner's hx-select, hx-swap and hx-target would be inherited.
+            n.setAttribute('hx-select', 'unset'); n.setAttribute('hx-swap', 'innerHTML'); n.setAttribute('hx-target', 'this');
+            innerOf('nested').appendChild(n);
+            htmx.process(n);
+        });
+        at(1000, function(){ push('nested'); });
+        at(1400, function(){ respond('/nested', 200, 'nested answer'); });
+        at(1600, function(){ row('nestedAnswer', document.getElementById('nested-el').textContent); });
+
+        // 7s: the failed poller's late failure is 5.5s old; a poller against
+        // a dead server reads lost by now.
+        at(7000, function(){
+            row('failedState', poller('failed').dataset.treebarFreshness || 'live');
+            row('unpushedState', poller('unpushed').dataset.treebarFreshness || 'live');
+        });
+        at(7200, function(){
+            var el = document.createElement('pre'); el.id = 'late-result';
+            el.textContent = JSON.stringify({htmx: htmx.version, aborted: aborted, errors: errors, rows: rows});
+            document.body.appendChild(el);
+        });
+        """
+        dir = mktempdir()
+        file = joinpath(dir, "late.html")
+        write(file, "<!DOCTYPE html>" * html(h.html(
+            h.head(h.meta(charset="utf-8"),
+                h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js")(),
+                htmx_treebar_styles(), htmx_treebar_script()),
+            h.body(body, templates..., h.template(id="done")(Raw(done)), h.script(Raw(driver))))))
+        profile = joinpath(dir, "profile")
+        dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=8000 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+        found = match(r"<pre id=\"late-result\">([^<]*)</pre>", dom)
+        @test found !== nothing
+        text = found === nothing ? "" : found.captures[1]
+        # A flat reading of the report: no JSON package in the test env.
+        field(key) = (m = match(Regex("\"$key\":(\"[^\"]*\"|[^,}]+)"), text); m === nothing ? "missing" : strip(m[1], '"'))
+        errors_of(name) = (m = match(Regex("\"$name\":\\[([^\\]]*)\\]"), text); m === nothing ? String[] : String.(strip.(split(m[1], ','), '"')))
+        @test field("htmx") == "2.0.8"
+        # The in-flight poll is never aborted, and ending it reports nothing.
+        @test field("aborted") == "0"
+        for name in ("plain", "paused", "heartbeat", "back", "backlate", "nested")
+            @test errors_of(name) == String[]
+        end
+        # The fragment lands and the late answer changes nothing, out-of-band
+        # content included.
+        @test field("plainShown") == "3"
+        @test field("plainAfter") == "3"
+        @test field("oob") == "untouched"
+        # Paused: the late answer leaves the element; resume shows the held one.
+        @test field("pausedKept") == "true"
+        @test field("pausedAfter") == "0"
+        @test field("pausedResumed") == "3"
+        # Heartbeat: the late last answer stays dropped for the page as well,
+        # and handing the poller back makes it poll on from the same element.
+        @test field("heartbeatKept") == "true"
+        @test field("heartbeatAfter") == "0"
+        @test field("reached") == "0"
+        @test parse(Int, field("heartbeatResumedPolls")) > parse(Int, field("heartbeatSent"))
+        @test field("heartbeatPolled") == "5"
+        # Genuine failures stay visible: a failed poll is still reported, and
+        # a poller whose polls all fail reads lost. The abandoned poll's own
+        # failure does not make a pushed poller read lost.
+        @test errors_of("failed") == ["htmx:afterRequest", "htmx:sendError"]
+        @test field("failedState") == "stale"
+        @test field("unpushedState") == "lost"
+        @test "htmx:sendError" in errors_of("unpushed")
+        # Handed back with the abandoned poll out: its answer is dropped, the
+        # new element polled meanwhile, and its answer lands.
+        @test parse(Int, field("backSent")) >= 2
+        @test field("backAfter") == "3"
+        @test field("backPolled") == "5"
+        # Handed back with the element on the page: an ordinary answer, and
+        # the request lock is free again.
+        @test field("backlateAfter") == "5"
+        @test parse(Int, field("backlateSent")) >= 2
+        # A nested request passes through the pushed poller's drop.
+        @test field("nestedAnswer") == "nested answer"
+        finalize_progress!(job)
+    end
+    end
+end

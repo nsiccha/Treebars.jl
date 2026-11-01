@@ -760,7 +760,8 @@ htmx_treebar_script() = h.script(Raw("""
         return req && req.classList && req.classList.contains('treebar-poller-inner') &&
             d.elt && d.elt.classList && d.elt.classList.contains('treebar-poller') ? d.elt : null;
     }
-    // Failures arrive as their own events; an aborted request is neither.
+    // Failures arrive as their own events; an aborted request or a dropped
+    // poll answer (see "Pushed pollers") is neither.
     document.addEventListener('htmx:afterRequest', function(evt){
         var d = evt.detail || {};
         if (d.successful !== true) return;
@@ -770,7 +771,9 @@ htmx_treebar_script() = h.script(Raw("""
     function pollFailed(evt){
         var d = evt.detail || {};
         var r = requestRegion(d);
-        if (!r) return;
+        // While pushed, only a poll left running at the first push can fail,
+        // and that says nothing about the push source.
+        if (!r || r._tbPushed) return;
         var s = evt.type === 'htmx:responseError' && d.xhr ? d.xhr.status : 0;
         markFail(r, s === 0 || s === 502 || s === 503 || s === 504 ? '' : 'HTTP ' + s, true);
     }
@@ -817,10 +820,13 @@ htmx_treebar_script() = h.script(Raw("""
     // poller live. Called without html it only confirms that the shown
     // answer is still current: a heartbeat. The first call puts the poller
     // in push mode: its own polls are suspended (see the pause hook below)
-    // and a poll already in flight is aborted, so a late poll answer cannot
-    // replace a newer pushed one. While the viewer has paused the poller,
-    // the newest pushed answer is held and shown on resume; meanwhile the
-    // shown state ages as a paused polled one does.
+    // and the answer of a poll already in flight is dropped, so a late poll
+    // answer cannot replace a newer pushed one. That poll is left to finish:
+    // htmx reports every aborted request as an error (console.error and
+    // htmx:error), however deliberate the abort, and has no setting for it.
+    // While the viewer has paused the poller, the newest pushed answer is
+    // held and shown on resume; meanwhile the shown state ages as a paused
+    // polled one does.
     // window.treebarPollerLost(el, why) ends push mode: the poller falls
     // back to its own polls, which retry by themselves, and reads
     // "Connection lost" (empty `why`) or "Updates failing (why)" once those
@@ -843,13 +849,29 @@ htmx_treebar_script() = h.script(Raw("""
             {select: inner.getAttribute('hx-select'), contextElement: inner});
         markOk(p, at);
     }
+    // Registered on the polling element, not the document: a pushed answer
+    // replaces that element, and a detached element's events never reach the
+    // document. htmx returns before parsing an answer dropped here, so its
+    // out-of-band content and response headers do nothing, and it still ends
+    // the request, so the element can poll again if it is handed back. The
+    // answer stops here too: to the page's own listeners (HTMXObjects marks
+    // an operation finished on seeing its last answer) this poll was never
+    // answered, and a poller handed back asks again. A request of an element
+    // inside the inner passes through; a handed-back poller's answer is an
+    // ordinary poll answer.
+    function dropLatePoll(evt){
+        if (evt.target !== this) return;
+        if (this.isConnected && !this.parentElement._tbPushed) return;
+        evt.preventDefault();
+        evt.stopPropagation();
+    }
     window.treebarUpdatePoller = function(el, html){
         var inner = pushTarget(el);
         if (!inner) return false;
         var p = inner.parentElement, at = Date.now();
         if (!p._tbPushed){
             p._tbPushed = true;
-            htmx.trigger(inner, 'htmx:abort');
+            inner.addEventListener('htmx:beforeOnLoad', dropLatePoll);
         }
         if (p.dataset.paused === '1'){
             p._tbHeld = {html: html != null ? html : p._tbHeld && p._tbHeld.html, at: at};
@@ -1916,8 +1938,10 @@ A push source (a server-sent-events stream, a custom socket) can feed the
 poller instead of its polls: `window.treebarUpdatePoller(el, html)` applies
 one pushed answer (the response a poll would have received) exactly as a poll
 answer, and `window.treebarUpdatePoller(el)` confirms the shown answer is still
-current. While pushed, the poller's own polls are suspended, a paused poller
-holds the newest pushed answer until resume, and the badge stays live as long
+current. While pushed, the poller's own polls are suspended, the answer of a
+poll already in flight is dropped (that poll is left to finish, because htmx
+reports an aborted request as an error), a paused poller holds the newest
+pushed answer until resume, and the badge stays live as long
 as the source confirms it at least every five intervals (at least 5s).
 `window.treebarPollerLost(el, why)` hands the poller back to its polls; if
 those fail too, it reads "Connection lost" (`why` empty) or "Updates failing

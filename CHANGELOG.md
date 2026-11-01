@@ -11,6 +11,19 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.4
+
+- A poller's first pushed answer (`window.treebarUpdatePoller`) no longer
+  aborts a poll already in flight. htmx reports every aborted request as an
+  error, so each such push wrote two `console.error` lines and fired
+  `htmx:error` twice on a healthy page. That poll now finishes and its answer
+  is dropped before htmx reads it: it changes nothing on the page, and the
+  page's own `htmx:beforeOnLoad` listeners do not see it. Its bytes are still
+  downloaded, at most one poll per time a poller enters push mode. If it fails,
+  htmx still reports that, but the poller does not read "Connection lost" on
+  its account while the push source is alive. Failed polls of a poller that is
+  not pushed are reported as before.
+
 ## 0.1.3
 
 - A phase marker's label may be a conditional choosing between string
