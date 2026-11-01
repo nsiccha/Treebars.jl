@@ -396,8 +396,9 @@ end
             if (d.xhr && d.xhr.status === 286) reached += 1;
         });
 
-        // plain: the push replaces the polling element; the late answer has
-        // nowhere to go, and its out-of-band content must not land either.
+        // plain: the push replaces the polling element, so the late answer
+        // has nowhere to go. Left to htmx it would still be parsed, and its
+        // out-of-band content would log htmx:oobErrorNoTarget.
         at(1000, function(){ push('plain', 3); row('plainShown', bar('plain')); });
         at(1500, function(){ respond('plain', 200, tpl('plain', 9) + '<div id="oob" hx-swap-oob="true">late</div>'); });
         at(1700, function(){ row('plainAfter', bar('plain')); row('oob', document.getElementById('oob').textContent); });
