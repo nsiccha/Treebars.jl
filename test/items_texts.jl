@@ -180,6 +180,17 @@ end
     end
 end
 
+@testitem "Client texts preserve custom words through JSON transport" setup=[TreebarsTestImports] tags=[:unit, :render] begin
+    import JSON
+    ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+    custom = "Quotes: \"' · slash: / · backslash: \\ · Unicode: Grüße 🌳 \u2028\u2029 · controls: " * join(Char.(0:31))
+    texts = treebar_texts(:de; polling=custom)
+    payload = JSON.parse(ext._client_texts_json(texts))
+    @test payload["polling"] == custom
+    @test payload["running"] == "{elapsed} bisher"
+    @test collect(keys(payload)) == string.(collect(ext._CLIENT_TEXTS))
+end
+
 # Notes a package writes into progress nodes (`treebar_notes`, snag
 # consumer-written-813ef5a6): DynamicObjects' "from disk: 26.9 MB",
 # "queued · #2" and "(cached)" follow the page language; English stays as the

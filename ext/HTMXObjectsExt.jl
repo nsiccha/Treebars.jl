@@ -3,6 +3,7 @@ import HTMXObjects
 import Treebars
 import HTMXObjects: h, Node, Raw, fetchindex
 import HTTP
+import JSON
 import HTTP.WebSockets: WebSocket, send
 import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_treebar_script,
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
@@ -59,29 +60,13 @@ const _CLIENT_TEXTS = (:running, :eta, :polling, :paused, :pause, :resume, :stal
     :connection_lost, :updates_failing, :retrying, :ended, :board_pause, :board_resume,
     :unit_ms, :unit_s, :unit_min, :unit_h, :unit_d, :unit_space, :decimal)
 
-function _json_string(s::AbstractString)
-    io = IOBuffer()
-    print(io, '"')
-    for c in s
-        if c == '"' || c == '\\'
-            print(io, '\\', c)
-        elseif c < ' '
-            print(io, "\\u", string(UInt16(c); base=16, pad=4))
-        else
-            print(io, c)
-        end
-    end
-    print(io, '"')
-    String(take!(io))
-end
-
 # A single-quoted JavaScript string literal, for the words inline onclick
 # handlers write.
 _js_string(s::AbstractString) = string("'",
     replace(s, '\\' => "\\\\", '\'' => "\\'", '\n' => "\\n", '\r' => "\\r"), "'")
 
-_client_texts_json(t::TreebarTexts) = string("{",
-    join((string(_json_string(string(n)), ":", _json_string(getfield(t, n))) for n in _CLIENT_TEXTS), ","), "}")
+_client_texts_json(t::TreebarTexts) =
+    JSON.json(NamedTuple{_CLIENT_TEXTS}(map(n -> getfield(t, n), _CLIENT_TEXTS)))
 const _EN_CLIENT_TEXTS_JSON = _client_texts_json(_EN_TEXTS)
 
 # The `data-treebar-texts` value for `t`, or `nothing` (no attribute) for the
