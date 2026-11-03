@@ -800,9 +800,11 @@ htmx_treebar_script() = h.script(Raw("""
     // A push source (a server-sent-events stream, a custom socket) can feed
     // a poller in place of its own polls. window.treebarUpdatePoller(el,
     // html) applies one pushed answer, the response a poll would have
-    // received, exactly as htmx applies a poll answer (so terminalization
-    // and every htmx:afterSwap listener run unchanged), and confirms the
-    // poller live. Called without html it only confirms that the shown
+    // received, exactly as htmx applies a poll answer (so a page's
+    // htmx:beforeSwap gate or rewrite, terminalization and every
+    // htmx:afterSwap listener run unchanged), and confirms the poller live,
+    // also when a listener skips the answer, as a skipped poll answer does.
+    // Called without html it only confirms that the shown
     // answer is still current: a heartbeat. The first call puts the poller
     // in push mode: its own polls are suspended (see the pause hook below)
     // and the answer of a poll already in flight is dropped, so a late poll
@@ -826,12 +828,32 @@ htmx_treebar_script() = h.script(Raw("""
         if (!p || !p.isConnected || !p.classList.contains('treebar-poller')) return null;
         return p.querySelector(':scope > .treebar-poller-inner[hx-trigger]');
     }
+    // htmx fires htmx:beforeSwap only for the response to a request, and
+    // htmx.swap fires none, so this offers a pushed answer the way htmx offers
+    // a poll answer. The detail has a poll answer's fields, without xhr since
+    // no request ran, plus treebarPushed. What a listener changes is read back
+    // as htmx reads it, except that isError does nothing (no request to fail)
+    // and only swapOverride's style counts (htmx has no public way to parse
+    // its modifiers).
+    function swapPushed(inner, html){
+        var url = inner.getAttribute('hx-get');
+        var d = {shouldSwap: true, serverResponse: html, isError: false,
+            ignoreTitle: htmx.config.ignoreTitle, selectOverride: undefined, swapOverride: undefined,
+            target: inner, boosted: false, select: undefined, etc: {},
+            requestConfig: {elt: inner, target: inner, verb: 'get', path: url},
+            pathInfo: {requestPath: url, finalRequestPath: url},
+            treebarPushed: true};
+        if (!htmx.trigger(inner, 'htmx:beforeSwap', d) || !d.shouldSwap) return;
+        // The settle delay htmx gives the inner's own hx-swap="outerHTML".
+        htmx.swap(d.target, d.serverResponse,
+            {swapStyle: d.swapOverride ? String(d.swapOverride).trim().split(/\\s+/)[0] : 'outerHTML',
+             settleDelay: htmx.config.defaultSettleDelay, ignoreTitle: d.ignoreTitle},
+            {select: d.selectOverride === 'unset' ? null : d.selectOverride || inner.getAttribute('hx-select'),
+             contextElement: inner});
+    }
     function applyPushed(inner, html, at){
         var p = inner.parentElement;
-        // The settle delay htmx gives the inner's own hx-swap="outerHTML".
-        if (html != null) htmx.swap(inner, html,
-            {swapStyle: 'outerHTML', settleDelay: htmx.config.defaultSettleDelay},
-            {select: inner.getAttribute('hx-select'), contextElement: inner});
+        if (html != null) swapPushed(inner, html);
         markOk(p, at);
     }
     // Registered on the polling element, not the document: a pushed answer
@@ -1923,7 +1945,14 @@ A push source (a server-sent-events stream, a custom socket) can feed the
 poller instead of its polls: `window.treebarUpdatePoller(el, html)` applies
 one pushed answer (the response a poll would have received) exactly as a poll
 answer, and `window.treebarUpdatePoller(el)` confirms the shown answer is still
-current. While pushed, the poller's own polls are suspended, the answer of a
+current. The answer is first offered to `htmx:beforeSwap` on the polling
+element, so a page's swap gate or rewrite covers it as it covers a poll answer:
+the detail has a poll answer's fields, without `xhr` since no request ran, plus
+`treebarPushed: true`. A listener can skip the answer (`shouldSwap = false` or
+`preventDefault()`), which still confirms the poller live, or change
+`serverResponse`, `target`, `selectOverride`, `ignoreTitle` and the style in
+`swapOverride` (its modifiers have no effect).
+While pushed, the poller's own polls are suspended, the answer of a
 poll already in flight is dropped (that poll is left to finish, because htmx
 reports an aborted request as an error), a paused poller holds the newest
 pushed answer until resume, and the badge stays live as long

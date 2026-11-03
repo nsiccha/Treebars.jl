@@ -11,6 +11,19 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.5
+
+- A pushed answer (`window.treebarUpdatePoller`) is now offered to
+  `htmx:beforeSwap` on the polling element before it lands, as htmx offers a
+  poll answer. It was swapped directly, so a page's swap gate or rewrite never
+  saw it. The detail has a poll answer's fields, without `xhr` since no request
+  ran, plus `treebarPushed: true`. A listener can skip the answer
+  (`shouldSwap = false` or `preventDefault()`), which still confirms the poller
+  live, or change `serverResponse`, `target`, `selectOverride`, `ignoreTitle`
+  and the style in `swapOverride` (its modifiers have no effect). A listener
+  that reads `detail.xhr` unguarded now throws on a pushed answer, which the
+  browser reports; the answer still lands. Guard it.
+
 ## 0.1.4
 
 - A poller's first pushed answer (`window.treebarUpdatePoller`) no longer

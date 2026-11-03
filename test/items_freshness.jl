@@ -540,3 +540,259 @@ end
     end
     end
 end
+
+@testitem "Pushed pollers: an answer is offered to htmx:beforeSwap as a poll answer is (browser)" setup=[TreebarsTestImports] tags=[:unit, :render] begin
+    import JSON
+    let
+    # Opt in with TREEBARS_BROWSER_TESTS=1 (needs google-chrome or chromium,
+    # and network for htmx 2.0.8 from jsdelivr). htmx fires htmx:beforeSwap
+    # only for the response to a request and htmx.swap fires none, so a page's
+    # swap gate or rewrite never saw a pushed answer. One poller is answered by
+    # real htmx (only XMLHttpRequest is replaced), so what a pushed answer
+    # offers is compared with what a poll answer offers.
+    if get(ENV, "TREEBARS_BROWSER_TESTS", "") != "1"
+        @test_skip true
+    else
+        chrome = Sys.which("google-chrome")
+        isnothing(chrome) && (chrome = Sys.which("chromium"))
+        isnothing(chrome) && error("TREEBARS_BROWSER_TESTS=1 requires google-chrome or chromium")
+        html(x) = repr(MIME"text/html"(), x)
+        ext = Base.get_extension(Treebars, :HTMXObjectsExt)
+        job = initialize_progress!(:state; description="Job", N=10)
+        start_progress!(job)
+        answer(name, i) = (update_progress!(job, i); html(ext._polling_running(job;
+            label="Background job", poll_url="/poll/$name", poll_interval="200ms", cancel_url="")))
+        names = ("polled", "fields", "rewrite", "unwritten", "shouldswap", "prevent", "vetoed", "quiet",
+            "elsewhere", "unset", "title", "heartbeat", "paused", "unguarded")
+        templates = [h.template(id="answer-$name-$i")(Raw(answer(name, i))) for name in names for i in (3, 5)]
+        # A plot fragment: its script runs at insert, naming the id it was given.
+        plot = ext._polling_inner_done(h.div(h.p(id="shared-plot")("plot"),
+            h.script(Raw("window.ran.push('shared-plot');"))))
+        done = html(ext._polling_wrap(plot; terminal=true))
+        body = h.div(
+            [h.div(id="slot-$name")(Raw(answer(name, 0))) for name in names]...,
+            h.div(id="target-elsewhere")("was "), h.div(id="target-unset")())
+        driver = raw"""
+        window.ran = [];
+        var out = {}, rows = {}, offers = {}, errors = 0;
+        window.addEventListener('error', function(){ errors += 1; });
+        function pollerOf(url){ var m = /\/poll\/(\w+)/.exec(url || ''); return m ? m[1] : url; }
+        function FakeXhr(){ this.upload = {addEventListener: function(){}}; this.status = 0; this.response = ''; }
+        FakeXhr.prototype = {
+            overrideMimeType: function(){}, setRequestHeader: function(){}, addEventListener: function(){},
+            getAllResponseHeaders: function(){ return ''; }, getResponseHeader: function(){ return null; },
+            open: function(verb, url){ this.name = pollerOf(url); },
+            send: function(){ out[this.name] = this; },
+            abort: function(){}
+        };
+        window.XMLHttpRequest = FakeXhr;
+        function tpl(name, i){ return document.getElementById('answer-' + name + '-' + i).innerHTML; }
+        function poller(name){ return document.querySelector('#slot-' + name + ' > .treebar-poller'); }
+        function bar(name){ var b = poller(name).querySelector('.treebar-poller-inner progress.treebar-progress'); return b ? b.getAttribute('value') : ''; }
+        function push(name, html){ return treebarUpdatePoller(poller(name), html); }
+        function row(key, value){ rows[key] = value; }
+        function at(t, fn){ setTimeout(fn, t); }
+        function describe(evt){
+            var d = evt.detail, el = evt.target, url = el.getAttribute('hx-get'), c = d.requestConfig || {}, p = d.pathInfo || {};
+            return {keys: Object.keys(d).sort(), inner: el.classList.contains('treebar-poller-inner'),
+                bubbles: evt.bubbles, cancelable: evt.cancelable, target: d.target === el, elt: d.elt === el,
+                requester: c.elt === el, configTarget: c.target === el, verb: c.verb, path: c.path === url,
+                requestPath: p.requestPath === url, finalPath: p.finalRequestPath === url,
+                shouldSwap: d.shouldSwap, isError: d.isError, responseType: typeof d.serverResponse,
+                swapOverride: String(d.swapOverride), selectOverride: String(d.selectOverride),
+                boosted: !!d.boosted, etc: typeof d.etc};
+        }
+        // What a page's listeners do, per poller.
+        var gates = {
+            rewrite: function(evt, d){ d.serverResponse = d.serverResponse.replace(/shared-plot/g, 'shared-plot--rewrite'); },
+            shouldswap: function(evt, d, n){ if (n === 1) d.shouldSwap = false; },
+            prevent: function(evt, d, n){ if (n === 1) evt.preventDefault(); },
+            vetoed: function(evt, d){ d.shouldSwap = false; },
+            elsewhere: function(evt, d){
+                d.target = document.getElementById('target-elsewhere');
+                // Not innerHTML: htmx falls back to it for a style it does not know.
+                d.swapOverride = 'beforeend settle:5ms';
+                d.selectOverride = '#part';
+            },
+            unset: function(evt, d){
+                d.target = document.getElementById('target-unset');
+                d.swapOverride = 'innerHTML';
+                d.selectOverride = 'unset';
+            },
+            title: function(evt, d, n){ if (n === 1) d.ignoreTitle = true; }
+        };
+        document.addEventListener('htmx:beforeSwap', function(evt){
+            var slot = evt.target.closest('[id^="slot-"]');
+            if (!slot) return;
+            var name = slot.id.slice(5), seen = offers[name] = offers[name] || [];
+            seen.push({describe: describe(evt), pushed: evt.detail.treebarPushed === true,
+                xhr: !!evt.detail.xhr, response: evt.detail.serverResponse});
+            if (gates[name]) gates[name](evt, evt.detail, seen.length);
+        });
+        function offered(name){ return (offers[name] || []).length; }
+
+        // A real poll answer, for comparison.
+        at(600, function(){
+            var x = out.polled; out.polled = null;
+            x.status = 200; x.response = tpl('polled', 5);
+            x.onload();
+        });
+        at(800, function(){ row('polledBar', bar('polled')); });
+
+        // Nothing a listener does: the answer lands as it was pushed.
+        at(1000, function(){ row('fieldsCall', push('fields', tpl('fields', 3))); row('fieldsBar', bar('fields')); });
+
+        // A rewrite lands, and reaches the fragment's script before it runs.
+        at(1000, function(){ row('rewriteCall', push('rewrite', document.getElementById('done').innerHTML)); });
+        at(1100, function(){
+            row('rewriteRan', window.ran.slice());
+            row('rewriteRenamed', !!document.getElementById('shared-plot--rewrite'));
+            row('rewriteOriginal', !!document.getElementById('shared-plot'));
+            row('rewriteTerminal', document.querySelector('#slot-rewrite > .treebar-terminal') !== null);
+        });
+
+        // A veto keeps what is shown; the next answer is offered and lands.
+        at(1000, function(){ row('shouldswapCall', push('shouldswap', tpl('shouldswap', 3))); row('shouldswapVetoed', bar('shouldswap')); });
+        at(1200, function(){ push('shouldswap', tpl('shouldswap', 5)); row('shouldswapNext', bar('shouldswap')); });
+        at(1000, function(){ row('preventCall', push('prevent', tpl('prevent', 3))); row('preventVetoed', bar('prevent')); });
+        at(1200, function(){ push('prevent', tpl('prevent', 5)); row('preventNext', bar('prevent')); });
+
+        // A vetoed answer still confirms the poller live, as a skipped poll
+        // answer does. `quiet` hears nothing, so it reads stale by then.
+        [1000, 3000, 5000, 7000].forEach(function(t){ at(t, function(){ push('vetoed', tpl('vetoed', 3)); }); });
+        at(7500, function(){
+            row('vetoedState', poller('vetoed').dataset.treebarFreshness || 'live');
+            row('vetoedBar', bar('vetoed'));
+            row('quietState', poller('quiet').dataset.treebarFreshness || 'live');
+        });
+
+        // Where and how it lands: htmx reads these back from the detail.
+        at(1000, function(){ push('elsewhere', '<div id="part">kept</div><div id="rest">dropped</div>'); });
+        at(1100, function(){
+            row('elsewhereHtml', document.getElementById('target-elsewhere').textContent);
+            row('elsewhereBar', bar('elsewhere'));
+        });
+        at(1000, function(){ push('unset', '<div>one</div><div>two</div>'); });
+        at(1100, function(){ row('unsetHtml', document.getElementById('target-unset').textContent); });
+
+        // ignoreTitle: the first answer's title is ignored, the next one's shows.
+        at(1000, function(){ push('title', '<title>Pushed title</title>' + tpl('title', 3)); });
+        at(1100, function(){ row('titleIgnored', document.title); });
+        at(1200, function(){ push('title', '<title>Pushed title</title>' + tpl('title', 5)); });
+        at(1300, function(){ row('titleShown', document.title); });
+
+        // A heartbeat carries no answer, so there is nothing to offer.
+        at(1000, function(){ row('heartbeatCall', push('heartbeat')); row('heartbeatOffers', offered('heartbeat')); });
+
+        // A held answer is offered when it is shown, and only the newest is.
+        at(500, function(){ poller('paused').dataset.paused = '1'; });
+        at(1000, function(){ push('paused', tpl('paused', 3)); });
+        at(1200, function(){ push('paused', tpl('paused', 5)); row('pausedOffers', offered('paused')); poller('paused').dataset.paused = '0'; });
+        at(1500, function(){
+            row('pausedResumedOffers', offered('paused'));
+            row('pausedNewest', offers.paused && offers.paused[0].response === tpl('paused', 5));
+            row('pausedBar', bar('paused'));
+        });
+
+        // A listener written for requests that reads detail.xhr throws, which
+        // the browser reports; the answer lands regardless.
+        at(1800, function(){
+            document.getElementById('slot-unguarded').addEventListener('htmx:beforeSwap', function(evt){ row('unguardedStatus', evt.detail.xhr.status); });
+            row('errorsBefore', errors);
+            row('unguardedCall', push('unguarded', tpl('unguarded', 3)));
+            row('errorsAfter', errors);
+            row('unguardedBar', bar('unguarded'));
+        });
+
+        at(7700, function(){
+            var described = {};
+            Object.keys(offers).forEach(function(name){ described[name] = offers[name].length; });
+            var el = document.createElement('pre'); el.id = 'offer-result';
+            el.textContent = JSON.stringify({htmx: htmx.version, rows: rows, counts: described,
+                polled: (offers.polled || [null])[0], fields: (offers.fields || [null])[0]}, function(key, value){ return key === 'response' ? undefined : value; });
+            document.body.appendChild(el);
+        });
+        """
+        dir = mktempdir()
+        file = joinpath(dir, "offer.html")
+        write(file, "<!DOCTYPE html>" * html(h.html(
+            h.head(h.meta(charset="utf-8"), h.title("Page title"),
+                h.script(src="https://cdn.jsdelivr.net/npm/htmx.org@2.0.8/dist/htmx.min.js")(),
+                htmx_treebar_styles(), htmx_treebar_script()),
+            h.body(body, templates..., h.template(id="done")(Raw(done)), h.script(Raw(driver))))))
+        profile = joinpath(dir, "profile")
+        dom = read(pipeline(`$chrome --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --virtual-time-budget=8500 --dump-dom --user-data-dir=$profile file://$file`; stderr=devnull), String)
+        found = match(r"<pre id=\"offer-result\">([^<]*)</pre>", dom)
+        @test found !== nothing
+        report = found === nothing ? Dict{String,Any}("rows" => Dict(), "counts" => Dict()) :
+            JSON.parse(replace(found.captures[1], "&amp;" => "&"))
+        rows = report["rows"]
+        counts = report["counts"]
+        @test get(report, "htmx", "") == "2.0.8"
+        # A pushed answer's offer reads as a poll answer's does: same event,
+        # same fields, apart from the request that did not run.
+        none = Dict{String,Any}("describe" => Dict(), "pushed" => "no offer", "xhr" => "no offer")
+        polled = something(get(report, "polled", nothing), none)
+        pushed = something(get(report, "fields", nothing), none)
+        @test get(rows, "polledBar", "") == "5"
+        @test polled["pushed"] == false
+        @test polled["xhr"] == true
+        @test pushed["pushed"] == true
+        @test pushed["xhr"] == false
+        polled_keys = get(polled["describe"], "keys", String[])
+        pushed_keys = get(pushed["describe"], "keys", String[])
+        @test !isempty(polled_keys)
+        @test setdiff(polled_keys, pushed_keys) == ["xhr"]
+        @test setdiff(pushed_keys, polled_keys) == ["treebarPushed"]
+        for key in ("inner", "bubbles", "cancelable", "target", "elt", "requester", "configTarget", "verb",
+                "path", "requestPath", "finalPath", "shouldSwap", "isError", "responseType",
+                "swapOverride", "selectOverride", "boosted", "etc")
+            @test get(pushed["describe"], key, "missing") == get(polled["describe"], key, "absent")
+        end
+        @test get(polled["describe"], "target", false) == true
+        @test get(polled["describe"], "shouldSwap", false) == true
+        @test get(rows, "fieldsCall", false) == true
+        @test get(rows, "fieldsBar", "") == "3"
+        # A rewrite reaches the fragment's script before it runs.
+        @test get(rows, "rewriteCall", false) == true
+        @test get(rows, "rewriteRan", String[]) == ["shared-plot--rewrite"]
+        @test get(rows, "rewriteRenamed", false) == true
+        @test get(rows, "rewriteOriginal", true) == false
+        @test get(rows, "rewriteTerminal", false) == true
+        # Either way of vetoing keeps what is shown, and the next answer lands.
+        @test get(rows, "shouldswapCall", false) == true
+        @test get(rows, "shouldswapVetoed", "") == "0"
+        @test get(rows, "shouldswapNext", "") == "5"
+        @test get(counts, "shouldswap", 0) == 2
+        @test get(rows, "preventCall", false) == true
+        @test get(rows, "preventVetoed", "") == "0"
+        @test get(rows, "preventNext", "") == "5"
+        @test get(counts, "prevent", 0) == 2
+        # Vetoed answers confirm the poller live; one that hears nothing is stale.
+        @test get(rows, "vetoedState", "") == "live"
+        @test get(rows, "vetoedBar", "") == "0"
+        @test get(counts, "vetoed", 0) == 4
+        @test get(rows, "quietState", "") == "stale"
+        # What a listener changes decides where and how the answer lands.
+        @test get(rows, "elsewhereHtml", "") == "was kept"
+        @test get(rows, "elsewhereBar", "") == "0"
+        @test get(rows, "unsetHtml", "") == "onetwo"
+        @test get(rows, "titleIgnored", "") == "Page title"
+        @test get(rows, "titleShown", "") == "Pushed title"
+        # A heartbeat offers nothing; a held answer is offered when shown, and
+        # only the newest one.
+        @test get(rows, "heartbeatCall", false) == true
+        @test get(rows, "heartbeatOffers", -1) == 0
+        @test get(rows, "pausedOffers", -1) == 0
+        @test get(rows, "pausedResumedOffers", -1) == 1
+        @test get(rows, "pausedNewest", false) == true
+        @test get(rows, "pausedBar", "") == "5"
+        # A listener reading detail.xhr throws, and the answer still lands.
+        @test get(rows, "unguardedCall", false) == true
+        @test get(rows, "errorsAfter", 0) == get(rows, "errorsBefore", 0) + 1
+        @test !haskey(rows, "unguardedStatus")
+        @test get(rows, "unguardedBar", "") == "3"
+        finalize_progress!(job)
+    end
+    end
+end
