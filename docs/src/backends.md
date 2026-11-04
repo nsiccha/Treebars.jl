@@ -176,7 +176,11 @@ treebarPollerLost(el, why)      // the source failed; `why` empty = unreachable
 `el` is the `.treebar-poller` wrapper or any element inside it (the wrapper
 is never replaced while the poller is live). The answer is applied exactly as
 htmx applies a poll answer, so the finished result terminalizes the poller as
-usual. From the first call, Treebars suspends the poller's own polls; while
+usual, and a page's `htmx:beforeSwap` swap gate or rewrite covers it: its detail
+has a poll answer's fields, without `xhr` since no request ran, plus
+`treebarPushed: true`. Skipping an answer (`shouldSwap = false` or
+`preventDefault()`) still confirms the poller live. From the first call,
+Treebars suspends the poller's own polls; while
 the viewer has paused it, Treebars holds the newest pushed answer and shows it
 on resume. `treebarPollerLost` hands the poller back to its own polls, which
 retry by themselves. Both functions return `false` once the poller has
