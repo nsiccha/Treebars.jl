@@ -58,14 +58,17 @@ mutable struct ProgressNode{I,M,C}
     # poll `interrupt_requested` in a hot loop while a controller on another
     # thread flips it.
     const interrupt::Threads.Atomic{Bool}
-    function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}())
+    # `_attach=false` (a mirror replica, src/mirror.jl) records `parent` as the
+    # creating parent without adding the node to its children: the replica
+    # adds it where the frames say, in their order.
+    function ProgressNode(impl, meta=(;propagates=false); parent=nothing, children=ThreadsafeSet{ProgressNode}(), _attach::Bool=true)
         rv = new{typeof(impl),typeof(meta),typeof(children)}(
             impl, meta, parent, children, Threads.Atomic{Bool}(false)
         )
-        isnothing(parent) || push!(parent.children, rv)
-        # Like every lifecycle change below: an open snapshot file may be due
-        # an update (src/snapshot.jl).
-        _snapshot_changed()
+        _attach && !isnothing(parent) && push!(parent.children, rv)
+        # Like every lifecycle change below: an open snapshot file or a mirror
+        # may be due an update (src/snapshot.jl, src/mirror.jl).
+        _progress_changed(impl)
         rv
     end
 end
@@ -86,7 +89,14 @@ add_child!(parent::ProgressNode, child::ProgressNode) = push!(parent.children, c
 add_child!(::Nothing, ::Any) = nothing
 add_child!(::Any, ::Nothing) = nothing
 
-request_interrupt!(node::ProgressNode) = (node.interrupt[] = true; node)
+function request_interrupt!(node::ProgressNode)
+    node.interrupt[] = true
+    # The marker shows in snapshot files and mirrors, and a mirror replica
+    # passes the request on to the node it mirrors (src/mirror.jl).
+    _progress_changed(node.impl)
+    _forward_interrupt(node)
+    node
+end
 # Walks `parent` (the creating parent), not `.children` reachability: a node DO
 # also attaches under other trees via `add_child!` is interrupted by its own
 # lineage only, so a request on one caller's tree cannot stop shared work.
@@ -343,9 +353,11 @@ mutable struct StateProgress
     finalized_at::Union{DateTime,Nothing}
     phase_groups::Union{Nothing,OrderedDict{Any,_PhaseGroup}}
     phase_member::Union{Nothing,_PhaseMembership}
+    # The mirrors following this node (src/mirror.jl), `nothing` when none.
+    @atomic track::Any
     function StateProgress(; description="Running...", N=nothing, pending=false, _phase_member=nothing)
         sp = new(ReentrantLock(), description, N, 0, "",
-            !pending, false, false, pending ? nothing : now(), nothing, nothing, _phase_member)
+            !pending, false, false, pending ? nothing : now(), nothing, nothing, _phase_member, nothing)
         isnothing(_phase_member) || _record_phase_transition!(sp, 1)
         sp
     end
@@ -595,7 +607,7 @@ function start_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 
@@ -607,28 +619,28 @@ function update_progress!(sp::StateProgress, i::Integer)
             sp.i = clamp(i, 0, sp.N)
         end
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 function update_progress!(sp::StateProgress, ::IncrementBy{di}) where {di}
     rv = lock(sp.lock) do
         sp.i = isnothing(sp.N) ? sp.i + di : clamp(sp.i + di, 0, sp.N)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 function update_progress!(sp::StateProgress, msg::AbstractString)
     rv = lock(sp.lock) do
         sp.message = String(msg)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 function update_progress!(sp::StateProgress, note::TreebarNote)
     rv = lock(sp.lock) do
         sp.message = note
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 update_progress!(sp::StateProgress, ::Nothing) = nothing
@@ -643,7 +655,7 @@ function fail_progress!(sp::StateProgress, args...; kwargs...)
         sp.finalized_at = t
         _record_phase_transition!(sp, previous)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 function finalize_progress!(sp::StateProgress)
@@ -660,7 +672,7 @@ function finalize_progress!(sp::StateProgress)
         sp.finalized_at = t
         _record_phase_transition!(sp, previous)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 # Terminate a pending node WITHOUT backfilling `started_at` — the one thing
@@ -676,7 +688,7 @@ function skip_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 # Terminate a pending or running node as reused. `started_at` is left as it is:
@@ -693,7 +705,7 @@ function reuse_progress!(sp::StateProgress)
         end
         _record_phase_transition!(sp, previous)
     end
-    _snapshot_changed()
+    _progress_changed(sp)
     rv
 end
 

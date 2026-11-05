@@ -295,7 +295,17 @@ it supports. Build one with [`treebar_notes`](@ref); calling it,
 struct TreebarNotes
     words::Dict{Symbol,Dict{Symbol,String}}    # locale => text name => text
     placeholders::Dict{Symbol,Vector{Symbol}}  # text name => the placeholders its English text takes
+    # The same words give the same fingerprint in every process. A note that
+    # crossed from another process (a progress mirror, src/mirror.jl) carries
+    # a copy of its table, and an app's override still finds it by this.
+    fingerprint::UInt64
+    TreebarNotes(words, placeholders) = new(words, placeholders, _notes_fingerprint(words))
 end
+
+# From the texts as strings, sorted: a `Symbol`'s hash is its address, which
+# differs between processes.
+_notes_fingerprint(words) = hash(sort!([(string(locale), string(name), text)
+    for (locale, texts) in words for (name, text) in texts]))
 
 """
     TreebarNote
@@ -426,7 +436,7 @@ function _note_overrides(pairs_)
                 " must be a string; got ", repr(text))))
             _check_placeholders("treebar_texts: note $name", text, placeholders)
         end
-        i = findfirst(q -> q.first === notes, merged)
+        i = findfirst(q -> _same_notes(q.first, notes), merged)
         isnothing(i) ? push!(merged, notes => map(String, words)) :
             (merged[i] = notes => merge(merged[i].second, map(String, words)))
     end
@@ -457,10 +467,12 @@ _note_text(note::TreebarNote, t::TreebarTexts) =
 _isempty_text(message::AbstractString) = isempty(message)
 _isempty_text(::TreebarNote) = false
 
+_same_notes(a::TreebarNotes, b::TreebarNotes) = a === b || a.fingerprint == b.fingerprint
+
 _note_text_template(::Nothing, name::Symbol, t::TreebarTexts) = getfield(t, name)
 function _note_text_template(notes::TreebarNotes, name::Symbol, t::TreebarTexts)
     for (table, words) in t.notes
-        table === notes && haskey(words, name) && return words[name]
+        _same_notes(table, notes) && haskey(words, name) && return words[name]
     end
     en = notes.words[:en]
     get(get(notes.words, t.locale, en), name, en[name])

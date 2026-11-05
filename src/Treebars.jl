@@ -14,6 +14,7 @@ export @progress, @phases, @with_progress, with_progress, with_prepared_progress
     request_interrupt!, interrupt_requested, throw_if_interrupted, ProgressInterrupted,
     round2, short_string, Fraction,
     render_text, phase_overview, snapshot_progress, ProgressSnapshot,
+    mirror_progress, ProgressMirror, ProgressFrame, progress_replica, ProgressReplica, apply_frame!,
     TreebarTexts, treebar_texts, TreebarNotes, TreebarNote, treebar_notes, treebar_note, ByteSize
 
 BACKEND = Ref{Any}(nothing)
@@ -29,6 +30,7 @@ function short_string end
 include("formatting.jl")
 include("text.jl")
 include("snapshot.jl")
+include("mirror.jl")
 include("convenience.jl")
 include("busy_retry.jl")
 include("dispatch_parent.jl")
