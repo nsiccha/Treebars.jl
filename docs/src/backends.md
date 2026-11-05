@@ -83,6 +83,63 @@ has no public way to run Julia code from a signal handler, and on Linux it uses
 `SIGUSR1` and `SIGUSR2` itself. The file already is the on-demand view: it is
 never more than `interval` seconds behind the tree.
 
+### A worker's tree, live in another process — `mirror_progress`
+
+When heavy work runs in a worker process and a web page in another process
+shows it, the page can show the worker's tree itself, node for node, as part of
+its own tree. The worker follows its tree with [`mirror_progress`](@ref), which
+hands plain-data frames to a function you give it; the page's process applies
+them with [`apply_frame!`](@ref) to a replica made by
+[`progress_replica`](@ref) from a node of its own:
+
+```julia
+# in the worker
+mirror_progress(frame -> send_to_ui(frame), node) do
+    run_fit(; progress=node)
+end
+
+# in the page's process
+replica = progress_replica(pending_node; on_interrupt = id -> send_to_worker(id))
+for frame in frames_from_worker
+    apply_frame!(replica, frame)
+end
+# and in the worker, on receiving `id`:
+request_interrupt!(mirror, id)
+```
+
+The replica is an ordinary `ProgressNode{StateProgress}` tree: `pending_node`
+takes on the worker root's own state, and its children are created and updated
+as the worker's are. So `htmx_render`, `polling_fetchindex` and its pushed
+answers, pills, ETA, the phase overview and the page's language all work on it
+unchanged, inside whatever tree `pending_node` hangs in.
+
+- **What travels.** The first frame (sent before `mirror_progress` returns) and
+  the last one (sent when it closes) hold the whole tree; every frame between
+  holds what changed: the nodes whose state changed, each with its whole state,
+  and the children added or removed, in the order it happened. Notes stay
+  notes, so the page draws them in its own language, and an app's own words for
+  a package's notes still apply. Both times of every node travel exactly.
+  Prepared-phase plans travel with their counts, including items that already
+  finished and left the tree. Nothing is capped.
+- **When.** At most once per `interval` seconds (default 0.05), while something
+  changes: sent by the thread that changes the tree, or by a background task,
+  so a worker whose threads are all busy still sends. `flush(mirror)` sends what
+  is pending now; `interval=0` sends every change at once.
+- **Cost.** A frame costs what changed, not the size of the tree: nothing walks
+  the tree to find changes. With no mirror open, the hooks cost one atomic load.
+- **Robust.** Applying a frame twice changes nothing. Frames older than one
+  already applied, frames after the final one and frames from another mirror
+  are ignored. If a frame in between was lost, the final frame still leaves the
+  replica exactly at the worker's final state.
+- **Stop.** [`request_interrupt!`](@ref) on a replica node, on `pending_node` or
+  above it calls `on_interrupt(id)`; the worker passes `id` to
+  `request_interrupt!(mirror, id)`, so the real node is interrupted, and the
+  children it creates later too.
+
+Frames are plain data; between processes, pass them through `Serialization`
+(both sides load Treebars, of the same version). The transport is yours: a
+socket, a worker library's channel, or a `Channel` in one process.
+
 ## HTMXObjects.jl integration
 
 When `HTMXObjects` is loaded, `StateProgress` trees can be rendered as HTML.

@@ -11,6 +11,26 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.6
+
+- New: a progress tree can be shown live in another process.
+  `mirror_progress(send, node; interval=0.05)` (also a do-block form) follows
+  the tree and passes `ProgressFrame`s to `send`; `progress_replica(target;
+  on_interrupt)` plus `apply_frame!(replica, frame)` turn them into an ordinary
+  `ProgressNode{StateProgress}` tree under `target`, which every renderer and
+  poller draws as it draws the source. `request_interrupt!` on the replica
+  calls `on_interrupt(id)`, and `request_interrupt!(mirror, id)` passes the
+  request on to the source node. `close`, `isopen` and `flush` work on a
+  `ProgressMirror`. Frames carry only what changed; the first and final ones
+  carry the whole tree.
+- `request_interrupt!` now counts as a change of the tree: an open snapshot
+  file that is due writes the "interrupt requested" marker at once instead of
+  at the next other change.
+- An app's own words for a package's notes (`treebar_texts(…, table => (…))`)
+  now also apply to a copy of that table with the same words, such as one in a
+  note that came from another process. Two different tables with exactly the
+  same words are therefore treated as one.
+
 ## 0.1.5
 
 - A pushed answer (`window.treebarUpdatePoller`) is now offered to
