@@ -497,3 +497,28 @@ end
     @test times(target) == times(root)
     end
 end
+
+@testitem "a long run's mirror and replica stay the size of its tree" setup=[TreebarsTestImports, MirrorHelpers] tags=[:unit, :mirror] begin
+    let
+    # Many transient items, each with its own prepared phases: what they leave
+    # behind on either side is their counts on the node that keeps them, not
+    # one entry per item.
+    root = initialize_progress!(:state; description="Long")
+    (; m, target, replica, sync!, apply_all!) = mirrored(root; interval=0.001)
+    @progress root "Items" for item in 1:300
+        @progress "Load"
+        @progress "Fit"
+        item % 50 == 0 && sync!()
+    end
+    sync!()
+    @test occursin("Load: 0 pending · 0 running · 300 finished", render_text(target; phase_overview=true))
+    @test phase_overview(target) == phase_overview(root)
+    @test length(replica.nodes) == count_nodes(root)
+    @test length(replica.groups) <= 2
+    @test length(m.group_ids) <= 2
+    @test length(m.group_sent) <= 2
+    close(m)
+    apply_all!()
+    @test render_text(target; phase_overview=true) == render_text(root; phase_overview=true)
+    end
+end

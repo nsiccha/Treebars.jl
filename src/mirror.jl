@@ -34,9 +34,10 @@ const _Op = Tuple{Int8,Int,Int}
 mutable struct _Track
     const mirror::Any       # the ProgressMirror
     const id::Int
-    const node::ProgressNode
+    # `nothing` once the node left the mirrored tree: a track still queued for
+    # the next frame does not keep a finished node alive.
+    @atomic node::Union{Nothing,ProgressNode}
     @atomic dirty::Bool     # queued for the next frame
-    @atomic gone::Bool      # left the mirrored tree
     refs::Int               # mirrored children sets that hold the node (1 for the root); guarded by the mirror's `spin`
 end
 
@@ -117,8 +118,8 @@ mutable struct ProgressMirror
     # Held while a frame is built and sent; a changing thread only `trylock`s
     # it, so threads never wait for each other's frames.
     const lock::ReentrantLock
-    # Guards the queues and the id table. Innermost: never held while taking
-    # another lock, so the structure hooks may take it inside a children lock.
+    # Guards the queues. Innermost: never held while taking another lock, so
+    # the structure hooks may take it inside a children lock.
     const spin::Threads.SpinLock
     const wake::Base.Event
     @atomic last_ns::UInt64
@@ -128,8 +129,13 @@ mutable struct ProgressMirror
     next_id::Int                      # `spin`
     ops::Vector{_Op}                  # `spin`
     dirty::Vector{_Track}             # `spin`
-    const tracks::Dict{Int,_Track}    # `spin`
-    const group_ids::IdDict{_PhaseGroup,Int}    # `lock`, like the three below
+    # Plans of nodes that left the tree, with a node to look for their holder
+    # from, and the ids of nodes that left holding plans: `spin`.
+    left::Vector{Tuple{_PhaseGroup,ProgressNode}}
+    left_hosts::Vector{Int}
+    # The plans sent so far: `lock`, like the four below.
+    next_group::Int
+    const group_ids::IdDict{_PhaseGroup,Int}
     const group_host::Dict{Int,Int}
     const group_sent::Dict{Int,Any}
     const host_groups::Dict{Int,Vector{Int}}
@@ -184,10 +190,18 @@ end
 _children_lock(node) = node.children isa ThreadsafeSet ? node.children.lock : nothing
 _lock_children(node) = (l = _children_lock(node); isnothing(l) || lock(l); l)
 _unlock_children(l) = isnothing(l) || unlock(l)
+# A snapshot of `node`'s children; no allocation for a leaf, the common case
+# when a finished item leaves the tree.
+function _mirrored_children(node)
+    kids = node.children
+    kids isa ThreadsafeSet || return ProgressNode[]
+    @lock kids.lock isempty(kids.inner) ? _NO_CHILDREN : collect(kids.inner)
+end
+const _NO_CHILDREN = ProgressNode[]
 
-# `x` was added to the children of `c.node`; called inside that children lock.
-# Holding `x`'s own children lock while deciding makes one id per node and
-# mirror even when two threads attach `x` at once, and keeps a concurrent
+# `x` was added to the children of `c`'s node; called inside that children
+# lock. Holding `x`'s own children lock while deciding makes one id per node
+# and mirror even when two threads attach `x` at once, and keeps a concurrent
 # change below `x` out until `x` is tracked. Locks are taken parent before
 # child only, so this cannot deadlock against another hook.
 function _mirror_append!(m::ProgressMirror, c::_Track, x::ProgressNode)
@@ -214,8 +228,7 @@ _mirror_append!(::ProgressMirror, ::_Track, ::Any) = nothing
 # one) and everything below it.
 function _adopt!(m::ProgressMirror, node::ProgressNode, container::Int)
     t = @lock m.spin begin
-        t = _Track(m, (m.next_id += 1), node, true, false, 1)
-        m.tracks[t.id] = t
+        t = _Track(m, (m.next_id += 1), node, true, 1)
         container == 0 || push!(m.ops, (_APPEND, container, t.id))
         push!(m.dirty, t)
         t
@@ -230,44 +243,53 @@ function _adopt!(m::ProgressMirror, node::ProgressNode, container::Int)
     t
 end
 
-# `x` was removed from the children of `c.node`; called inside that lock.
+# `x` was removed from the children of `c`'s node; called inside that lock.
 function _mirror_remove!(m::ProgressMirror, c::_Track, x::ProgressNode)
     (@atomic m.open) || return nothing
     t = _track_for(x, m)
     isnothing(t) && return nothing
     gone = @lock m.spin begin
         push!(m.ops, (_REMOVE, c.id, t.id))
-        t.refs -= 1
-        t.refs == 0
+        _unref!(m, t, x)
     end
-    gone && _forget!(m, t)
+    gone && _release!(m, t, x)
     _pending!(m)
 end
 _mirror_remove!(::ProgressMirror, ::_Track, ::Any) = nothing
 
-# `t.node` is no longer in the mirrored tree: stop following it, and every node
-# below it that no other mirrored node holds.
-function _forget!(m::ProgressMirror, t::_Track)
-    node = t.node
-    held = _lock_children(node)
-    try
-        @atomic t.gone = true
-        node.impl isa StateProgress && _remove_track!(node.impl, t)
-        @lock m.spin begin
-            delete!(m.tracks, t.id)
-            push!(m.ops, (_FORGET, 0, t.id))
-        end
-        node.children isa ThreadsafeSet || return nothing
-        _remove_track!(node.children, t)
-        for child in node.children.inner
-            child isa ProgressNode || continue
-            ct = _track_for(child, m)
-            isnothing(ct) && continue
-            gone = @lock m.spin (ct.refs -= 1; ct.refs == 0)
-            gone && _forget!(m, ct)
-        end
-    finally
-        _unlock_children(held)
+# One mirrored children set less holds `node`; `m.spin` is held. When none
+# holds it any more it has left the mirrored tree: its id is forgotten, and
+# its plan, a transient item's that finished, still moved counts on the node
+# that keeps them (found from its parent).
+function _unref!(m::ProgressMirror, t::_Track, node::ProgressNode)
+    t.refs -= 1
+    t.refs == 0 || return false
+    push!(m.ops, (_FORGET, 0, t.id))
+    sp = node.impl
+    if sp isa StateProgress
+        member = sp.phase_member
+        isnothing(member) || push!(m.left, (member.group, something(node.parent, node)))
+        isnothing(sp.phase_groups) || push!(m.left_hosts, t.id)
+    end
+    true
+end
+
+# Stop following `node`, which left the mirrored tree, and every node below it
+# that no other mirrored node holds. The track lets go of the node, so a
+# finished transient item is not kept alive by a frame still to be sent. A
+# child added concurrently is either seen here (it was tracked before the
+# children's track went) or never reported (after it).
+function _release!(m::ProgressMirror, t::_Track, node::ProgressNode)
+    @atomic t.node = nothing
+    node.impl isa StateProgress && _remove_track!(node.impl, t)
+    node.children isa ThreadsafeSet || return nothing
+    _remove_track!(node.children, t)
+    for child in _mirrored_children(node)
+        child isa ProgressNode || continue
+        ct = _track_for(child, m)
+        isnothing(ct) && continue
+        gone = @lock m.spin _unref!(m, ct, child)
+        gone && _release!(m, ct, child)
     end
     nothing
 end
@@ -320,10 +342,28 @@ _pending!(m::ProgressMirror) = ((@atomicswap m.pending = true) || notify(m.wake)
     nothing
 end
 
+# Every node the mirror follows, depth first from the root, each once.
+function _foreach_track(f, m::ProgressMirror)
+    root = _track_for(m.root, m)
+    isnothing(root) && return nothing
+    seen = Set{Int}()
+    stack = Tuple{_Track,ProgressNode}[(root, m.root)]
+    while !isempty(stack)
+        t, node = pop!(stack)
+        t.id in seen && continue
+        push!(seen, t.id)
+        f(t, node)
+        for child in Iterators.reverse(_mirrored_children(node))
+            child isa ProgressNode || continue
+            ct = _track_for(child, m)
+            isnothing(ct) || push!(stack, (ct, child))
+        end
+    end
+end
+
 # ── frames ───────────────────────────────────────────────────────────────────
 
-function _node_state(m::ProgressMirror, t::_Track)
-    node = t.node
+function _node_state(m::ProgressMirror, t::_Track, node::ProgressNode)
     p = node.parent
     pt = t.id == 1 || isnothing(p) ? nothing : _track_for(p, m)
     parent = isnothing(pt) ? 0 : pt.id
@@ -342,11 +382,13 @@ end
 
 # Builds the next frame; `m.lock` is held.
 function _build_frame(m::ProgressMirror; full::Bool=false, final::Bool=false)
-    ops, dirty = @lock m.spin begin
+    ops, dirty, left, left_hosts = @lock m.spin begin
         @atomic m.pending = false
-        queued = (m.ops, m.dirty)
+        queued = (m.ops, m.dirty, m.left, m.left_hosts)
         m.ops = _Op[]
         m.dirty = _Track[]
+        m.left = Tuple{_PhaseGroup,ProgressNode}[]
+        m.left_hosts = Int[]
         queued
     end
     # Cleared before the state is read: a change after this point queues the
@@ -355,33 +397,46 @@ function _build_frame(m::ProgressMirror; full::Bool=false, final::Bool=false)
         @atomic t.dirty = false
     end
     m.seq += 1
-    full && return _full_frame(m, final)
-    nodes = _NodeState[]
     plans = Tuple{_PhaseGroup,ProgressNode}[]
-    for t in dirty
-        # A transient item that finished and left the tree since the last frame
-        # still moved its plan's counts on the node that keeps them.
-        _member_plans!(plans, t)
-        (@atomic t.gone) && continue
-        push!(nodes, _node_state(m, t))
-        _hosted_plans!(plans, t.node)
+    for (group, from) in left
+        _plan_chain!(plans, group, from)
     end
-    groups, order = _group_states(m, plans, false)
-    ProgressFrame(m.source, m.seq, false, final, nodes, ops, Pair{Int,Vector{Int}}[], groups, order)
+    if full
+        frame = _full_frame(m, final, plans)
+    else
+        nodes = _NodeState[]
+        for t in dirty
+            node = @atomic t.node
+            isnothing(node) && continue        # left the tree since
+            push!(nodes, _node_state(m, t, node))
+            _member_plans!(plans, t, node)
+            _hosted_plans!(plans, node)
+        end
+        groups, order = _group_states(m, plans, false)
+        frame = ProgressFrame(m.source, m.seq, false, final, nodes, ops, Pair{Int,Vector{Int}}[], groups, order)
+    end
+    # The plans of nodes that left are not sent again: forget them, so a long
+    # run's tables stay the size of its tree.
+    foreach(host -> _forget_host_groups!(m, host), left_hosts)
+    frame
 end
 
 # A phase node's state counts in its plan and in the plan's surviving-owner
-# record. The mirrored root's own plan belongs to the tree around it, which the
-# replica does not mirror.
-function _member_plans!(plans, t::_Track)
+# records. The mirrored root's own plan belongs to the tree around it, which
+# the replica does not mirror.
+function _member_plans!(plans, t::_Track, node::ProgressNode)
     t.id == 1 && return plans
-    sp = t.node.impl
+    sp = node.impl
     sp isa StateProgress || return plans
     member = sp.phase_member
     isnothing(member) && return plans
-    group = member.group
+    _plan_chain!(plans, member.group, node)
+end
+
+# A plan and the records that keep its counts for surviving owners.
+function _plan_chain!(plans, group, from::ProgressNode)
     while !isnothing(group)
-        push!(plans, (group, t.node))
+        push!(plans, (group, from))
         group = group.ancestor
     end
     plans
@@ -389,85 +444,69 @@ end
 
 function _hosted_plans!(plans, node::ProgressNode)
     for group in _phase_group_records(node)
-        push!(plans, (group, node))
-        ancestor = group.ancestor
-        while !isnothing(ancestor)
-            push!(plans, (ancestor, node))
-            ancestor = ancestor.ancestor
-        end
+        _plan_chain!(plans, group, node)
     end
     plans
 end
 
-function _full_frame(m::ProgressMirror, final::Bool)
+function _full_frame(m::ProgressMirror, final::Bool, plans)
     nodes = _NodeState[]
     children = Pair{Int,Vector{Int}}[]
-    plans = Tuple{_PhaseGroup,ProgressNode}[]
-    root = _track_for(m.root, m)
-    seen = Set{Int}()
-    isnothing(root) || _collect_full!(nodes, children, plans, seen, m, root)
+    _foreach_track(m) do t, node
+        push!(nodes, _node_state(m, t, node))
+        _hosted_plans!(plans, node)
+        ids = Int[]
+        for child in _mirrored_children(node)
+            child isa ProgressNode || continue
+            ct = _track_for(child, m)
+            isnothing(ct) || push!(ids, ct.id)
+        end
+        push!(children, t.id => ids)
+    end
     groups, order = _group_states(m, plans, true)
     ProgressFrame(m.source, m.seq, true, final, nodes, _Op[], children, groups, order)
 end
 
-function _collect_full!(nodes, children, plans, seen, m, t::_Track)
-    t.id in seen && return nothing
-    push!(seen, t.id)
-    push!(nodes, _node_state(m, t))
-    node = t.node
-    _hosted_plans!(plans, node)
-    kids = Tuple{ProgressNode,_Track}[]
-    if node.children isa ThreadsafeSet
-        for child in collect(node.children)
-            child isa ProgressNode || continue
-            ct = _track_for(child, m)
-            isnothing(ct) || push!(kids, (child, ct))
-        end
-    end
-    push!(children, t.id => Int[ct.id for (_, ct) in kids])
-    for (_, ct) in kids
-        _collect_full!(nodes, children, plans, seen, m, ct)
-    end
-end
-
-# The node that holds `group`: the first one at or above `from` whose plans
-# include it. A plan held above the mirrored root goes to the root; one held by
-# a node that has left the mirrored tree (a finished transient item) is gone
-# with it: 0.
+# The node that holds `group` and its id: the first node at or above `from`
+# whose plans include it. A plan held above the mirrored root goes to the root;
+# one held by a node that has left the mirrored tree (a finished transient
+# item) is gone with it: id 0.
 function _group_host(m::ProgressMirror, group::_PhaseGroup, from::ProgressNode)
     node = from
     inside = true
     while node isa ProgressNode
         if group in _phase_group_records(node)
             t = _track_for(node, m)
-            return isnothing(t) ? (inside ? 0 : 1) : t.id
+            isnothing(t) || return (t.id, node)
+            return inside ? (0, node) : (1, m.root)
         end
         node === m.root && (inside = false)
         node = node.parent
     end
-    0
+    (0, from)
 end
 
 # The plans among `plans` that are new or changed since they were last sent
 # (all of them for a full frame), and the plan order of every node that holds
 # a new one.
 function _group_states(m::ProgressMirror, plans, full::Bool)
-    hosts = Set{Int}()
+    hosts = Dict{Int,ProgressNode}()
     live = Tuple{_PhaseGroup,Int}[]
     seen = Base.IdSet{_PhaseGroup}()
     for (group, from) in plans
         group in seen && continue
         push!(seen, group)
         id = get(m.group_ids, group, 0)
-        if id == 0
-            host = _group_host(m, group, from)
+        if id == 0 || full
+            host, host_node = _group_host(m, group, from)
             host == 0 && continue
-            id = m.group_ids[group] = length(m.group_ids) + 1
-            m.group_host[id] = host
-            push!(get!(Vector{Int}, m.host_groups, host), id)
-            push!(hosts, host)
+            if id == 0
+                id = m.group_ids[group] = (m.next_group += 1)
+                m.group_host[id] = host
+                push!(get!(Vector{Int}, m.host_groups, host), id)
+            end
+            hosts[host] = host_node
         end
-        full && push!(hosts, m.group_host[id])
         push!(live, (group, id))
     end
     groups = _GroupState[]
@@ -481,22 +520,32 @@ function _group_states(m::ProgressMirror, plans, full::Bool)
         push!(groups, _GroupState(id, m.group_host[id], ancestor, group.key, group.declarer, group.host,
             group.keys, state[3], state[1], state[2]))
     end
-    order = Pair{Int,Vector{Int}}[host => _host_order(m, host) for host in sort!(collect(hosts))]
+    order = Pair{Int,Vector{Int}}[host => _host_order(m, host, hosts[host]) for host in sort!(collect(keys(hosts)))]
     groups, order
 end
 
 # The plans a mirrored node holds, in the order it holds them; plans held
 # above the root come after the root's own.
-function _host_order(m::ProgressMirror, host::Int)
+function _host_order(m::ProgressMirror, host::Int, node::ProgressNode)
     ids = get(m.host_groups, host, Int[])
-    t = @lock m.spin get(m.tracks, host, nothing)
-    isnothing(t) && return copy(ids)
     own = Int[]
-    for group in _phase_group_records(t.node)
+    for group in _phase_group_records(node)
         id = get(m.group_ids, group, 0)
         id != 0 && id in ids && push!(own, id)
     end
     vcat(own, filter(id -> !(id in own), ids))
+end
+
+function _forget_host_groups!(m::ProgressMirror, host::Int)
+    ids = pop!(m.host_groups, host, nothing)
+    isnothing(ids) && return nothing
+    gone = Set(ids)
+    filter!(((group, id),) -> !(id in gone), m.group_ids)
+    for id in ids
+        delete!(m.group_host, id)
+        delete!(m.group_sent, id)
+    end
+    nothing
 end
 
 # ── sending ──────────────────────────────────────────────────────────────────
@@ -520,16 +569,18 @@ _description(node::ProgressNode) = string(typeof(node.impl))
 
 function _stop!(m::ProgressMirror)
     @atomic m.open = false
-    tracks = @lock m.spin collect(values(m.tracks))
-    for t in tracks
-        @atomic t.gone = true
-        t.node.impl isa StateProgress && _remove_track!(t.node.impl, t)
-        t.node.children isa ThreadsafeSet && _remove_track!(t.node.children, t)
+    followed = Tuple{_Track,ProgressNode}[]
+    _foreach_track((t, node) -> push!(followed, (t, node)), m)
+    for (t, node) in followed
+        @atomic t.node = nothing
+        node.impl isa StateProgress && _remove_track!(node.impl, t)
+        node.children isa ThreadsafeSet && _remove_track!(node.children, t)
     end
     @lock m.spin begin
-        empty!(m.tracks)
         empty!(m.ops)
         empty!(m.dirty)
+        empty!(m.left)
+        empty!(m.left_hosts)
     end
     notify(m.wake)
     nothing
@@ -614,8 +665,8 @@ function mirror_progress(send, node::ProgressNode; interval::Real=0.05)
     interval >= 0 || throw(ArgumentError("mirror_progress interval must not be negative, got $interval"))
     m = ProgressMirror(node, send, Float64(interval), round(UInt64, interval * 1e9), _mirror_source(),
         ReentrantLock(), Threads.SpinLock(), Base.Event(true), UInt64(0), true, false, 0, 0,
-        _Op[], _Track[], Dict{Int,_Track}(), IdDict{_PhaseGroup,Int}(), Dict{Int,Int}(),
-        Dict{Int,Any}(), Dict{Int,Vector{Int}}())
+        _Op[], _Track[], Tuple{_PhaseGroup,ProgressNode}[], Int[], 0, IdDict{_PhaseGroup,Int}(),
+        Dict{Int,Int}(), Dict{Int,Any}(), Dict{Int,Vector{Int}}())
     lock(m.lock) do
         held = _lock_children(node)
         try
@@ -674,11 +725,13 @@ Base.show(io::IO, m::ProgressMirror) =
 Request an interrupt on the node of `mirror`'s tree that has `id` in its
 frames: the id a replica's `on_interrupt` handed over (see
 [`progress_replica`](@ref)). Unknown ids, such as a node that has since left
-the tree, are ignored.
+the tree, are ignored. The node is looked up in the tree: a viewer's Stop can
+afford that, and it spares every node of the run an index entry.
 """
 function request_interrupt!(m::ProgressMirror, id::Integer)
-    t = @lock m.spin get(m.tracks, Int(id), nothing)
-    isnothing(t) || request_interrupt!(t.node)
+    found = Ref{Union{Nothing,ProgressNode}}(nothing)
+    _foreach_track((t, node) -> t.id == id && (found[] = node), m)
+    isnothing(found[]) || request_interrupt!(found[])
     m
 end
 
@@ -702,6 +755,7 @@ mutable struct ProgressReplica
     const nodes::Dict{Int,ProgressNode}
     const ids::IdDict{ProgressNode,Int}
     const groups::Dict{Int,_PhaseGroup}
+    const host_groups::Dict{Int,Vector{Int}}   # node id => the plans it holds
 end
 
 # Replicas with an `on_interrupt`, replaced (never mutated) under `lock`, so
@@ -748,7 +802,8 @@ from the mirror are left alone.
 """
 function progress_replica(target::ProgressNode{<:StateProgress}; on_interrupt=nothing)
     r = ProgressReplica(target, on_interrupt, ReentrantLock(), UInt64(0), 0, false, 0, false,
-        Dict{Int,ProgressNode}(1 => target), IdDict{ProgressNode,Int}(target => 1), Dict{Int,_PhaseGroup}())
+        Dict{Int,ProgressNode}(1 => target), IdDict{ProgressNode,Int}(target => 1), Dict{Int,_PhaseGroup}(),
+        Dict{Int,Vector{Int}}())
     if !isnothing(on_interrupt)
         _register!(r)
         interrupt_requested(target) && _forward_root!(r)
@@ -860,8 +915,7 @@ end
 function _apply_ops!(r::ProgressReplica, ops)
     for (kind, c, x) in ops
         if kind == _FORGET
-            node = pop!(r.nodes, x, nothing)
-            isnothing(node) || x == 1 || delete!(r.ids, node)
+            x == 1 || _forget_replica_node!(r, x)
             continue
         end
         container = get(r.nodes, c, nothing)
@@ -888,8 +942,18 @@ function _apply_children!(r::ProgressReplica, f::ProgressFrame)
         end
     end
     present = Set(rec.id for rec in f.nodes)
-    for (id, node) in collect(r.nodes)
-        id == 1 || id in present || (delete!(r.nodes, id); delete!(r.ids, node))
+    for id in collect(keys(r.nodes))
+        id == 1 || id in present || _forget_replica_node!(r, id)
+    end
+end
+
+# A node that left the source tree: drop it and the plans it held, so a long
+# run's replica stays the size of its tree.
+function _forget_replica_node!(r::ProgressReplica, id::Int)
+    node = pop!(r.nodes, id, nothing)
+    isnothing(node) || delete!(r.ids, node)
+    for gid in pop!(r.host_groups, id, Int[])
+        delete!(r.groups, gid)
     end
 end
 
@@ -902,6 +966,7 @@ function _apply_groups!(r::ProgressReplica, groups, order)
             group = _PhaseGroup(ReentrantLock(), nothing, g.key, g.declarer, g.host_label, g.keys,
                 copy(g.labels), copy(g.counts), g.items)
             r.groups[g.id] = group
+            push!(get!(Vector{Int}, r.host_groups, g.host), g.id)
             sp = host.impl::StateProgress
             lock(sp.lock) do
                 plans = sp.phase_groups
