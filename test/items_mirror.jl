@@ -517,6 +517,9 @@ end
     @test length(replica.groups) <= 2
     @test length(m.group_ids) <= 2
     @test length(m.group_sent) <= 2
+    # Finished first: a running root's duration is read off the clock, so two
+    # renders of it a moment apart can differ by a millisecond.
+    finalize_progress!(root)
     close(m)
     apply_all!()
     @test render_text(target; phase_overview=true) == render_text(root; phase_overview=true)
