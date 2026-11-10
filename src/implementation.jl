@@ -37,17 +37,9 @@ end
 """
     ProgressNode{I,M,C}
 
-Tree node of a Treebars progress tree. Wraps a backend-specific `impl`
-(`StateProgress`, Term.jl `ProgressBar` / `ProgressJob`, …) plus metadata,
-a (possibly `nothing`) parent, a thread-safe set of children, and an atomic
-interrupt flag (see [`request_interrupt!`](@ref)).
-
-All progress operations (`update_progress!`, `finalize_progress!`,
-`fail_progress!`, `add_child!`, …) dispatch through `ProgressNode` to the
-backend `impl`, and children are tracked automatically by the constructor.
-Prefer the convenience entry points ([`@progress`](@ref),
-[`with_progress`](@ref), [`with_prepared_phases`](@ref)) over building
-`ProgressNode`s by hand.
+A node with backend state, a parent and children. Obtain nodes through
+[`with_progress`](@ref) or [`with_prepared_phases`](@ref); use the public
+lifecycle and query functions rather than mutating backend fields.
 """
 mutable struct ProgressNode{I,M,C}
     const impl::I
@@ -118,7 +110,7 @@ Base.showerror(io::IO, e::ProgressInterrupted) =
     throw_if_interrupted(node) -> nothing
 
 Throw [`ProgressInterrupted`](@ref) if [`interrupt_requested`](@ref)`(node)`,
-else return `nothing` — the one-line opt-in for work that simply aborts. Under
+else return `nothing` — the one-line opt-in for work that aborts. Under
 `@progress` / `with_progress` the exception fails the node like any other
 error. A runner that should instead stop *cleanly* (finish its node, keep a
 partial result) checks [`interrupt_requested`](@ref) and returns. No-op for
@@ -140,26 +132,11 @@ labels(node::ProgressNode) = get(node.meta, :labels, nothing)
 """
     is_displayed(node) -> Bool
 
-Render-only flag. `true` (the default) means the node renders normally;
-`false` makes the node a **transparent passthrough** — it still exists in
-the tree (children can parent under it, the full
-`start_progress!` / `update_progress!` / `fail_progress!` /
-`finalize_progress!` lifecycle still runs), but at render time the node
-itself emits nothing and its children are hoisted one level up into the
-parent's children container.
-
-The display **preference** is three-state (`_display_pref`): `true` / `false`
-set explicitly via `displayed=` on [`initialize_progress!`](@ref) /
-[`prepare_progress!`](@ref), or *unset* (the default). `is_displayed`
-collapses that to a `Bool` — only an explicit `false` hides; unset and
-explicit `true` both report `true`.
-
-Note the render side (`_renders_self`) goes one step further: a node with
-**no preference set** that is also a bare wrapper (no description, message,
-or counter) is inlined just like an explicit `displayed=false`, so
-undecorated structural nodes don't add empty levels to the rendered tree.
-
-Returns `false` for `nothing` (a no-op target has nothing to render).
+Whether a node is allowed to render. An explicit `displayed=false` makes it
+transparent: its children render one level up, while its lifecycle still runs.
+Unset and explicit `true` both return true. With no explicit preference, a
+bare wrapper without a description, message or counter is also inlined by
+the renderer. Set `displayed=true` to show such a wrapper.
 """
 is_displayed(node::ProgressNode) = get(node.meta, :displayed, true) !== false
 is_displayed(::Nothing) = false
@@ -188,24 +165,9 @@ function initialize_progress!(node::ProgressNode, args...; transient=false, prop
     )
 end
 
-"""
-    prepare_progress!(parent, args...; kwargs...)
-
-Create a child progress node in the **pending** state — visible in the tree but
-not yet started. Call [`start_progress!`](@ref) to transition it to running.
-
-Used by the `@progress begin … end` macro to pre-enumerate phase markers so
-the whole pipeline is visible from the outset.
-"""
 prepare_progress!(node::ProgressNode, args...; kwargs...) =
     initialize_progress!(node, args...; pending=true, kwargs...)
 
-"""
-    start_progress!(node)
-
-Transition a pending progress node to running. Idempotent — no-op if the node
-has already started or finished.
-"""
 start_progress!(node::ProgressNode) = (start_progress!(node.impl); node)
 
 # Update: forward to impl, then handle kwargs as labeled sub-nodes
@@ -298,25 +260,11 @@ end
 """
     StateProgress
 
-Thread-safe progress backend that stores all lifecycle state in mutable fields
-guarded by a `ReentrantLock`. Used by the `:state` backend (selected via
-`initialize_progress!(:state; …)`) and rendered by the HTMXObjects extension
-(`htmx_render`) and the HTTP extension (`ws_progress`).
-
-Lifecycle fields:
-
-- `started_at` — `nothing` while the node is **pending** (created by
-  [`prepare_progress!`](@ref)), set to `now()` by [`start_progress!`](@ref)
-  or by the eager constructors.
-- `finalized_at` — `nothing` while the node is running, set to `now()` by
-  [`finalize_progress!`](@ref) or [`fail_progress!`](@ref).
-- `failed` — `true` after [`fail_progress!`](@ref).
-- `reused` — `true` after [`reuse_progress!`](@ref).
-
-Query the lifecycle via [`is_pending`](@ref), [`is_running`](@ref),
-[`is_finished`](@ref), [`is_reused`](@ref), [`is_failed`](@ref),
-[`is_skipped`](@ref), [`duration`](@ref). The six are mutually exclusive and
-exhaustive.
+The thread-safe state backend selected by `:state`. It retains labels,
+counters, messages and lifecycle state for text, snapshot and web views.
+Query it through [`is_pending`](@ref), [`is_running`](@ref),
+[`is_finished`](@ref), [`is_failed`](@ref), [`is_skipped`](@ref) and
+[`is_reused`](@ref), rather than reading its storage fields.
 """
 mutable struct StateProgress
     lock::ReentrantLock
@@ -429,7 +377,7 @@ end
     is_pending(s)
 
 `true` when a progress node has been created (via [`prepare_progress!`](@ref))
-but not yet started **and has not been terminated** — i.e. it is still expected
+but not yet started and has not been terminated — i.e. it is still expected
 to run. Defined on `StateProgress` and on `ProgressNode{<:StateProgress}`;
 `false` for backends without a pending concept and for `nothing`.
 
@@ -452,7 +400,7 @@ is_running(s::StateProgress) = !isnothing(s.started_at) && isnothing(s.finalized
 """
     is_finished(s)
 
-`true` when a progress node **ran** and was finalized successfully (via
+`true` when a progress node ran and was finalized successfully (via
 [`finalize_progress!`](@ref)). A node that never started is
 [`is_skipped`](@ref), not finished, and a node whose result was reused is
 [`is_reused`](@ref).
@@ -478,8 +426,8 @@ is_failed(s::StateProgress) = !isnothing(s.finalized_at) && s.failed
 """
     is_skipped(s)
 
-`true` when a progress node was pre-enumerated but **never entered, and never
-will be** — control flow left the enclosing block (an early `return`/`break`, or
+`true` when a progress node was pre-enumerated but never entered, and never
+will be — control flow left the enclosing block (an early `return`/`break`, or
 an exception raised in an earlier phase) before reaching it. Set by
 [`skip_progress!`](@ref).
 
@@ -494,7 +442,7 @@ is_skipped(s::StateProgress) =
 """
     is_reused(s)
 
-`true` when a progress node's result was **already available**, so the work it
+`true` when a progress node's result was already available, so the work it
 stands for was not done — a cache hit, or output prepared by an earlier run.
 Set by [`reuse_progress!`](@ref).
 
@@ -522,7 +470,7 @@ end
 """
     eta(s)
 
-Estimated wall-clock time **remaining** for a *determinate, running* progress
+Estimated wall-clock time remaining for a *determinate, running* progress
 node, as a `Dates.Period`, or `nothing` when no estimate is meaningful.
 
 A node qualifies only while it is [`is_running`](@ref) with a known total (`N`)

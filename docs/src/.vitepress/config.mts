@@ -36,6 +36,9 @@ export default defineConfig({
   cleanUrls: true,
   outDir: 'REPLACE_ME_DOCUMENTER_VITEPRESS', // This is required for MarkdownVitepress to work correctly...
   head: [
+    ['link', { rel: 'stylesheet', href: `${baseTemp.base}aov/aov.css` }],
+    ...['vega.min.js', 'vega-lite.min.js', 'vega-embed.min.js', 'aov-runtime.js']
+      .map(name => ['script', { src: `${baseTemp.base}aov/${name}` }]),
     ['link', { rel: 'icon', href: 'REPLACE_ME_DOCUMENTER_VITEPRESS_FAVICON' }],
     ['script', {src: `${getBaseRepository(baseTemp.base)}versions.js`}],
     // ['script', {src: '/versions.js'], for custom domains, I guess if deploy_url is available.

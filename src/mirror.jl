@@ -612,54 +612,23 @@ end
     mirror_progress(send, node; interval=0.05) -> ProgressMirror
     mirror_progress(f, send, node; interval=0.05)
 
-Follow `node`'s progress tree and pass its changes to `send(frame)` as
-[`ProgressFrame`](@ref)s, so another process can show the tree live with
-[`progress_replica`](@ref) and [`apply_frame!`](@ref). `send` carries a frame
-to that process: a write to a socket or a worker channel, or a `put!` into a
-`Channel` within one process.
+Send [`ProgressFrame`](@ref) values to a caller-supplied transport. Apply them
+in the receiving process with [`progress_replica`](@ref) and
+[`apply_frame!`](@ref). The first and closing frames hold the full tree;
+intermediate frames contain changed node states and ordered structure changes.
+Notes, timestamps and prepared-phase counts are preserved.
 
-```julia
-# in the worker
-mirror_progress(frame -> put!(to_ui, frame), node) do
-    fit(model; progress = node)
-end
-# in the UI process
-replica = progress_replica(pending_node; on_interrupt = id -> put!(to_worker, id))
-for frame in from_worker
-    apply_frame!(replica, frame)
-end
-```
+A background task and node changes trigger sends, at most once per `interval`
+seconds. `interval=0` sends each change; `flush(handle)` sends pending changes.
+`close(handle)` sends the final frame and stops observation. The do-block
+calls `f()` and closes on every exit. Close after the work's owning wrapper
+finishes if the final frame must carry that root's terminal state.
 
-- **What is sent.** The first frame, sent before this returns, holds the whole
-  tree: every node, nothing capped. Each later frame holds what changed since
-  the one before: the nodes whose state changed (each with its whole state,
-  so applying a frame twice changes nothing) and the children added or
-  removed, in the order they happened. Notes stay notes, so each page draws
-  them in its own language; both timestamps travel exactly; prepared-phase
-  plans travel with their counts, so `phase_overview` counts the same on the
-  replica.
-- **When.** At most one frame per `interval` seconds, while something
-  changes: sent by whichever thread changes the tree once the last frame is
-  `interval` old, or by a background task. So a worker whose threads are all
-  busy computing still sends. `interval=0` sends every change at once.
-  `flush(mirror)` sends what is pending now.
-- **Closing.** `close(mirror)` sends the final frame, again the whole tree, and
-  stops following the tree; the do-block form closes it when `f` returns or
-  throws. A replica that missed a frame in between ends exactly at the
-  source's final state.
-- **Cost.** A frame costs what changed, not the size of the tree. With a mirror
-  open, a `@progress for` tick costs about what it costs with a
-  [`snapshot_progress`](@ref) file open; with none open, nothing measurable.
-- **`send`** is called with no lock of the tree held and never twice at once
-  for one mirror. If it throws on the first frame, `mirror_progress` throws;
-  later, a failing `send` is logged once as an error and closes the mirror,
-  while the run itself carries on.
-- **Stop.** A replica's `on_interrupt` hands over the id of the node a viewer
-  asked to stop; `request_interrupt!(mirror, id)` passes the request on to
-  that node here.
-
-`node === nothing` (progress disabled) mirrors nothing: the handle form returns
-`nothing`, and the do-block form just runs `f()`.
+`send` runs without tree locks and is serialized per mirror. Failure on its
+first call propagates; a later failure is logged and stops the mirror while
+work continues. Use `request_interrupt!(mirror, id)` to forward a replica's
+interrupt request. With a disabled node, the handle is `nothing` and the
+do-block still calls its callback.
 """
 function mirror_progress(send, node::ProgressNode; interval::Real=0.05)
     interval >= 0 || throw(ArgumentError("mirror_progress interval must not be negative, got $interval"))

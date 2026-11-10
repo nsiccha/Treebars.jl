@@ -11,7 +11,7 @@
 #   julia --project=<crosspkg-env> test/polling_handle_guard.jl
 #
 # Verified 2026-07-20 against DynamicObjects cff88f9 (pre-inference) +
-# HTMXObjects 8dfa703 — the pins Bruno's app resolves by `path`.
+# HTMXObjects 8dfa703.
 #
 # This test covers both handle generations without requiring Treebars to resolve
 # DynamicObjects' concrete `Pending` type while the extension is loading.
@@ -64,7 +64,7 @@ function check(name, f)
     end
 end
 
-# --- 1. An UNRESOLVED Pending (the exact shape Bruno saw) stays on the poll path ---
+# --- 1. An UNRESOLVED Pending stays on the poll path ---
 if _OLD_PENDING
     c = ThreadsafeDict()
     key = ((("warmup",)), (; n_chains=4, n_draws=1000, seed=1, init_positions=nothing,
@@ -92,7 +92,7 @@ end
 # guard, so a Pending that is ALREADY ready at the done path (a benign completion
 # race, or a stale process skewed against DO's fetch contract) flowed to
 # `render_result(rv)` RAW and serialized as `Pending(ThreadsafeDict(...),...)` —
-# the handle substituted for the figure Bruno's FDA report exported. Asserting
+# the handle substituted for the exported figure.
 if _OLD_PENDING
     # `_is_unresolved_handle(ready) == false` and STOPPING (the old test) encoded the
     # bug as correct: it never checked what `_polling_resolve` DOES with a ready
@@ -114,7 +114,7 @@ if _OLD_PENDING
     end)
 
     # The done path must hand render_result the resolved VALUE, on BOTH the sync
-    # loopback (Bruno's `sync=wants_markdown(__req__)` path) and the async path.
+    # loopback and the async path.
     for sync in (true, false)
         check("completion-race Pending renders once without warning (sync=$sync)", () -> begin
             got = Ref{Any}(:untouched)

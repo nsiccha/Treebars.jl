@@ -2,36 +2,18 @@
     initialize_progress!(kind::Symbol[, N]; description="Running...", kwargs...)
     initialize_progress!(parent::ProgressNode[, N]; description="Running...", transient=false, kwargs...)
 
-Create a progress root (from a backend symbol like `:state` or `:term`) or a child
-node (from an existing `ProgressNode`). Returns a `ProgressNode`. No-op when `nothing`.
+Create a root from a backend symbol, or a child of an existing node. Return a
+[`ProgressNode`](@ref); return `nothing` for a disabled parent.
+`:state` is built in; `:term` requires Term to be loaded.
 
-`N` is the counter total, given positionally or as the keyword `N=` (not both):
-an `Integer` makes a determinate counter, `nothing` or no total an indeterminate
-node. `transient=true` detaches a child from its parent once it finishes (a
-failed transient child stays attached). An argument shape no method accepts
-throws an `ArgumentError`, as does a backend symbol whose package is not loaded.
+An integer `N` creates a determinate counter. Omit it or pass `nothing` for
+an indeterminate node. Pass it positionally or by keyword, not both.
+`transient=true` detaches a finished child; failed children remain attached.
+Unsupported argument shapes and unloaded backends raise `ArgumentError`.
 
-!!! warning "Prefer `@progress` or `with_progress` instead"
-    Calling `initialize_progress!` / `update_progress!` / `finalize_progress!` manually
-    is error-prone — forgetting `finalize_progress!` or missing exceptions leaves
-    progress nodes stuck in the "running" state forever. Use the convenience API:
-
-    ```julia
-    # Best: automatic initialize + update + finalize for loops
-    @progress parent for i in 1:N
-        # ...
-    end
-
-    # Good: automatic finalize + fail handling via do-block
-    with_progress(parent, N; description="...") do p
-        for i in 1:N
-            # ...
-            update_progress!(p, i)
-        end
-    end
-    ```
-
-    See [`with_progress`](@ref), [`@progress`](@ref).
+Use [`with_progress`](@ref) for application work so finalization and failure
+are handled on every exit. Direct initialization is useful for backends and
+nodes whose lifecycle is owned by a replica.
 """
 initialize_progress!(::Nothing, args...; kwargs...) = nothing
 
@@ -60,12 +42,8 @@ fail_progress!(::Nothing, args...; kwargs...) = nothing
 """
     finalize_progress!(node; kwargs...)
 
-Mark a progress node as complete. No-op when `nothing`.
-
-!!! warning "Prefer `@progress` or `with_progress` instead"
-    Manual `finalize_progress!` is easy to forget or skip on exceptions. Use
-    [`@progress`](@ref) or [`with_progress`](@ref) which handle finalization and
-    failure automatically in a try/catch/finally block.
+Finalize a node without overwriting an existing failure or reuse state.
+No-op for `nothing`. Prefer [`with_progress`](@ref) to pair work with cleanup.
 """
 finalize_progress!(::Nothing, args...; kwargs...) = nothing
 
@@ -115,7 +93,7 @@ finalize_progress!(p, args...; kwargs...) = @error "No implementation loaded for
 """
     prepare_progress!(parent, args...; kwargs...)
 
-Create a child progress node in the **pending** state — appears in the tree but
+Create a child progress node in the pending state — appears in the tree but
 not yet started. Call [`start_progress!`](@ref) to transition it to running.
 Used by `@progress begin … end` to pre-enumerate phase markers. Takes the
 arguments of [`initialize_progress!`](@ref), including the counter total
@@ -135,7 +113,7 @@ start_progress!(::Any) = nothing
 """
     skip_progress!(node)
 
-Terminate a **pending** progress node as *skipped* — it was pre-enumerated but
+Terminate a pending progress node as *skipped* — it was pre-enumerated but
 never entered, and never will be (control flow left the block first). Distinct
 from [`finalize_progress!`](@ref) (which means "ran and completed") and from
 [`fail_progress!`](@ref) (which means "ran and threw").
@@ -150,38 +128,15 @@ skip_progress!(::Any) = nothing
 """
     reuse_progress!(node)
 
-Terminate a **pending or running** progress node as *reused* — its result was
-already available (a cache hit, or output prepared by an earlier run), so the
-work it stands for was not done this time. Distinct from
-[`finalize_progress!`](@ref) ("ran and completed") and from
-[`skip_progress!`](@ref) ("never entered; its result does not exist").
+Mark a pending or running phase reused because its result already exists.
+A reused phase is terminal and distinct from finished or skipped. Before
+entry it has no duration; after entry it retains time spent checking the
+result. Later finalization preserves reuse; a later exception can still fail
+it. Pending children become reused and running children are finalized.
 
-Call it on a prepared phase before entering it, or from inside the phase body
-once the hit is known:
-
-```julia
-with_prepared_phases(parent, (prepare="Prepare model", fit="Fit")) do phases
-    cached(:prepare) ? reuse_progress!(phases.prepare) :
-        with_prepared_progress(_ -> prepare_model(), phases.prepare)
-    with_prepared_progress(phases.fit) do phase
-        hit = lookup_fit()
-        isnothing(hit) || (reuse_progress!(phase); return hit)
-        fit_model()
-    end
-end
-```
-
-A phase reused before it was entered has no duration; one reused from inside
-its body keeps the time spent finding out. The enclosing wrapper's later
-finalize leaves a reused node unchanged, while an exception thrown after the
-reuse still fails it. Pending children of a reused node become reused too;
-running children are finalized. Idempotent, and a no-op on a node that already
-finished, failed, or was skipped.
-
-Renders as `↺` in [`render_text`](@ref), as `reused` with an "N reused" pill
-in the HTML renderer, and in its own `reused` column of
-[`phase_overview`](@ref). Backends without the state (Term.jl) finalize the
-node instead; `nothing` is a no-op.
+Idempotent on terminal nodes. The text view uses `↺`; the HTML view and
+[`phase_overview`](@ref) have a reused group. Backends without this state,
+including Term, finalize instead. No-op for `nothing`.
 """
 reuse_progress!(::Nothing) = nothing
 reuse_progress!(::Any) = nothing
@@ -189,88 +144,43 @@ reuse_progress!(::Any) = nothing
 """
     request_interrupt!(node) -> node
 
-Ask the work running under `node` to stop early. Sets `node`'s interrupt flag,
-after which [`interrupt_requested`](@ref) reports `true` for `node` and for
-every node below it — including children created after the request — while
-siblings and ancestors are unaffected.
+Request cooperative interruption on this node and its descendants, including
+children created later. Siblings and ancestors are unaffected. This does not
+throw or change lifecycle state; work must check [`interrupt_requested`](@ref)
+or [`throw_if_interrupted`](@ref).
 
-Purely a **request**: nothing throws, stops, or changes lifecycle state. A
-runner opts in by checking [`interrupt_requested`](@ref) at points where it can
-wind down (e.g. a sampler at a checkpoint boundary) and then finalizes or fails
-its node as usual; a runner that never checks simply runs to completion.
-
-Thread-safe and idempotent; the flag stays set for the node's lifetime, so
-target the node of the job you mean to stop rather than a long-lived root that
-later jobs will also hang under. No-op for `nothing`.
+The request is thread-safe, idempotent and persists for the node's lifetime.
+Target the job subtree rather than a long-lived root. No-op for `nothing`.
 """
 request_interrupt!(::Nothing) = nothing
 
 """
     interrupt_requested(node) -> Bool
 
-`true` when [`request_interrupt!`](@ref) was called on `node` or on any of its
-ancestors. Lock-free (one atomic load per level of the `parent` chain), so it
-is cheap enough to poll inside a hot loop. `false` for `nothing` — a disabled
-progress tree is never interrupted.
-
-```julia
-for i in 1:n_steps
-    interrupt_requested(progress) && break   # opt in: stop early, keep what we have
-    step!(state)
-    update_progress!(progress)
-end
-```
-
-[`throw_if_interrupted`](@ref) is the one-line form for work that simply aborts.
+Whether an interrupt was requested on the node or an ancestor. Return false
+for `nothing`. Call at a point where the work can stop; use
+[`throw_if_interrupted`](@ref) to abort by exception.
 """
 interrupt_requested(::Nothing) = false
 
 """
-    htmx_render(node; article=false, scoped=true, max_finished=nothing, phase_overview=false, texts=nothing, kwargs...)
+    htmx_render(node; article=false, scoped=true, max_finished=nothing,
+                phase_overview=false, texts=nothing, kwargs...)
 
-Render a `ProgressNode` tree as an HTMX `Node` fragment. The implementation
-lives in the HTMXObjects package extension — loading `HTMXObjects` activates
-it. Without that extension the call raises a descriptive `error`.
+Render a state-backed node as an HTMX HTML fragment. Requires HTMXObjects.
+Counters become progress bars, messages become label rows and containers hold
+their children. `article=true` uses an article container. Include
+[`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) in the host page.
 
-Rendering rules (for `ProgressNode{<:StateProgress}`):
+`scoped` and `max_finished` pass to [`htmx_render_children`](@ref).
+`phase_overview=true` prepends counts with nested plans expanded;
+`:collapsed` starts nested plans closed and `:top` shows outermost plans only.
+Viewer disclosure choices survive updates when the client script is loaded.
 
-- Nodes with a counter (`N !== nothing`) render as `<progress>` bars with
-  `description: i / N` headers.
-- Nodes with a message but no counter render as `key: value` label rows.
-- Container nodes render as nested `<div>` (or `<article>` when
-  `article=true`) with a header and `htmx_render_children` output.
-
-Each node's header includes a `.treebar-duration` span; the
-[`htmx_treebar_script`](@ref) ticker advances running nodes locally between
-polls. Skipped nodes, and reused nodes that were never entered, show no
-duration. `scoped` and `max_finished` are
-forwarded to `htmx_render_children` at every level (see there).
-
-`phase_overview=true` prepends per-plan lifecycle counts from
-[`phase_overview`](@ref), once above the tree. A plan declared inside another
-plan's prepared phase renders as an open disclosure under it, summarized by
-that phase's label; `phase_overview=:collapsed` renders those disclosures
-closed, and `phase_overview=:top` shows only the outermost plans. With nested
-plans, "Expand all" / "Collapse all" controls head the overview. A viewer's
-open/closed choice per plan survives live updates when
-[`htmx_treebar_script`](@ref) is on the page. It does not elide individual
-nodes. The same opt-in is supported by `htmx_render_children`,
-`htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`, and
-`polling_fetchindex` (HTTP and WebSocket).
-
-`texts`, a [`TreebarTexts`](@ref) such as `treebar_texts(:de)`, is the
-language of every word the tree shows: durations ("— 6 s bisher"), pills,
-the overview and the words [`htmx_treebar_script`](@ref) writes between
-updates. Left at `nothing`, it follows the page language the HTMXObjects
-route being answered declares (`__lang__ = "de"`; `de` and `de-*` are German,
-anything else English), on an HTMXObjects that provides `page_lang()`, and
-English otherwise. Every HTML renderer takes the same keyword:
-`htmx_render_children`, `polling_fetchindex` (HTTP and WebSocket),
-`htmx_ws_render`, `htmx_ws_progress`, producer-form `ws_progress`,
-`htmx_render_board`, `htmx_ws_render_board` and `ws_board`. A non-English
-render carries the script's words in a `data-treebar-texts` attribute on its
-outermost element (or on the poller, WebSocket frame or board around it);
-English markup has none.
+`texts` selects [`TreebarTexts`](@ref). With `nothing`, use the HTMXObjects
+page language when available: German for `de` or `de-*`, English otherwise.
+All HTML renderers use this language convention. A missing state node raises
+an error; initialize the application's status tree before rendering it.
 """
 htmx_render(p; kwargs...) = error("No implementation loaded for htmx_render($(typeof(p)); kwargs...)")
 
@@ -304,29 +214,18 @@ See HTMXObjects KB "AppData must initialize __status__" for context.
 """
     htmx_render_children(node; scoped=true, max_finished=nothing, texts=nothing)
 
-Render the children of a `ProgressNode` as an HTML fragment, classifying them
-into pending / running / finished / reused / skipped / failed groups and
-emitting toggle pills (`"N pending"`, `"N finished"`, `"N reused"`,
-`"N skipped"`, `"N failed"`) at the top. Finished, reused and skipped children
-start hidden behind their pills.
-Implementation lives in the HTMXObjects package extension — loading
-`HTMXObjects` activates it.
+Render children grouped by lifecycle state, with toggle pills. Requires
+HTMXObjects. Finished, reused and skipped groups start hidden behind their
+pills. Every child is included by default.
 
-Every child is rendered by default (`max_finished=nothing`). As an opt-in,
-`max_finished=k` renders individually only the newest `k` finished children
-per container (likewise reused, and skipped). The older ones are replaced by one
-`.treebar-elided` line ("N earlier finished not shown") that shows and hides
-with that group's pill. Pills count every child either way. Pending, running
-and failed children are never elided. [`render_text`](@ref) never elides.
+`max_finished=k` keeps the newest `k` finished children per container,
+likewise reused and skipped, and adds a count for older children. Pending,
+running and failed children are never elided; pills count the whole group.
+[`render_text`](@ref) never elides nodes.
 
-`scoped=true` (the default) emits `data-show-*` attributes on the wrapper so
-the pills toggle visibility scoped to this children container. Inside a
-`.treebar-poller` (as set up by [`polling_fetchindex`](@ref)), pass
-`scoped=false` so the wrapper's descendant CSS rules win.
-
-Use [`htmx_render`](@ref) for full-node rendering (it calls
-`htmx_render_children` internally for every level of the tree). `texts` is the
-language of the pills and placeholders; see [`htmx_render`](@ref).
+`scoped=true` owns visibility on this container. Inside a poller's existing
+scope, pass `scoped=false`. See [`htmx_render`](@ref) for `texts` and the
+full-node renderer.
 """
 function htmx_render_children end
 
@@ -334,18 +233,9 @@ function htmx_render_children end
 """
     htmx_treebar_styles()
 
-Return a `<style>` HTMX node with the CSS for every treebar class
-(`treebar-node`, `treebar-pill-*`, `treebar-children`, `treebar-poller`, …).
-Implementation lives in the HTMXObjects package extension.
-
-Include it in your app's `<head>` via the `extra_head` kwarg of `htmx(…)`:
-
-```julia
-htmx(...; extra_head=(htmx_treebar_styles(), htmx_treebar_script(), ...))
-```
-
-Pairs with [`htmx_treebar_script`](@ref), which provides the client-side
-duration ticker.
+Return the HTMX style node for progress trees, pills, pollers and boards.
+Requires HTMXObjects. Include it once in the host page's `extra_head`, beside
+[`htmx_treebar_script`](@ref).
 """
 function htmx_treebar_styles end
 
@@ -353,32 +243,14 @@ function htmx_treebar_styles end
 """
     htmx_treebar_script()
 
-Return a `<script>` HTMX node with Treebars' client-side polling behavior.
-Running `.treebar-duration` spans advance their displayed elapsed time every
-100ms locally instead of stuttering between server polls; the script also owns
-the badge status mirror (pause glyph, polling/paused word, determinate bar,
-elapsed — refreshed from the live tree after every swap and tick), pause
-handling, and terminalization of a completed poller's persistent wrapper from
-`.treebar-poller` to `.treebar-terminal`. Terminal nodes keep the
-server-rendered duration text; skipped nodes and never-entered reused nodes
-carry no duration.
-It is also the keyed reconciler behind [`htmx_render_board`](@ref): board
-polls, WebSocket frames and `window.treebarUpdateBoard(html)` update items in
-place by key instead of replacing the board. A push source feeds a
-[`polling_fetchindex`](@ref) poller through
-`window.treebarUpdatePoller(el, html)` and `window.treebarPollerLost(el, why)`
-(see there). Every live update (poll swap,
-WebSocket frame, board update) keeps the viewer's choices: a nested phase-plan
-disclosure the viewer opened or closed (`phase_overview=true` / `:collapsed`)
-stays so on the replacement markup.
-Implementation lives in the HTMXObjects package extension.
+Return the HTMX script node for duration updates, poller controls, preserved
+viewer choices and keyed board updates. Requires HTMXObjects. Include it once
+beside [`htmx_treebar_styles`](@ref) in the host page's `extra_head`.
 
-Include it once alongside [`htmx_treebar_styles`](@ref) via `extra_head`.
-Without it the HTMX fragment can still poll and receive terminal content, but
-the badge status mirror never updates and the wrapper retains its live-poller
-identity and badge control. (Collapse is stylesheet-driven, so a
-`chrome=:quiet` poller still collapses without the script — it just never
-refreshes its mirrored status.)
+The script advances running clocks between server updates and stops the
+transport when a poller receives a completed result. It reconciles boards by
+key and retains pill and disclosure choices across updates. Without it,
+server-rendered fragments do not provide these client behaviors.
 """
 function htmx_treebar_script end
 
@@ -449,7 +321,7 @@ ws_progress(produce::Function, ws, progress; kwargs...) =
     htmx_ws_progress(content; url, id, progress=nothing,
                      description=nothing, N=nothing, collapsed=false, texts=nothing)
 
-Render the initial content and an open, unobtrusive progress tree, connecting
+Render the initial content and an open progress tree, connecting
 to `url` through the htmx WebSocket extension. Pair this with the producer form
 of [`ws_progress`](@ref), using the same unique `id` on both routes. The content
 stays mounted; progress and published updates have separate stable targets.
@@ -481,74 +353,32 @@ htmx_ws_render(p; kwargs...) = @error "No implementation loaded for htmx_ws_rend
 
 """
     htmx_render_board(entries; poll_url=nothing, poll_interval="1s",
-                      empty=nothing, id="treebar-board",
-                      linger_ms=3000, expanded=false, live=poll_url !== nothing,
-                      phase_overview=false, texts=nothing, pause=nothing)
+        empty=nothing, id="treebar-board", linger_ms=3000, expanded=false,
+        live=poll_url !== nothing, phase_overview=false, texts=nothing, pause=nothing)
 
-Render a keyed, changing collection of progress trees — a live "running jobs"
-board — as an HTMX `Node`. Implementation lives in the HTMXObjects package
-extension. The board is generic: it knows nothing about where its entries come
-from.
+Render a changing collection of jobs. Requires HTMXObjects and the Treebars
+style and script nodes in the page. Each entry supplies these properties:
 
-`entries` is a vector of NamedTuples (any object with these properties works):
+| Property | Meaning |
+| --- | --- |
+| `key` | Stable identity; the first entry for a duplicate key wins. |
+| `label` | Job heading. |
+| `state` | `:queued`, `:running`, `:done` or `:failed`. |
+| `elapsed_ms` | Elapsed or final duration in milliseconds. |
+| `node` | Optional progress tree, default `nothing`. |
+| `meta` | Label/value pairs, default `()`. |
+| `href` | Optional heading link, default `nothing`. |
 
-```julia
-(; key, label, state, elapsed_ms, node=nothing, meta=(), href=nothing)
-```
+Every update supplies the full current list. `poll_url` enables polling;
+`poll_interval` uses HTMX duration syntax. The script matches by key,
+preserves viewer choices, and removes departing items after `linger_ms`.
+Keep completed entries in the list to retain their history.
 
-- `key` — stable identity; the client matches items across updates by it.
-  The first entry with a given key wins.
-- `label` — the item's heading.
-- `state` — `:queued`, `:running`, `:done` or `:failed`. A queued item renders
-  dim like a pending node, reading "queued · #3" when `meta` carries a
-  `position`.
-- `elapsed_ms` — time so far (running) or total (done/failed); a running item's
-  header ticks locally between updates.
-- `node` — optional [`ProgressNode`](@ref), rendered with [`htmx_render`](@ref)
-  in a collapsible `<details>` under the header (open when `expanded`).
-- `meta` — small label/value pairs (a NamedTuple, `Dict` or vector of Pairs)
-  shown under the header: route, polls, "unwatched" => "12s", …
-- `href` — optional link for the label (the job's own poller or result).
-
-Each entry becomes a `.treebar-board-item[data-treebar-key]` wrapper that holds
-its UI state — tree expansion (`data-open`) and pill toggles (`data-show-*`) —
-exactly as `.treebar-poller` does, around a `.treebar-board-item-content` the
-client replaces on every update.
-
-Every update carries the full current list. With `poll_url`, a
-`.treebar-board-poll` element fetches it every `poll_interval`, and
-[`htmx_treebar_script`](@ref) reconciles the response by key instead of letting
-htmx replace the board: existing items update in place (wrappers untouched), new
-items are inserted in server order, and items that leave the list show their
-final state for `linger_ms` (overridable per item with `data-treebar-linger-ms`)
-and are then removed; an item that leaves while still queued or running reads
-"ended". A `:done`/`:failed` entry stays as long as the server lists it, so list
-finished entries for a moment to show their outcome — or keep listing them for
-a history board. Without the script, the poll falls back to replacing the whole
-board. Full snapshots are idempotent, survive dropped polls and need no
-per-client state on the server.
-
-The header shows the running/queued counts and, when `live`, a Pause button
-(same mechanism as the poller's): a paused board issues no polls, drops pushed
-frames, freezes its clocks and keeps lingering items. `pause=false` leaves the
-button out; left at `nothing`, it follows the page exactly as
-[`polling_fetchindex`](@ref)'s `pause` does (an HTMXObjects route declaring
-`__progress_pause__ = false` renders no Pause), and shows otherwise. `empty` is shown while the
-list is empty (default: the texts' `no_jobs`, "No running jobs."). `texts` is
-the language of the board's words; see [`htmx_render`](@ref). `id` must be a valid CSS id; the reconciler matches updates to
-the live board by it. For WebSocket push see [`ws_board`](@ref).
-
-Include [`htmx_treebar_styles`](@ref) and [`htmx_treebar_script`](@ref) on the
-page.
-
-`phase_overview=true` (or `:top`, outermost plans only, or `:collapsed`,
-nested plans closed) shows one overview across the listed entries' progress
-nodes. Shared nodes and duplicate entry keys count once; entries without a
-node contribute no phase counts. The overview follows the current server
-snapshot, while departing items may still linger visually. A history board
-must continue listing completed roots to include their counts. Item trees
-remain in their existing disclosures. `htmx_ws_render_board` and `ws_board`
-forward this opt-in.
+`expanded` opens item trees initially. A live board offers Pause unless
+`pause=false` or the page declares `__progress_pause__ = false`. `empty`
+overrides the empty-list content. `id` must be a valid CSS id.
+`phase_overview` and `texts` follow [`htmx_render`](@ref); counts include
+currently listed nodes only, deduplicating shared nodes and duplicate keys.
 """
 function htmx_render_board end
 
@@ -567,18 +397,10 @@ function htmx_ws_render_board end
 """
     ws_board(ws, entries; interval=1.0, until=() -> false, kwargs...)
 
-WebSocket variant of a polled [`htmx_render_board`](@ref), mirroring
-[`ws_progress`](@ref): every `interval` seconds, call the zero-argument
-function `entries()` and push the full board snapshot
-([`htmx_ws_render_board`](@ref), `kwargs...` forwarded) until the client goes
-away or `until()` returns `true` (one final frame is sent then). `texts` and
-`pause` are resolved once, when the route calls it, for every frame. The page renders
-the initial board with the same `id` inside the `ws-connect` element:
-
-```julia
-h.div(hx_ext="ws", ws_connect="/ws/jobs")(htmx_render_board(entries(); live=true))
-```
-
-Implementation lives in the HTMXObjects package extension (with HTTP).
+Call `entries()` and send a full board snapshot every `interval` seconds,
+until the client disconnects or `until()` returns true; then send a final
+frame. Requires HTMXObjects and HTTP. Keywords pass to
+[`htmx_ws_render_board`](@ref). Resolve language and pause policy once for the
+connection. Use the same board `id` in the initial page and updates.
 """
 ws_board(ws, entries; kwargs...) = error("No implementation loaded for ws_board. Load HTMXObjects and HTTP to enable WebSocket boards.")

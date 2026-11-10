@@ -215,27 +215,13 @@ const _TEXT_LOCALES = (
 """
     treebar_texts(locale::Symbol=:en, notes::Pair...; texts...)
 
-The [`TreebarTexts`](@ref) for `locale` (`:en` or `:de`), with any of its texts
-replaced by keyword:
+Select English (`:en`) or German (`:de`) renderer text, optionally replacing
+words by keyword. All HTML renderers accept this as `texts`. With no explicit
+selection, HTML follows the HTMXObjects page language when available.
 
-```julia
-htmx_render(node; texts=treebar_texts(:de))
-treebar_texts(:de; running="läuft seit {elapsed}", stop="Anhalten")
-```
-
-Every HTML renderer takes `texts=`. Left out, the texts follow the page
-language that the HTMXObjects route being answered declares (`__lang__ = "de"`
-on its mount chain): `de` and every `de-*` tag select German, any other
-language or no declaration selects English. An unknown locale or text name, or
-a `{placeholder}` a text does not take, throws an `ArgumentError`.
-
-`locale` also picks the words of the notes packages write into progress nodes
-([`treebar_notes`](@ref)). An app replaces any of a package's texts by passing
-that package's table with its own words, checked against the table:
-
-```julia
-treebar_texts(:de, progress_notes => (from_disk = "von der Festplatte ({size})",))
-```
+Pass a package's [`TreebarNotes`](@ref) table paired with a named tuple to
+replace its note templates. Unknown locales, names or placeholders raise
+`ArgumentError`. See [`treebar_notes`](@ref) for declaring package notes.
 """
 function treebar_texts(locale::Symbol=:en, notes::Pair...; texts...)
     haskey(_TEXT_LOCALES, locale) || throw(ArgumentError(string("treebar_texts: unknown locale ",
@@ -324,27 +310,15 @@ end
 """
     treebar_notes(; en, de=…)
 
-The words of the notes a package writes into progress nodes: one `NamedTuple`
-of texts per language, English required. A text's `{placeholders}` are named
-by its English text; the other languages may use any of them, and a language
-that leaves a text out falls back to the English one.
+Declare package progress messages as a named tuple per language. English is
+required and defines each template's named `{placeholders}`. Missing
+translations fall back to English. Calling the returned table with a message
+name and keyword values produces a [`TreebarNote`](@ref).
 
-```julia
-const progress_notes = treebar_notes(
-    en = (from_disk = "from disk: {size}", cached = "(cached)"),
-    de = (from_disk = "aus dem Zwischenspeicher ({size})", cached = "(zwischengespeichert)"))
-
-update_progress!(node, progress_notes(:from_disk; size = ByteSize(n)))
-update_progress!(node, progress_notes(:cached))
-```
-
-Every HTML renderer writes the note in the language of its texts (the page's
-language, or `texts=`); [`render_text`](@ref) and the `:term` backend write
-English. An app rewords a package's texts through [`treebar_texts`](@ref).
-A language Treebars has no texts for, an unknown text, a `{placeholder}` the
-English text does not take, or a missing or unsupported value throws an
-`ArgumentError`. Values are strings and integers, written as given, and
-[`ByteSize`](@ref).
+HTML chooses the note's language when rendering; text and Term use English.
+Values may be strings, integers or [`ByteSize`](@ref). Unknown languages,
+messages, placeholders or unsupported values raise `ArgumentError`.
+Applications can override these templates through [`treebar_texts`](@ref).
 """
 function treebar_notes(; locales...)
     haskey(locales, :en) || throw(ArgumentError(
@@ -379,14 +353,10 @@ _note_template_string(locale, name, text) = throw(ArgumentError(string(
 """
     treebar_note(name::Symbol; values...)
 
-A [`TreebarNote`](@ref) in one of Treebars' own texts ([`TreebarTexts`](@ref)),
-for a note that says what Treebars already has words for:
-
-```julia
-update_progress!(node, treebar_note(:queued_position; position = 2))  # "queued · #2" / "wartet · Nr. 2"
-```
-
-An unknown text, or a missing or unsupported value, throws an `ArgumentError`.
+Create a [`TreebarNote`](@ref) from one of Treebars' renderer text templates.
+Pass its placeholder values as keywords, then give the note to
+[`update_progress!`](@ref). Unknown names or missing or unsupported values
+raise `ArgumentError`.
 """
 function treebar_note(name::Symbol; values...)
     name in _TEXT_NAMES || throw(ArgumentError(string("treebar_note: unknown text ", repr(name),

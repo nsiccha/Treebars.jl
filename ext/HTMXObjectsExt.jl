@@ -2236,8 +2236,8 @@ end
 
 # A callback that returns a finished answer (a response, not content) has it
 # serialized into the poller's HTML, so the caller gets markup where it expected
-# JSON or markdown and fails far downstream ("invalid JSON at byte 1", as two
-# Bruno routes did with `sync=true`). The fix is the caller's — return the raw
+# JSON or markdown and fails downstream with a serialization error.
+# The caller should return the raw
 # value from the route instead — so this only says so, once.
 _warn_wrapped_response(@nospecialize(body)) = nothing
 _warn_wrapped_response(body::Union{HTTP.Response,HTMXObjects.MIMEResponse}) = _warn_wrapped(body)

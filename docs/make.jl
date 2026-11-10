@@ -1,5 +1,23 @@
 using Documenter, DocumenterVitepress, Treebars
 
+include("lint.jl")
+
+pages = [
+    "Start" => ["Treebars.jl" => "index.md"],
+    "Guides" => [
+        "Instrumentation" => "instrumentation.md",
+        "Phases" => "phases.md",
+        "Monitoring" => "monitoring.md",
+    ],
+    "Examples" => ["Batch processing" => "batch.md"],
+    "Reference" => [
+        "Core" => "api.md",
+        "Observation" => "observation.md",
+        "Web" => "web.md",
+    ],
+]
+lint_docs(pages)
+
 makedocs(
     sitename = "Treebars.jl",
     modules  = [Treebars],
@@ -8,14 +26,9 @@ makedocs(
         devurl = "dev",
         devbranch = "main",
     ),
-    pages = [
-        "Home" => "index.md",
-        "Usage" => "usage.md",
-        "Backends" => "backends.md",
-        "API"  => "api.md",
-    ],
-    checkdocs = :none,
-    warnonly = true,
+    pages = pages,
+    checkdocs = :exports,
+    warnonly = false,
 )
 
 # Ensure a root index.html redirect exists for when no stable version is deployed
