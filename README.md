@@ -2,23 +2,23 @@
 
 [![Dev Docs](https://img.shields.io/badge/docs-dev-blue.svg)](https://nsiccha.github.io/Treebars.jl/dev/)
 
-Tree-structured nested progress bars with a backend-agnostic interface.
-
-## Features
-
-- **`@progress` macro**: annotate loops and blocks with progress tracking
-- **`ProgressNode` tree structure**: nested progress bars organized hierarchically
-- **Thread-safe `StateProgress`**: safe concurrent updates from multiple threads
-- **Multiple backends**: Term.jl for terminal output, web-based display via package extensions
+Treebars records nested Julia work as a progress tree for text, terminal and web views.
 
 ## Installation
 
-```julia
-using Pkg
-Pkg.add(url="https://github.com/nsiccha/Treebars.jl")
+Run this command in your shell:
+
+```sh
+julia -e 'using Pkg; Pkg.add(url="https://github.com/nsiccha/Treebars.jl")'
 ```
 
-## Related packages
+## Documentation
 
-- [WarmupHMC.jl](https://github.com/nsiccha/WarmupHMC.jl) -- uses Treebars.jl for sampling progress display
-- [ReactiveHMC.jl](https://github.com/nsiccha/ReactiveHMC.jl) -- HMC sampler with Treebars.jl integration
+[Start](https://nsiccha.github.io/Treebars.jl/dev/) with a complete example,
+then use the [instrumentation guide](https://nsiccha.github.io/Treebars.jl/dev/instrumentation)
+to attach counters and nested work. The
+[batch example](https://nsiccha.github.io/Treebars.jl/dev/batch) combines
+prepared phases, cached results and an overview figure.
+
+The site executes its examples during the build. See [docs/README.md](docs/README.md)
+for the page map and build commands.
