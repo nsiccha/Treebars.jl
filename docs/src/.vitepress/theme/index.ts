@@ -10,7 +10,6 @@ import {
 } from '@nolebase/vitepress-plugin-enhanced-readabilities/client'
 
 import VegaFigure from '@/VegaFigure.vue'
-import VersionPicker from "@/VersionPicker.vue"
 
 import { enhanceAppWithTabs } from 'vitepress-plugin-tabs/client'
 
@@ -31,7 +30,6 @@ export const Theme: ThemeConfig = {
   },
   enhanceApp({ app, router, siteData }) {
     enhanceAppWithTabs(app);
-    app.component('VersionPicker', VersionPicker);
     app.component('VegaFigure', VegaFigure);
   }
 }

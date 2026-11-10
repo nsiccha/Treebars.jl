@@ -6,12 +6,6 @@ import path from 'path'
 
 const mathjax = mathjaxPlugin()
 
-function getBaseRepository(base: string): string {
-  if (!base || base === '/') return '/';
-  const parts = base.split('/').filter(Boolean);
-  return parts.length > 0 ? `/${parts[0]}/` : '/';
-}
-
 const baseTemp = {
   base: 'REPLACE_ME_DOCUMENTER_VITEPRESS',// TODO: replace this in makedocs!
 }
@@ -19,13 +13,6 @@ const baseTemp = {
 const navTemp = {
   nav: 'REPLACE_ME_DOCUMENTER_VITEPRESS',
 }
-
-const nav = [
-  ...navTemp.nav,
-  {
-    component: 'VersionPicker'
-  }
-]
 
 // https://vitepress.dev/reference/site-config
 export default defineConfig({
@@ -40,9 +27,6 @@ export default defineConfig({
     ...['vega.min.js', 'vega-lite.min.js', 'vega-embed.min.js', 'aov-runtime.js']
       .map(name => ['script', { src: `${baseTemp.base}aov/${name}` }]),
     ['link', { rel: 'icon', href: 'REPLACE_ME_DOCUMENTER_VITEPRESS_FAVICON' }],
-    ['script', {src: `${getBaseRepository(baseTemp.base)}versions.js`}],
-    // ['script', {src: '/versions.js'], for custom domains, I guess if deploy_url is available.
-    ['script', {src: `${baseTemp.base}siteinfo.js`}]
   ],
   
   markdown: {
@@ -92,7 +76,7 @@ export default defineConfig({
         detailedView: true
       }
     },
-    nav,
+    nav: navTemp.nav,
     sidebar: 'REPLACE_ME_DOCUMENTER_VITEPRESS',
     editLink: 'REPLACE_ME_DOCUMENTER_VITEPRESS',
     socialLinks: [
