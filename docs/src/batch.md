@@ -11,9 +11,9 @@ a cached value is valid.
 ```@example batch
 using Treebars
 samples = [
-    (id=:A, values=[2.0, 4.0, 6.0], export=true),
-    (id=:B, values=[1.0, 3.0, 5.0], export=false),
-    (id=:C, values=[4.0, 8.0], export=false),
+    (id=:A, values=[2.0, 4.0, 6.0], export_record=true),
+    (id=:B, values=[1.0, 3.0, 5.0], export_record=false),
+    (id=:C, values=[4.0, 8.0], export_record=false),
 ]
 cached_sample = samples[2]
 cache = Dict(cached_sample.id => sum(cached_sample.values) / length(cached_sample.values))
@@ -42,7 +42,7 @@ function summarize_batch(samples, cache)
         exports = Pair{Symbol,Float64}[]
         means = progress_map(root, samples; description="Samples") do child, sample
             update_progress!(child, string(sample.id))
-            plan = (validate="Validate", summarize="Summarize", export="Export")
+            plan = (validate="Validate", summarize="Summarize", export_record="Export")
             with_prepared_phases(child, plan) do phases
                 with_prepared_progress(phases.validate) do _
                     isempty(sample.values) && error("Empty sample")
@@ -56,8 +56,8 @@ function summarize_batch(samples, cache)
                         sum(sample.values) / length(sample.values)
                     end
                 end
-                if sample.export
-                    with_prepared_progress(phases.export) do _
+                if sample.export_record
+                    with_prepared_progress(phases.export_record) do _
                         push!(exports, sample.id => average)
                     end
                 end
