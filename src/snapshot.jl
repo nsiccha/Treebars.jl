@@ -158,58 +158,21 @@ end
     snapshot_progress(node, path; interval=2, phase_overview=false) -> ProgressSnapshot
     snapshot_progress(f, node, path; interval=2, phase_overview=false)
 
-Keep a text snapshot of `node`'s progress tree in the file `path` while a run
-goes on, so another process can follow it: `cat path` from any shell, or
-`treebars watch path` (the `bin/treebars` script in the package). Meant for
-headless runs (a script under a compute token, a fit on a remote host) that
-have no browser and no terminal to show the tree.
+Keep a text snapshot in `path`, replacing it atomically. The header records
+writer, UTC write time and live/final status; the body is [`render_text`](@ref).
+The first write occurs before returning. A background task and node changes
+trigger later writes, at most once per `interval` seconds.
 
-```julia
-snapshot_progress(app.__status__, "fit.progress") do
-    app.sample()
-end
-```
+The interval is not a freshness guarantee: when all threads are busy and
+nothing changes, writing waits for the next change or scheduling opportunity.
+An interactive Julia thread lets the background task run independently.
+`close(handle)` writes the final snapshot. Open snapshots close at Julia exit;
+a killed process may leave an old live record. After the first write, I/O
+errors are logged and stop observation without stopping the work.
 
-```
-treebars snapshot · live · pid 4242 on gordito · written 2026-10-29T18:45:02Z (unix 1793299502) · every 2s
-▶ Sampling [3m 12s]
-├─ ✓ Prepare model [41s]
-└─ ▶ Warmup (812/1000) [2m 31s] · ETA ~35s
-```
-
-The first line says whether the run is still writing the file (`live`) or has
-closed it (`final`), which process wrote it, and when, in UTC. The rest is
-exactly what [`render_text`](@ref)`(node; phase_overview)` returns: the whole
-current tree, every node included.
-
-- **Bounded.** Each write replaces the whole file (a temp file in the same
-  directory, then a rename), so a reader never sees a half-written file and
-  the file never grows with the length of the run, only with the tree.
-- **When it is written.** Once when the snapshot opens (a path that cannot be
-  written throws here, before any work runs), then at most once per `interval`
-  seconds while the run goes on: by a background task, and by whichever
-  thread changes the tree (a node is created, starts, ends, counts or gets a
-  message) once the last write is `interval` old. So a run whose threads are
-  all busy still updates the file whenever its tree changes. With every
-  thread busy and nothing changing, the file is written again at the next
-  change; start Julia with an interactive thread (`julia -t auto,1`) for
-  writes every `interval` regardless.
-- **Final.** `close(snapshot)` (the do-block form does this when `f` returns
-  or throws) writes the final snapshot, marked `final`. Snapshots still open
-  when Julia exits are closed then. A run killed outright leaves its last
-  `live` snapshot behind, and the file's age tells a reader it stopped.
-- **Errors.** After the first write, a write that fails (a full disk, a
-  removed directory) is logged as an error and stops the snapshot; the run
-  itself carries on.
-
-Each write costs one `render_text` of the tree. Transient nodes that finished
-have left the tree, as they have in every view of it; pass
-`phase_overview=true` (or `:top`, `:collapsed`) to add the phase counts that
-keep them, as [`render_text`](@ref) does.
-
-The do-block form runs `f()` with the snapshot open and returns its value.
-`node === nothing` (progress disabled) writes no file: the handle form returns
-`nothing` and the do-block form just runs `f()`.
+The do-block calls `f()` and closes on every exit, returning its result.
+A final header means observation closed, not that every node finished.
+With `node=nothing`, write no file; the do-block still calls `f()`.
 """
 function snapshot_progress(node::ProgressNode, path::AbstractString;
         interval::Real=2, phase_overview::Union{Bool,Symbol}=false)

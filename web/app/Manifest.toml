@@ -387,7 +387,7 @@ version = "3.6.0"
 deps = ["Mmap", "SHA", "ScopedValues", "Serialization", "Treebars"]
 git-tree-sha1 = "80097f56265624f057e110f16f44af6800002732"
 repo-rev = "bad865e9a87f29116d5cfbcf36352a0555076e09"
-repo-url = "/home/niko/github/nsiccha/DynamicObjects.jl"
+repo-url = "https://github.com/nsiccha/DynamicObjects.jl"
 uuid = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
 version = "0.5.0"
 
@@ -514,7 +514,7 @@ version = "0.2.0"
 deps = ["Markdown", "OrderedCollections"]
 git-tree-sha1 = "c14e0176df5e89037acffebc175327f5bda6152f"
 repo-rev = "4ae6cd023b1db2a692d8c0612e989d7a02a0f661"
-repo-url = "/home/niko/github/nsiccha/HTMX.jl"
+repo-url = "https://github.com/nsiccha/HTMX.jl"
 uuid = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
 version = "1.1.0"
 
@@ -522,7 +522,7 @@ version = "1.1.0"
 deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "LazyArtifacts", "LibGit2", "Random", "Sockets", "Tables"]
 git-tree-sha1 = "37bb3994fb5d063bd6d4d91b46c11379fe004ebd"
 repo-rev = "6ad33d8816c24881dc0eb5978c25b3dd1af05974"
-repo-url = "/home/niko/github/nsiccha/HTMXObjects.jl"
+repo-url = "https://github.com/nsiccha/HTMXObjects.jl"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
 version = "0.1.0"
 weakdeps = ["Treebars"]
@@ -1474,7 +1474,7 @@ version = "0.4.1"
 deps = ["CRC32c", "Dates", "DifferentiationInterface", "Distributions", "DynamicHMC", "ElasticArrays", "FillArrays", "InverseFunctions", "LinearAlgebra", "LogDensityProblems", "LogExpFunctions", "MCMCDiagnosticTools", "Mmap", "OnlineStatsBase", "Pathfinder", "Random", "Serialization", "Statistics", "TSVD", "Treebars"]
 git-tree-sha1 = "44e1ba147a222a961ad37a253f3c60e312aec45c"
 repo-rev = "78e0d8815c0bd6faf65b2ab8b3b48e6ff7b83d22"
-repo-url = "/home/niko/github/nsiccha/WarmupHMC.jl"
+repo-url = "https://github.com/nsiccha/WarmupHMC.jl"
 uuid = "60658175-6863-4866-a322-ab51a11c0cfe"
 version = "0.2.1"
 

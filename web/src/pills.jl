@@ -114,7 +114,7 @@ end
         h.hr(),
 
         h.h4("2. Nested — structural parents with substatus children"),
-        h.p("Bruno pattern: always-running parents with finished/failed/running grandchildren.";
+        h.p("Always-running parents with finished/failed/running grandchildren.";
             class="u-text-sm u-text-muted"),
         nested,
         h.hr(),

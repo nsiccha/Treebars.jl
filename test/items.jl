@@ -2245,7 +2245,7 @@ retries the key (which triggers DO's retry_failed cleanup).
 end
 
 """
-The bruno SimState scenario: many cache-miss keys should not accumulate
+Repeated cache-miss keys should not accumulate
 children in app.__status__ after their tasks finish. The TreebarsExt
 `_default_substatus` now passes transient=true, so finalize_progress!
 (called by the auto-generated @progress wrapper around the property body)
@@ -2253,7 +2253,7 @@ detaches each substatus from the root tree on success.
 """
 @testitem "DO ThreadsafeDict auto-cleans substatus tree" setup=[TreebarsTestFixtures, TreebarsTestImports] tags=[:unit, :do] begin
     let
-    # The bruno SimState scenario: many cache-miss keys should not accumulate
+    # Repeated cache-miss keys should not accumulate
     # children in app.__status__ after their tasks finish. The TreebarsExt
     # `_default_substatus` now passes transient=true, so finalize_progress!
     # (called by the auto-generated @progress wrapper around the property body)

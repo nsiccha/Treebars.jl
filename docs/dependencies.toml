@@ -1,0 +1,15 @@
+[AlgebraOfVega]
+url = "https://github.com/nsiccha/AlgebraOfVega.jl"
+rev = "f96a064557589494d2a1b6ae75c16449758009fb"
+
+[HTMXObjects]
+url = "https://github.com/nsiccha/HTMXObjects.jl"
+rev = "0dce4099357c224236ca9b9a2f7d2dfd0e3334b7"
+
+[DynamicObjects]
+url = "https://github.com/nsiccha/DynamicObjects.jl"
+rev = "fc41273bce8b3aaf736bb0b23c36c97e773a1c7c"
+
+[HTMX]
+url = "https://github.com/nsiccha/HTMX.jl"
+rev = "0b8dc2f94e879bf31237bd28e751cf2ebc8d95f6"

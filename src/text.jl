@@ -92,56 +92,22 @@ end
 """
     render_text(node; phase_overview=false) -> String
 
-Render a progress tree as plain text — the node hierarchy with labels, phase
-nesting, counters, running messages and lifecycle state. Works on a finished
-**or** in-flight tree, needs no web stack, and is the intended way to verify
-`@progress` instrumentation offline:
+Render the tree as plain text, during work or after completion. Retain the
+callback's node explicitly: [`with_progress`](@ref) returns the callback's
+value, not automatically its node. A `ProgressNode` has the same text view
+when displayed at the REPL.
 
-```julia
-tree = with_progress(:state; description="probe") do p
-    my_instrumented_function(x; progress=p)
-end
-println(render_text(tree))
-```
+Lines contain a state symbol, description, optional counter and message,
+and duration. Symbols are `·` pending, `▶` running, `✓` finished, `↺` reused,
+`✗` failed and `⊘` skipped. Pending and skipped nodes have no duration;
+a reused node has one only if entered. A pending interrupt request is shown
+until the node terminates.
 
-```
-▶ probe [1.2s]
-├─ ✓ load data [0.4s]
-├─ ▶ fit (3/10) — chain 2 [0.8s]
-│  └─ · warmup
-└─ · plot
-```
-
-Each line is `<state> <description> [(i/N)] [— message] [duration]`, where
-state is `·` pending, `▶` running, `✓` finished, `↺` reused, `✗` failed, or
-`⊘` skipped. Pending and skipped nodes show no duration because they never
-started; a reused node shows one only if it was entered before
-[`reuse_progress!`](@ref) marked it. A
-pending or running node that [`request_interrupt!`](@ref) was called on ends in
-`· interrupt requested` until it terminates.
-
-Nodes are shown exactly as the HTML renderer would show them: bare wrappers
-(no description, message or counter) and `displayed=false` nodes inline,
-hoisting their children up a level, and a node attached under more than one
-parent renders once per tree. So an empty result means the markers really did
-not produce nodes — see [`@progress`](@ref) for why a bare `"label"` inside a
-`begin … end` block is swallowed as a docstring. (A caller that opts into
-`max_finished` on [`htmx_render_children`](@ref) gets an HTML render that
-elides older finished/reused/skipped children; `render_text` always prints every
-node.)
-
-`show(io, MIME"text/plain"(), node)` renders the same thing, so a
-`ProgressNode` displays as its tree at the REPL and under `@show`.
-
-Returns `"(no progress tree)"` for `nothing`, matching the no-op-on-`nothing`
-convention of the lifecycle functions.
-
-Set `phase_overview=true` to prepend the per-plan phase counts from
-[`phase_overview`](@ref); a plan declared inside another plan's phase is
-indented under it and named after that phase. `phase_overview=:top` shows only
-the outermost plans. `phase_overview=:collapsed` shows what the HTML view shows
-before a viewer opens anything: outermost plans in full, and each plan nested
-directly in them as one `▸ <caption>` line. The ordinary tree follows in full.
+Bare wrappers and `displayed=false` nodes inline their children. Shared nodes
+appear once per rendering. Every retained node is printed, without the HTML
+renderer's optional history elision. `phase_overview=true` adds plan counts;
+`:top` selects outermost plans and `:collapsed` is accepted for consistency
+with HTML. Return `"(no progress tree)"` for `nothing`.
 """
 function render_text(node::ProgressNode; phase_overview::Union{Bool,Symbol}=false)
     sprint() do io

@@ -2,14 +2,6 @@
 
 using Dates: Millisecond, Second, Minute, Hour, value
 
-"""
-    short_duration(dt::Union{Dates.CompoundPeriod, Dates.Period}) -> String
-
-Human-friendly duration string. Sub-minute durations render as a single
-one-decimal-second value (`"0.6s"`, `"2.7s"`, `"13.9s"`, `"13s"`); sub-100ms
-keep millisecond precision (`"47ms"`); minute-and-up join the two most
-significant canonical parts (`"1m 30s"`, `"1h 1m"`).
-"""
 _short_period(p::Hour)   = "$(value(p))h"
 _short_period(p::Minute) = "$(value(p))m"
 _short_period(p::Second) = "$(value(p))s"
@@ -27,6 +19,14 @@ function _short_subminute(ms)
     endswith(str, ".0") ? "$(str[1:end-2])s" : "$(str)s"
 end
 
+"""
+    short_duration(dt::Union{Dates.CompoundPeriod, Dates.Period}) -> String
+
+Format a duration using seconds below a minute and the two most significant
+canonical parts for longer durations. Subsecond values below 100 milliseconds
+retain millisecond precision; longer subminute values use tenths of a second,
+truncated rather than rounded.
+"""
 function short_duration(dt)
     cp = canonicalize(dt)
     parts = cp.periods
@@ -63,31 +63,15 @@ round2(x::String) = x
 """
     short_string(x; sigdigits=2) -> String
 
-Compact string form for progress display:
+Format values for progress messages. Numbers use significant digits and
+abbreviations at large magnitudes, with the same rules for integers and
+reals. Negative values retain their sign. Below abbreviation thresholds,
+integers are unchanged. Non-finite values pass through.
 
-- Reals and Integers alike are abbreviated with `k`/`M`/`G`/`T`/`P`/`E` suffixes
-  once `abs(x)` reaches the corresponding threshold (`1_500_000 → "1.5M"`,
-  `72000.0 → "72k"`, `-72000.0 → "-72k"`, `1e12 → "1.0T"`). The same numeric
-  value renders identically whatever its type, and `-x` always renders as `x`
-  with a leading `"-"`.
-- Below `1e3` a Real is rounded to `sigdigits` significant digits (the default 2
-  is [`round2`](@ref)); an Integer renders as-is. A trailing `".0"` is trimmed
-  once it is not one of those digits (`12.0 → "12"` but `1.0 → "1.0"`, and
-  `12.0 → "12.0"` at `sigdigits=3`). Non-finite Reals pass through.
-- `sigdigits` sets the precision of a suffixed mantissa the same way
-  (`short_string(123_456.0; sigdigits=4) == "123.5k"`, Integers included). It
-  must be positive. Numbers, vectors, pairs, named tuples and a wrapped
-  [`Fraction`](@ref) take it; containers pass it on to each element whose own
-  method takes it and render any other element with its plain method.
-- Thresholds key off the *raw* value, so rounding may carry a mantissa up to
-  `"1000"` (`999.0 → "1000"`, `999_999 → "1000k"`). Magnitudes past the largest
-  suffix (`≥ 1e21`, BigInt only) render un-suffixed.
-- Vectors of length > 7 are summarized as `[first 3, ..., last 3]`.
-- Pairs render as `"k => v"`; named tuples as `"(;k=v, …)"`.
-- A wrapped [`Fraction`](@ref) renders as a percentage.
-
-Extend with package-specific methods in consuming packages; accept a
-`sigdigits` keyword for it to reach your method.
+Containers forward `sigdigits` to supported elements. Long vectors show their
+first and last elements; pairs and named tuples retain keys. A [`Fraction`](@ref)
+formats as a percentage. `sigdigits` must be positive. Extend this function
+in a consuming package for domain-specific values.
 """
 short_string(x) = string(x)
 

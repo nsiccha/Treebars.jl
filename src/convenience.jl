@@ -2,26 +2,15 @@
     with_progress(f, kind::Symbol[, N]; description="Running...", kwargs...)
     with_progress(f, parent::ProgressNode[, N]; description="Running...", transient=false, kwargs...)
 
-Initialize progress, call `f(progress_node)`, finalize on completion or fail on error.
-Returns `f`'s value, not the node.
+Initialize a node, call `f(node)`, and finalize it on completion or fail it on
+error. Return the callback's value. Return the node explicitly if the caller
+needs to inspect it afterwards.
 
-The arguments are those of [`initialize_progress!`](@ref): `N` is the counter
-total, positionally or as `N=` (an `Integer` for a determinate counter, `nothing`
-or no total for an indeterminate node), and `transient=true` detaches the child
-from `parent` once it finishes. `parent=nothing` disables progress: `f` receives
-`nothing` and every lifecycle call on it is a no-op.
-
-```julia
-with_progress(parent, length(draws); description="Draws") do p
-    for d in draws
-        simulate(d)
-        update_progress!(p, IncrementBy(1))
-    end
-end
-with_progress(parent; description="Pathfinder", transient=true) do p
-    update_progress!(p, "iteration 3")
-end
-```
+Arguments follow [`initialize_progress!`](@ref). `N` is a counter total,
+passed positionally or as a keyword, not both. `transient=true` detaches a
+finished child; a failed child remains. With `parent=nothing`, the callback
+receives `nothing` and still runs normally. Use [`update_progress!`](@ref)
+inside the callback to report a counter position or message.
 """
 function with_progress(f, args...; kwargs...)
     progress = initialize_progress!(args...; kwargs...)
@@ -57,22 +46,11 @@ end
 """
     @with_progress phase body
 
-Per-phase sandwich: start the (prepared, pending) `phase` node, run `body`,
-then finalize — calling `fail_progress!(phase, err)` and rethrowing on
-exception. Inline expansion (no closure), so `return`, `break`, `continue`,
-local-variable access, and early exits behave as in the surrounding scope.
-
-Companion to [`prepare_progress!`](@ref). Use when the set of phases is
-data-driven and the static `@progress "label" begin … end` form doesn't apply:
-
-```julia
-phases = [prepare_progress!(root; description=string(k)) for k in keys(chain)]
-for (spec, phase) in zip(chain, phases)
-    @with_progress phase compute(spec)
-end
-```
-
-See also [`with_prepared_progress`](@ref) for the HOF form.
+Start a prepared `phase`, run `body`, and finalize it on completion. On an
+exception, fail the phase and rethrow. Inline expansion preserves `return`,
+`break`, `continue` and local-variable access in the surrounding scope.
+Use within [`with_prepared_phases`](@ref) so unentered phases are closed too.
+See [`with_prepared_progress`](@ref) for the function form.
 """
 macro with_progress(phase, body)
     _phase_sandwich_ast(esc(phase), esc(body))
@@ -81,21 +59,9 @@ end
 """
     with_prepared_progress(f, phase)
 
-HOF form of [`@with_progress`](@ref). Starts the (prepared, pending) `phase`
-node, calls `f(phase)`, and finalizes — with `fail_progress!(phase, err)` and
-rethrow on exception. Returns `f`'s value.
-
-Pairs with [`prepare_progress!`](@ref): prepare all phases up front so they
-appear as pending siblings, then run each one inside `with_prepared_progress`:
-
-```julia
-phases = [prepare_progress!(root; description=string(k)) for k in keys(chain)]
-vals = map(pairs(chain), phases) do ((_, spec), phase)
-    with_prepared_progress(phase) do _
-        compute(spec)
-    end
-end
-```
+Start a prepared phase, call `f(phase)`, and finalize on completion or fail
+and rethrow on error. Return the callback's value. Pair with
+[`with_prepared_phases`](@ref), which owns cleanup of unentered phases.
 """
 function with_prepared_progress(f, phase)
     start_progress!(phase)
@@ -112,45 +78,15 @@ end
 """
     with_prepared_phases(f, parent, descriptions; kwargs...)
 
-Bulk-prepare a set of pending phase nodes under `parent`, pass them to `f`,
-and clean up on exception.
+Prepare pending children and call `f(phases)`. An iterable supplies labels;
+a named tuple preserves its keys and uses string values as labels, otherwise
+the key's string. Keywords, including `N` and `transient`, pass to each
+[`prepare_progress!`](@ref) call. Return the callback's value.
 
-`descriptions` may be:
-
-- an iterable of description strings (e.g. `Vector{String}` or `Tuple`) —
-  `phases` follows the iterable's `map` shape, with `ProgressNode` values.
-- a `NamedTuple` — `phases` is a `NamedTuple` with the same keys and
-  `ProgressNode` values. The per-phase description is the NT value if it is
-  an `AbstractString`, otherwise `string(key)` — so `NamedTuple`s whose values
-  carry non-string metadata (symbols, specs, etc.) still produce sensible
-  labels.
-
-If `f(phases)` throws, the phase that was `is_running` is failed via
-`fail_progress!(p, err)` before the exception rethrows, so user code never has
-to guard the prepare / consume gap manually. Phases still `is_pending` at any
-exit — a throw *or* an early `return` out of `f` — were never entered, and are
-terminated as `is_skipped` rather than left dangling pending or blamed for an
-error they never saw.
-
-Extra `kwargs...` are forwarded to each [`prepare_progress!`](@ref) call
-(e.g. `transient=true`, `N=100`).
-
-See also [`@with_progress`](@ref) and [`with_prepared_progress`](@ref) for
-running individual prepared phases.
-
-```julia
-# Data-driven chain. Keys carry structure; values carry specs.
-chain = (parse=:parse, transform=:transform, wrap=:wrap, brmi=:brmi)
-
-vals = with_prepared_phases(__status__, chain) do phases
-    # phases.parse, phases.transform, … are pending ProgressNodes.
-    map(chain, phases) do spec, phase
-        with_prepared_progress(phase) do _
-            getproperty(r, spec)
-        end
-    end
-end
-```
+Enter each reached phase through [`with_prepared_progress`](@ref) or
+[`@with_progress`](@ref). On every exit, pending phases become skipped. On
+error, running phases are failed before the exception is rethrown.
+Repeated plans contribute counts to [`phase_overview`](@ref).
 """
 function with_prepared_phases(f, parent, descriptions; kwargs...)
     labels = map(string, descriptions)
@@ -195,43 +131,19 @@ end
 """
     progress_map(f, parent, itrs...; description="Running...", transient=false, kwargs...)
 
-Like `map(f, itrs...)`, but renders a **determinate progress bar** under
-`parent` for the whole map and gives each element its own child node beneath
-that bar, passing it to `f` as the first argument: `f(child, xs...)`. Returns
-the mapped collection. Multiple iterables zip like `map`.
+Map the iterables, passing a progress child before each item's arguments:
+`f(child, xs...)`. Return the mapped collection. The parent owns a map counter;
+`description` labels that counter and `transient` controls its lifetime.
+Iterables without a known length have an indeterminate counter.
 
-The loop (bar) node counts `0 … length` and advances by one as each element
-finishes; `description` is its label and `transient` its lifetime. When the
-iterables have no length (e.g. a bare generator) the loop node is indeterminate
-(no bar) but still brackets the per-element children.
+Per-item children start without labels; give them a message or nested work.
+Keywords pass to their [`initialize_progress!`](@ref) calls. Report into the
+callback's `child`, not an enclosing macro's `__progress__`.
+With `parent=nothing`, the map still runs and children are `nothing`.
 
-Each per-element `child` is created **label-less** so it stays out of the way
-until `f` gives it content (an empty child auto-inlines at render): report into
-it with `update_progress!(child, "msg")`, a nested `@progress child …`, etc.
-`kwargs` forward to each per-element [`initialize_progress!`](@ref).
-
-`parent` is an explicit progress node. Inside a `@progress` block, pass
-`__progress__` (the walker rewrites it to the enclosing node). Outside a
-`@progress` block, pass any node, or `nothing` to disable progress (then both
-the loop node and `child` are `nothing`, all lifecycle ops no-op).
-
-Inside `f`, report sub-progress into the passed `child` — e.g.
-`@progress child for … end`, `with_progress(child, …)`, or
-`update_progress!(child, …)` — NOT `__progress__` (which refers to the outer
-node, not the per-element child).
-
-```julia
-progress_map(__progress__, chains) do child, c
-    @fetch!(child, c.df)
-end
-```
-
-The `@progress [label] map(itrs...) do args… end` sugar lowers to this, threading
-the per-element `child` as `__progress__` for the do-body (see [`@progress`](@ref)).
-A keyword block on that `map` call (`map(itrs...; kw...)`) keeps its plain-`map`
-meaning: it goes to the underlying `map`, so an empty `;` or an empty splat runs
-and a real keyword is `map`'s own `MethodError`. It does not reach the children;
-pass child `kwargs` through this function form instead.
+The macro form `@progress [label] map(itrs...) do xs...` supplies the child
+as its body's `__progress__`. Keywords on that `map` retain ordinary Julia
+`map` semantics; use the function form for child keywords.
 """
 progress_map(f, parent, itrs...; kwargs...) = _progress_map(f, parent, itrs, (;); kwargs...)
 
@@ -1163,79 +1075,27 @@ function _emit_phases(phases, ctx)
 end
 
 """
-    @progress body
-    @progress "label" body
-    @progress backend body
-    @progress backend "label" body
+    @progress [backend_or_node] [label] body
 
-Wrap `body` with automatic progress tracking. Supports:
+Instrument a loop, comprehension, map, block or expression while preserving
+its result. With no explicit backend or node, use `Treebars.BACKEND[]`, whose
+default `nothing` disables progress.
 
-- **for loops** — iterable progress with a counter:
-  `@progress for i in 1:N … end` or `@progress "Sampling" for i in 1:N … end`
+A standalone `@progress "label"` inside a block marks a phase. All markers
+are prepared up front; a phase finishes at the next marker or block exit.
+Unentered phases become skipped. A phase that throws becomes failed and the
+exception is rethrown. Labels may be literal or interpolated strings, or
+conditionals choosing strings, evaluated before the plan begins.
 
-- **begin blocks with phase markers** — `@progress "label"` as a direct statement
-  of a `begin` block acts as a phase marker. Statements following a marker run
-  under that phase. All labeled phases are pre-enumerated as pending children
-  so the whole pipeline is visible from the outset:
+Within the macro body, `__progress__` denotes the active node. Plain `for`
+and `Threads.@threads for` loops inside it become counters too; nested loop
+counters are transient. Comprehensions and maps require explicit wrapping.
+The map form gives each item its own child. Lazy generators and filtered or
+multidimensional comprehensions are not supported as wrapped counters.
 
-  ```julia
-  @progress "Pipeline" begin
-      @progress "Load"      # marker — "Load" starts here
-      x = load()
-      @progress "Train"     # "Load" finishes, "Train" starts
-      for i in 1:N; train(i); end
-      @progress "Eval"
-      evaluate(x)
-  end
-  ```
-
-  Each phase finishes at the next marker and the last one when the block ends,
-  also when the block runs on a node it was given (`@progress node begin … end`)
-  that the caller goes on using.
-
-  Plain `for` / `Threads.@threads for` loops *inside* the block — at any depth,
-  including nested in `if` / `while` / another `for` — automatically become
-  determinate counter children of their enclosing node (a counter nested in a
-  loop body is transient: visible while running, detached when finished). Name
-  one with `@progress "label" for`, leave one plain with `@progress nothing
-  for`. Comprehensions, `map`, and `while` loops stay plain unless wrapped
-  explicitly. The default counter label is `for <vars> in <collection>` in full
-  (or `for <vars>` when that exceeds 60 characters) — never clipped. To keep
-  phases and explicit forms but leave every unmarked loop plain, use
-  [`@progress_scope`](@ref) instead.
-
-  A marker's label is a string literal, plain or interpolated, or a conditional
-  choosing between string literals (a ternary, or an `if` / `elseif` / `else`
-  chain whose every branch is a string). Any other one-argument `@progress x`
-  in the block — a name, a call, an index — would do nothing, so it is an error
-  at macro expansion that names the interpolated form for a computed label:
-
-  ```julia
-  @progress "Fit chain \$(c)"                   # interpolated label
-  @progress fast ? "Quick fit" : "Full fit"    # conditional label
-  @progress "\$(label_for(c))"                  # a label computed by any expression
-  ```
-
-- **any other labeled expression** — wrapped as an indeterminate spinner child.
-
-Inside the body, `__progress__` names the active node. A label (a marker's or a
-labeled form's) and a loop's iterator are evaluated once, before their own node
-exists, so there `__progress__` names the node that one is created under — for
-phase markers, the node their phases are prepared under.
-
-The `backend` argument is only accepted at the outermost call (defaults to
-`Treebars.BACKEND[]`). Nested `@progress` calls use the enclosing progress node —
-or an explicit one, `@progress node body`, mirroring [`@phases`](@ref).
-
-**Nested calls may be written module-qualified.** The walker rewrites nested
-`@progress` / [`@phases`](@ref) by matching the macro head in SOURCE, and accepts
-`@progress`, `Treebars.@progress`, and any path ending in `Treebars`
-(`DynamicObjects.Treebars.@progress` — the spelling available to a consumer that
-only did `using DynamicObjects`, whose own `@progress` is an unrelated LHS
-parse-marker). Reaching it through a different alias is NOT recognised: import it
-instead, with `using Treebars: @progress` (or `using DynamicObjects.Treebars:
-@progress`). A marker whose head the walker cannot see expands as a standalone
-call and errors, naming this cause.
+Nested `@progress`, `Treebars.@progress` and longer paths ending in Treebars
+are recognized; arbitrary aliases are not. Bare strings are not phase
+markers. Use [`with_progress`](@ref) to pass a node to an ordinary function.
 """
 macro progress(args...)
     backend, label, body = _parse_toplevel_args(args)
@@ -1404,51 +1264,14 @@ end
     @phases body
     @phases node body
 
-Auto-instrument **each top-level statement** of `body` as its own pre-enumerated,
-timed progress phase — as if a `@progress "<shortened source>"` phase marker were
-inserted before every statement. `body` is a `begin … end` block or a `for` /
-`Threads.@threads for` loop; in the loop forms each statement becomes a
-per-iteration phase under the iteration counter. Reach for it to profile a
-sequence/loop body and see which statement dominates.
+Instrument each top-level statement of a block or loop body as a prepared
+phase, labeled with shortened statement source. Compound statements remain
+one phase. The node form is self-contained; the body-only form uses the active
+node inside [`@progress`](@ref), or `Treebars.BACKEND[]` when standalone.
 
-Two forms:
-
-- `@phases body` — drives the **active** progress node. Only meaningful inside an
-  enclosing `@progress` block (whose walker supplies the active node). Used
-  standalone it drives `BACKEND[]`, so it is a graceful no-op when progress is
-  disabled.
-- `@phases node body` — drives an explicit `ProgressNode` expression (`p`,
-  `__status__`, …). Self-contained; works anywhere. Mirrors the
-  `@progress <node> body` node form.
-
-```julia
-@progress "fit" for subject in subjects
-    @phases begin
-        data  = load(subject)     # phase "data = load(subject)"
-        model = build(data)       # phase "model = build(data)"   (data visible)
-        fit!(model)               # phase "fit!(model)"
-    end
-end
-
-# Explicit node, self-contained:
-with_progress(:state; description="pipeline") do p
-    @phases p begin
-        step_a()
-        step_b()
-    end
-end
-```
-
-Phase labels are the shortened statement source (whitespace collapsed, truncated).
-Compound statements (`if` / nested `for` / blocks) stay **one** phase each — the
-split is over top-level statements only, not recursive.
-
-!!! note
-    All statements run inside the phase machinery's single `try` scope, so
-    assignments stay mutually visible **across** phases but do not leak **past**
-    the `@phases` block. Fine for loop bodies (loop-scoped locals) and
-    side-effecting sequences; if post-block code needs a binding, set it outside
-    the `@phases` block (or use plain `@progress "label"` markers).
+Statements share a scope across phases, but assignments do not escape the
+macro's `try` scope. Define a binding outside the block if it is needed later.
+Use explicit phase markers when labels should describe tasks rather than code.
 """
 macro phases(args...)
     ctx = _ctx(:($(BACKEND)[]), false)
