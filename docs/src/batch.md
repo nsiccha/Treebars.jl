@@ -1,6 +1,6 @@
 # Batch processing
 
-This example computes the mean of each sample in a batch. Each sample is a
+This example computes the mean of each sample in a batch. Each synthetic sample is a
 named collection of dimensionless measurements, with a flag that requests an
 export record. The data are defined below; no file, service or fitted model
 is needed. One sample has a cached mean, calculated before the tracked run to
@@ -131,7 +131,7 @@ docs_figure(figure, "batch-phases"; # hide
 Blue bars count work that ran; orange bars count an existing result that was
 reused; grey bars count work that was bypassed. The values come from the
 executed overview, not a separate description of the intended run. Compare
-the Summarize and Export rows with the cache and export flags in the input.
+the Summarize and Export groups with the cache and export flags in the input.
 No pending, running or failed phase is expected after this successful call;
 the diagnostics below check those states instead of omitting them silently.
 
