@@ -37,7 +37,7 @@ onBeforeUnmount(() => {
 
 <style scoped>
 .docs-figure { margin: 24px 0; min-width: 0; color: #0b0b0b; }
-:global(.dark) .docs-figure { color: var(--vp-c-text-1); }
+:global(.dark .docs-figure) { color: var(--vp-c-text-1); }
 figcaption { margin-top: 12px; font-size: 14px; line-height: 1.6; }
 [role="alert"] { color: var(--vp-c-danger-1); }
 </style>

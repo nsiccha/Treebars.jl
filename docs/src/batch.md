@@ -116,7 +116,9 @@ figure = data(counts) *
     mapping(:phase => "Phase", :count => "Count (sample phases)";
             color=:state => "State", dodge_x=:state) * visual(BarPlot) *
     config(width=480, height=240,
-        config=(; axisX=(; labelAngle=0), axisY=(; tickMinStep=1)),
+        config=(; axis=(; labelFontSize=13, titleFontSize=14),
+            legend=(; labelFontSize=13, titleFontSize=14),
+            axisX=(; labelAngle=0), axisY=(; tickMinStep=1)),
         scales=scales(
         X=(; categories=[phase.label for phase in overview.phases]),
         Y=(; zero=true),
