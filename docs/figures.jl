@@ -17,7 +17,7 @@ function docs_figure(spec, id; caption)
     DocsFigure("figures/$id.json", id, caption)
 end
 
-function Base.show(io::IO, ::MIME"text/html", figure::DocsFigure)
+function Base.show(io::IO, ::MIME"text/markdown", figure::DocsFigure)
     escape(s) = replace(s, '&' => "&amp;", '"' => "&quot;", '<' => "&lt;", '>' => "&gt;")
     print(io, "<VegaFigure src=\"", escape(figure.src), "\" plot-id=\"",
         escape(figure.id), "\" caption=\"", escape(figure.caption), "\" />")

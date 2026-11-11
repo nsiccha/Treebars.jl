@@ -98,7 +98,7 @@ a larger dataset.
 
 ## Phase counts
 
-The overview aggregates the declared plan. Its rows preserve the distinction
+The overview aggregates the declared plan. It preserves the distinction
 between finished, reused and skipped work instead of treating every terminal
 phase as an executed phase.
 
@@ -108,18 +108,21 @@ overview = only(phase_overview(run.tree))
 states = [:finished, :reused, :skipped]
 counts = [(phase=phase.label, state=string(state), count=getproperty(phase, state))
           for phase in overview.phases for state in states]
-counts
+nothing # hide
 ```
 
 ```@example batch
 figure = data(counts) *
     mapping(:phase => "Phase", :count => "Count (sample phases)";
-            color=:state => "State", dodge=:state) * visual(BarPlot) *
-    config(width=480, height=240, scales=scales(
+            color=:state => "State", dodge_x=:state) * visual(BarPlot) *
+    config(width=480, height=240,
+        config=(; axisX=(; labelAngle=0), axisY=(; tickMinStep=1)),
+        scales=scales(
+        X=(; categories=[phase.label for phase in overview.phases]),
         Y=(; zero=true),
         Color=(; categories=string.(states), palette=["#2a78d6", "#eb6834", "#777777"])))
 include(joinpath(pkgdir(Treebars), "docs", "figures.jl")) # hide
-docs_figure(figure, "batch-phases";
+docs_figure(figure, "batch-phases"; # hide
     caption="Finished, reused and skipped sample phases. Counts come from this run.") # hide
 ```
 

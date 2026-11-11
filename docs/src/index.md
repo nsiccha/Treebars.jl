@@ -9,7 +9,8 @@ julia -e 'using Pkg; Pkg.add(url="https://github.com/nsiccha/Treebars.jl")'
 ```@example start
 using Treebars
 values = [2, 4, 6]
-result, tree = with_progress(:state, length(values); description="Squares") do p
+result, tree = with_progress(:state, length(values);
+                             description="Squares") do p
     result = map(enumerate(values)) do (i, x)
         value = x^2
         update_progress!(p, i)
