@@ -819,4 +819,3 @@ htmx_treebar_script() = h.script(Raw("""
     }
 })();
 """))
-

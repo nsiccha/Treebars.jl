@@ -268,4 +268,3 @@ htmx_treebar_styles() = h.style(Raw("""
 .tb-input-narrow { max-width: 6rem; }
 .tb-input-narrow-7 { max-width: 7rem; }
 """))
-
