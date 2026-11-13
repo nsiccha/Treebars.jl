@@ -29,6 +29,7 @@ function round2 end
 function short_string end
 include("formatting.jl")
 include("text.jl")
+include("tracking.jl")
 include("snapshot.jl")
 include("mirror.jl")
 include("convenience.jl")

@@ -33,13 +33,98 @@ mutable struct ProgressSnapshot
     # Held while writing; a changing thread only `trylock`s it, so it never
     # waits for another thread's write.
     const lock::ReentrantLock
+    const spin::Threads.SpinLock
     const wake::Base.Event
     @atomic last_ns::UInt64
     @atomic open::Bool
 end
 
-# The open snapshots, replaced (never mutated) under `lock`, so the change hook
-# reads them with one atomic load and no lock.
+# One reference per observed parent edge (plus the root's reference). Shared
+# subgraphs stay observed until their last edge goes away. No node pointer is
+# retained here, so detached transient work is not kept alive by observation.
+mutable struct _SnapshotTrack <: _ProgressTrack
+    const snapshot::ProgressSnapshot
+    refs::Int # snapshot.spin; children locks serialize adoption and removal
+end
+_track_owner(t::_SnapshotTrack) = t.snapshot
+_snapshot_track_for(node, s) = _find_track(node, s, _SnapshotTrack)
+_snapshot_children(node) = node.children isa ThreadsafeSet ? _mirrored_children(node) : collect(node.children)
+
+function _snapshot_append!(s::ProgressSnapshot, node::ProgressNode)
+    held = _lock_children(node)
+    try
+        (@atomic s.open) || return nothing
+        t = _snapshot_track_for(node, s)
+        if isnothing(t)
+            t = _SnapshotTrack(s, 1)
+            node.impl isa StateProgress && _add_track!(node.impl, t)
+            node.children isa ThreadsafeSet && _add_track!(node.children, t)
+            for child in _snapshot_children(node)
+                _snapshot_append!(s, child)
+            end
+        else
+            @lock s.spin t.refs += 1
+        end
+    finally
+        _unlock_children(held)
+    end
+    nothing
+end
+_snapshot_append!(::ProgressSnapshot, ::Any) = nothing
+
+function _snapshot_remove!(s::ProgressSnapshot, node::ProgressNode)
+    held = _lock_children(node)
+    try
+        t = _snapshot_track_for(node, s)
+        isnothing(t) && return nothing
+        gone = @lock s.spin (t.refs -= 1; t.refs == 0)
+        gone || return nothing
+        node.impl isa StateProgress && _remove_track!(node.impl, t)
+        node.children isa ThreadsafeSet && _remove_track!(node.children, t)
+        for child in _snapshot_children(node)
+            _snapshot_remove!(s, child)
+        end
+    finally
+        _unlock_children(held)
+    end
+    nothing
+end
+_snapshot_remove!(::ProgressSnapshot, ::Any) = nothing
+
+_tracked_append(t::_SnapshotTrack, x) = _snapshot_append!(t.snapshot, x)
+_tracked_remove(t::_SnapshotTrack, x) = _snapshot_remove!(t.snapshot, x)
+@inline function _track_changed(t::_SnapshotTrack)
+    _track_changed(t, time_ns())
+end
+@inline function _track_changed(t::_SnapshotTrack, tick::UInt64)
+    s = t.snapshot
+    _is_due(s, tick) && _write_due_snapshot(s)
+    nothing
+end
+
+function _unwatch_snapshot(s::ProgressSnapshot)
+    seen = Base.IdSet{ProgressNode}()
+    stack = ProgressNode[s.node]
+    while !isempty(stack)
+        node = pop!(stack)
+        _first_seen!(seen, node) || continue
+        held = _lock_children(node)
+        try
+            t = _snapshot_track_for(node, s)
+            if !isnothing(t)
+                node.impl isa StateProgress && _remove_track!(node.impl, t)
+                node.children isa ThreadsafeSet && _remove_track!(node.children, t)
+            end
+            append!(stack, (c for c in _snapshot_children(node) if c isa ProgressNode))
+        finally
+            _unlock_children(held)
+        end
+    end
+    nothing
+end
+
+# The open snapshots for exit-time cleanup only. Counter changes consult the
+# tracks on their own node, never this process-wide registry.
 mutable struct _SnapshotRegistry
     @atomic open::Vector{ProgressSnapshot}
     const lock::ReentrantLock
@@ -54,32 +139,21 @@ _register!(s::ProgressSnapshot) = lock(_SNAPSHOTS.lock) do
 end
 function _unregister!(s::ProgressSnapshot)
     @atomic s.open = false
+    _unwatch_snapshot(s)
     lock(_SNAPSHOTS.lock) do
         @atomic _SNAPSHOTS.open = filter(!=(s), _SNAPSHOTS.open)
     end
+    notify(s.wake)
     nothing
 end
 
-# Called after every change to a tree, outside any node lock: rendering takes
-# node locks one at a time, so a caller holding one could deadlock against a
-# thread rendering. With no snapshot open this is one atomic load.
-@inline function _snapshot_changed()
-    open = @atomic _SNAPSHOTS.open
-    isempty(open) || _write_due_snapshots(open)
-    nothing
-end
-
-@noinline function _write_due_snapshots(open)
-    t = time_ns()
-    for s in open
-        _is_due(s, t) || continue
-        # Another thread writing this snapshot right now writes this change too.
-        trylock(s.lock) || continue
-        try
-            (@atomic s.open) && _is_due(s, time_ns()) && _write_or_stop(s, "live")
-        finally
-            unlock(s.lock)
-        end
+@noinline function _write_due_snapshot(s::ProgressSnapshot)
+    # Another thread writing this snapshot right now writes this change too.
+    trylock(s.lock) || return nothing
+    try
+        (@atomic s.open) && _is_due(s, time_ns()) && _write_or_stop(s, "live")
+    finally
+        unlock(s.lock)
     end
 end
 
@@ -180,9 +254,17 @@ function snapshot_progress(node::ProgressNode, path::AbstractString;
     path = abspath(path)
     tmp = joinpath(dirname(path), ".$(basename(path)).$(getpid())-$(Threads.atomic_add!(_SNAPSHOT_IDS, 1)).tmp")
     s = ProgressSnapshot(node, path, tmp, Float64(interval), round(UInt64, interval * 1e9),
-        phase_overview, ReentrantLock(), Base.Event(true), time_ns(), true)
-    _write_snapshot(s, "live")
-    _register!(s)
+        phase_overview, ReentrantLock(), Threads.SpinLock(), Base.Event(true), time_ns(), true)
+    lock(s.lock) do
+        try
+            _snapshot_append!(s, node)
+            _write_snapshot(s, "live")
+            _register!(s)
+        catch
+            _unregister!(s)
+            rethrow()
+        end
+    end
     errormonitor(Threads.@spawn :interactive _snapshot_loop(s))
     s
 end
