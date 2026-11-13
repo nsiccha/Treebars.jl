@@ -9,7 +9,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
     htmx_render_board, htmx_ws_render_board, ws_board,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_reused, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
-    _flatten_displayed_children, _shows_interrupt_request
+    _displayed_children, _DisplayTraversal, _shows_interrupt_request
 import Treebars: TreebarTexts, _EN_TEXTS, _lang_texts, _fill_text, _duration_text, _note_text, _isempty_text
 import Treebars: add_child!
 import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
@@ -90,27 +90,52 @@ function _status_string(sp::StateProgress)
     "finished"
 end
 
+# Capture mutable state under its lock, then build HTML after releasing it.
+# Duration and ETA share one clock reading and are reused in text and attrs.
+struct _RenderState
+    description::String
+    N::Union{Int,Nothing}
+    i::Int
+    message::Union{String,Treebars.TreebarNote}
+    status::String
+    started::Bool
+    elapsed::Millisecond
+    eta::Union{Nothing,Millisecond}
+    interrupt::Bool
+end
+
+function _render_state(node::ProgressNode{<:StateProgress})
+    sp = node.impl
+    lock(sp.lock) do
+        elapsed = duration(sp)
+        _RenderState(sp.description, sp.N, sp.i, sp.message, _status_string(sp),
+            !isnothing(sp.started_at), elapsed, Treebars._eta(sp, elapsed),
+            _shows_interrupt_request(node))
+    end
+end
+_render_state(::ProgressNode) = nothing
+
 # Initial textContent for the duration span. Running nodes get a fresh value here
 # but the client-side ticker overwrites every 250ms; finished/failed nodes keep
 # whatever the server rendered (the ticker leaves them alone).
-function _initial_duration_text(sp::StateProgress, t::TreebarTexts)
-    is_pending(sp) && return " — " * t.pending
+function _initial_duration_text(sp::_RenderState, t::TreebarTexts)
+    sp.status == "pending" && return " — " * t.pending
     # A label, never an elapsed figure: a skipped node has no `started_at`, so
     # any duration here would be the 0s that made a bypassed phase read as an
     # instantaneous one.
-    is_skipped(sp) && return " — " * t.skipped
+    sp.status == "skipped" && return " — " * t.skipped
     # Same rule for a phase reused before it was entered: it did no work, so
     # it gets no figure. Entered first, it keeps the time spent finding out.
-    is_reused(sp) && return isnothing(sp.started_at) ? " — " * t.reused :
-        " — " * _fill_text(t.reused_after; elapsed=_duration_text(duration(sp), t))
-    d = _duration_text(duration(sp), t)
-    if is_running(sp)
+    sp.status == "reused" && return !sp.started ? " — " * t.reused :
+        " — " * _fill_text(t.reused_after; elapsed=_duration_text(sp.elapsed, t))
+    d = _duration_text(sp.elapsed, t)
+    if sp.status == "running"
         # A determinate running node (0 < i < N) also gets a live ETA beside the
         # elapsed; the client ticker counts it down between polls (data-eta-ms).
-        e = eta(sp)
+        e = sp.eta
         running = " — " * _fill_text(t.running; elapsed=d)
         isnothing(e) ? running : running * " · " * _fill_text(t.eta; eta=_duration_text(e, t))
-    elseif is_failed(sp)
+    elseif sp.status == "failed"
         " — " * _fill_text(t.failed; elapsed=d)
     else
         " — " * _fill_text(t.done; elapsed=d)
@@ -119,17 +144,17 @@ end
 
 # Duration span. Carries data attrs so the client can tick running nodes locally
 # between server polls instead of waiting for the next render to advance them.
-function _duration_span(sp::StateProgress, t::TreebarTexts)
-    status = _status_string(sp)
+function _duration_span(sp::_RenderState, t::TreebarTexts)
+    status = sp.status
     text = _initial_duration_text(sp, t)
     if status == "pending"
         return h.span(class="treebar-duration", data_treebar_status=status)(text)
     end
-    elapsed_ms = string(Dates.value(Millisecond(duration(sp))))
+    elapsed_ms = string(Dates.value(Millisecond(sp.elapsed)))
     # data-eta-ms is present only for a running determinate node; the client
     # ticker anchors an absolute finish target from it and counts down. Absent
     # → the span ticks up (elapsed) exactly as before.
-    e = eta(sp)
+    e = sp.eta
     if isnothing(e)
         h.span(class="treebar-duration",
             data_treebar_status=status,
@@ -153,1102 +178,8 @@ _freshness_span() = h.span(class="treebar-freshness", hidden=true)()
 _interrupt_span(node::ProgressNode, t::TreebarTexts) =
     _shows_interrupt_request(node) ? h.span(class="treebar-interrupt")(t.interrupt) : ""
 
-# Global stylesheet for treebar components — include via extra_head in htmx()
-htmx_treebar_styles() = h.style(Raw("""
-.treebar-pills { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
-.treebar-pill {
-    display: inline-block;
-    padding: 0.15rem 0.6rem;
-    border-radius: 1rem;
-    font-size: 0.8rem;
-    cursor: pointer;
-    user-select: none;
-    border: 1px solid transparent;
-    transition: opacity 0.15s;
-}
-.treebar-pill-finished {
-    background: color-mix(in srgb, var(--pico-ins-color, #d1fae5) 35%, transparent);
-}
-.treebar-pill-failed {
-    background: color-mix(in srgb, var(--pico-del-color, #fee2e2) 35%, transparent);
-}
-.treebar-pill-pending {
-    background: color-mix(in srgb, var(--pico-muted-color, #ccc) 25%, transparent);
-}
-.treebar-pill-skipped {
-    background: color-mix(in srgb, var(--pico-muted-color, #ccc) 15%, transparent);
-}
-.treebar-pill-reused {
-    background: color-mix(in srgb, var(--pico-ins-color, #d1fae5) 15%, transparent);
-}
-.treebar-pending { opacity: 0.55; }
-.treebar-pending .treebar-progress { opacity: 0.5; }
-/* Dimmer than pending and struck through: the phase is terminal, and the
-   strike is what separates "never ran" from "not yet" at a glance. */
-.treebar-skipped { opacity: 0.45; }
-.treebar-skipped .treebar-description { text-decoration: line-through; }
-/* A success whose output already existed: dimmed like history, but never
-   struck through — unlike skipped, its result is available. */
-.treebar-reused { opacity: 0.7; }
-.treebar-pill:hover { opacity: 0.8; }
-.treebar-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; }
-.treebar-duration { font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-interrupt { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
-.treebar-elided { font-size: 0.85em; font-style: italic; color: var(--pico-muted-color, #888); }
-.treebar-stop { padding: 0.1rem 0.4rem; font-size: 0.7em; float: right; }
-.treebar-node { margin-bottom: 0.25rem; }
-
-/* Polling badge chrome. Each live `.treebar-poller` carries one
-   `.treebar-badge`: a hairline strip plus a panel (pause/play control,
-   poll label, status word, progress bar, elapsed) above the live tree.
-   The panel and tree render EXPANDED by default, so a first-load region —
-   nothing on screen yet — shows progress immediately instead of a bare
-   hairline (snag first-load-polle-9728d9da). Quiet chrome (hairline that
-   expands on hover/focus) is opt-in per poller via `data-chrome="quiet"`
-   (the `chrome=:quiet` kwarg), or automatic for a poller diverted into
-   HTMXObjects' live-refresh reporter (`.htmxo-live-reporter`), where
-   settled content is already on screen and the poller is background
-   progress. Visual constraints (binding): no gradient accents, no glowing
-   shadows, no emoji icons (the pause/play glyphs are text), no lift/scale
-   hover effects, and the polling pulse is gated on
-   `prefers-reduced-motion`. */
-.treebar-poller { position: relative; }
-.treebar-terminal { position: static; }
-.treebar-badge { display: block; padding: 0.3rem 0 0.15rem; }
-.treebar-badge-strip {
-    display: block; height: 2px; border-radius: 1px;
-    background: var(--pico-muted-color, #888);
-    opacity: 0.55;
-}
-/* The pulse says "polling" without moving anything: the strip never changes
-   size or position, and reduced-motion users get the static strip plus the
-   glyph and status text, which carry the same state. A paused poller holds
-   still at low opacity. */
-@media (prefers-reduced-motion: no-preference) {
-    .treebar-poller[data-paused="0"] .treebar-badge-strip {
-        animation: tb-badge-pulse 1.6s ease-in-out infinite;
-    }
-}
-@keyframes tb-badge-pulse { 0%, 100% { opacity: 0.35; } 50% { opacity: 0.8; } }
-.treebar-poller[data-paused="1"] .treebar-badge-strip { opacity: 0.3; }
-/* The quiet panel is CLIPPED when collapsed, never `display: none` — the
-   pause button stays keyboard-focusable, so tabbing to it matches
-   `:focus-within` and expands the badge in the same frame (no
-   invisible-focus trap). The quiet live tree is `display: none` until
-   then: it carries no focusable controls of its own that must stay
-   reachable (pills reappear with it), and a hidden inner still polls and
-   swaps — htmx never checks visibility. The inner rules use the
-   DIRECT-CHILD `>` so expanding an outer poller never auto-expands a
-   nested one (the same nested-poller trap the data-show-* scheme avoids,
-   see comment below). */
-.treebar-badge-panel {
-    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
-}
-.treebar-poller > .treebar-poller-inner { display: block; }
-.treebar-poller[data-chrome="quiet"] .treebar-badge-panel,
-.htmxo-live-reporter .treebar-poller .treebar-badge-panel {
-    max-height: 0; overflow: hidden;
-}
-.treebar-poller[data-chrome="quiet"]:hover .treebar-badge-panel,
-.treebar-poller[data-chrome="quiet"]:focus-within .treebar-badge-panel,
-.htmxo-live-reporter .treebar-poller:hover .treebar-badge-panel,
-.htmxo-live-reporter .treebar-poller:focus-within .treebar-badge-panel { max-height: none; }
-.treebar-poller[data-chrome="quiet"] > .treebar-poller-inner,
-.htmxo-live-reporter .treebar-poller > .treebar-poller-inner { display: none; }
-.treebar-poller[data-chrome="quiet"]:hover > .treebar-poller-inner,
-.treebar-poller[data-chrome="quiet"]:focus-within > .treebar-poller-inner,
-.htmxo-live-reporter .treebar-poller:hover > .treebar-poller-inner,
-.htmxo-live-reporter .treebar-poller:focus-within > .treebar-poller-inner { display: block; }
-.treebar-pause {
-    margin: 0; padding: 0.1rem 0.45rem; font-size: 0.75rem; line-height: 1.4;
-    width: auto; cursor: pointer; flex: none;
-}
-/* The badge label WRAPS, never clips: a poller label is read content, so no
-   max-width / overflow / ellipsis / nowrap here (snag
-   poller-badge-lab-78301564). The panel flex-wraps so the status siblings
-   drop below the label on narrow widths instead of crushing it, and the
-   quiet hover/focus expansion above caps nothing (max-height: none) so a
-   wrapped multi-line label is never cut there either. */
-.treebar-badge-label {
-    font-size: 0.8rem; color: var(--pico-muted-color, #888);
-}
-.treebar-badge-status { font-size: 0.8rem; flex: none; }
-.treebar-badge-bar { width: 6rem; margin: 0; flex: none; }
-.treebar-badge-elapsed { font-size: 0.8rem; color: var(--pico-muted-color, #888); flex: none; }
-/* Freshness (htmx_treebar_script): a live region whose shown state is old
-   says how old, in the `.treebar-freshness` text of its chrome. `stale`
-   stops the polling pulse; `lost` (updates have failed for seconds, not
-   one blip) also marks the strip and the text in the error color, dims the
-   live content, and opens a quiet badge's panel, so the notice is seen
-   without hovering. The text wraps like the badge label; nothing clips. */
-.treebar-freshness { font-size: 0.8rem; color: var(--pico-muted-color, #888); }
-.treebar-freshness[hidden] { display: none; }
-.treebar-poller[data-treebar-freshness] > .treebar-badge > .treebar-badge-strip { animation: none; }
-.treebar-poller[data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-strip {
-    background: var(--pico-del-color, #c62828); opacity: 0.9;
-}
-.treebar-poller[data-treebar-freshness="lost"] > .treebar-badge .treebar-freshness,
-.treebar-board[data-treebar-freshness="lost"] > .treebar-board-header > .treebar-freshness,
-[data-treebar-freshness="lost"] .treebar-ws-frame > .treebar-freshness { color: var(--pico-del-color, #c62828); }
-.treebar-poller[data-treebar-freshness="lost"] > .treebar-poller-inner,
-.treebar-board[data-treebar-freshness="lost"] > .treebar-board-list,
-[data-treebar-freshness="lost"] .treebar-ws-frame > :not(.treebar-freshness) { opacity: 0.55; }
-.treebar-poller[data-chrome="quiet"][data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-panel,
-.htmxo-live-reporter .treebar-poller[data-treebar-freshness="lost"] > .treebar-badge > .treebar-badge-panel { max-height: none; }
-.treebar-children { padding-left: 1rem; margin-left: 0.25rem; border-left: 2px solid color-mix(in srgb, var(--pico-muted-color, #888) 40%, transparent); }
-/* Message-bearing nodes now use the same treebar-node + treebar-header structure
-   as container nodes, so treebar-label/treebar-value/treebar-description classes
-   are no longer emitted. */
-
-/* Pill toggle state lives on the closest scope (.treebar-poller for live polls,
-   .treebar-board-item on a board, .treebar-ws-frame for WebSocket frames,
-   .treebar-children for static one-shot renders). data-show-* values are "0" or
-   "1" rather than "true"/"false" because Cobweb drops attrs whose value is the
-   string "false".
-
-   Visibility is driven through INHERITED custom properties, NOT a descendant
-   combinator (`.treebar-poller[data-show-finished="0"] .treebar-child-finished`).
-   The combinator reached straight through *nested* pollers: an outer poller
-   stuck at "0" kept hiding finished nodes inside a nested poller even after
-   that inner poller's pill flipped it to "1" (the outer match still applied;
-   CSS descendant selectors have no nearest-ancestor-wins rule). Custom
-   properties inherit and the NEAREST definition wins, so each scope governs
-   its own subtree down to the next scope — nested-poller-correct by
-   construction. Only scopes that actually carry the data-show-* attribute set
-   the var, so a scopeless inner .treebar-children (scoped=false inside a
-   poller) is transparent to inheritance: the poller's value passes through. */
-.treebar-poller[data-show-finished="0"], .treebar-board-item[data-show-finished="0"], .treebar-ws-frame[data-show-finished="0"], .treebar-children[data-show-finished="0"] { --tb-finished-display: none; }
-.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-ws-frame[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-display: block; }
-.treebar-poller[data-show-failed="0"], .treebar-board-item[data-show-failed="0"], .treebar-ws-frame[data-show-failed="0"], .treebar-children[data-show-failed="0"] { --tb-failed-display: none; }
-.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-ws-frame[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-display: block; }
-.treebar-poller[data-show-pending="0"], .treebar-board-item[data-show-pending="0"], .treebar-ws-frame[data-show-pending="0"], .treebar-children[data-show-pending="0"] { --tb-pending-display: none; }
-.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-ws-frame[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-display: block; }
-.treebar-poller[data-show-skipped="0"], .treebar-board-item[data-show-skipped="0"], .treebar-ws-frame[data-show-skipped="0"], .treebar-children[data-show-skipped="0"] { --tb-skipped-display: none; }
-.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-ws-frame[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-display: block; }
-.treebar-poller[data-show-reused="0"], .treebar-board-item[data-show-reused="0"], .treebar-ws-frame[data-show-reused="0"], .treebar-children[data-show-reused="0"] { --tb-reused-display: none; }
-.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-ws-frame[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-display: block; }
-.treebar-child-finished { display: var(--tb-finished-display, block); }
-.treebar-child-failed { display: var(--tb-failed-display, block); }
-.treebar-child-pending { display: var(--tb-pending-display, block); }
-.treebar-child-skipped { display: var(--tb-skipped-display, block); }
-.treebar-child-reused { display: var(--tb-reused-display, block); }
-
-/* Active-pill highlight, same nearest-scope-wins inheritance so a nested
-   poller's pills reflect that poller's own toggle, not an ancestor's. */
-.treebar-poller[data-show-finished="1"], .treebar-board-item[data-show-finished="1"], .treebar-ws-frame[data-show-finished="1"], .treebar-children[data-show-finished="1"] { --tb-finished-pill-border: currentColor; }
-.treebar-poller[data-show-failed="1"], .treebar-board-item[data-show-failed="1"], .treebar-ws-frame[data-show-failed="1"], .treebar-children[data-show-failed="1"] { --tb-failed-pill-border: currentColor; }
-.treebar-poller[data-show-pending="1"], .treebar-board-item[data-show-pending="1"], .treebar-ws-frame[data-show-pending="1"], .treebar-children[data-show-pending="1"] { --tb-pending-pill-border: currentColor; }
-.treebar-poller[data-show-skipped="1"], .treebar-board-item[data-show-skipped="1"], .treebar-ws-frame[data-show-skipped="1"], .treebar-children[data-show-skipped="1"] { --tb-skipped-pill-border: currentColor; }
-.treebar-poller[data-show-reused="1"], .treebar-board-item[data-show-reused="1"], .treebar-ws-frame[data-show-reused="1"], .treebar-children[data-show-reused="1"] { --tb-reused-pill-border: currentColor; }
-.treebar-pill-finished { border-color: var(--tb-finished-pill-border, transparent); }
-.treebar-pill-failed { border-color: var(--tb-failed-pill-border, transparent); }
-.treebar-pill-pending { border-color: var(--tb-pending-pill-border, transparent); }
-.treebar-pill-skipped { border-color: var(--tb-skipped-pill-border, transparent); }
-.treebar-pill-reused { border-color: var(--tb-reused-pill-border, transparent); }
-
-/* Keyed board (htmx_render_board). The .treebar-board-item wrapper is never
-   replaced by the client reconciler — only its .treebar-board-item-content —
-   so UI state on it (data-show-* pill toggles above, data-open for the tree)
-   survives updates exactly like the .treebar-poller wrapper does. */
-.treebar-board-header { display: flex; gap: 0.5rem; align-items: baseline; justify-content: space-between; flex-wrap: wrap; margin-bottom: 0.5rem; }
-.treebar-board-header > .treebar-freshness { flex: 1; }
-.treebar-board-count { font-size: 0.85em; color: var(--pico-muted-color, #888); }
-.treebar-phase-overview { margin-block: 0.75rem; }
-.treebar-phase-plan { overflow-x: auto; margin-block: 0.5rem; }
-.treebar-phase-plan table { width: 100%; font-size: 0.85em; }
-.treebar-phase-plan caption { text-align: left; font-weight: 600; padding-block: 0.3rem; }
-.treebar-phase-plan th, .treebar-phase-plan td { padding: 0.3rem 0.5rem; }
-.treebar-phase-plan th { text-align: left; overflow-wrap: anywhere; }
-.treebar-phase-plan th[scope="row"] { overflow-wrap: anywhere; min-width: 8rem; }
-.treebar-phase-plan td { text-align: right; font-variant-numeric: tabular-nums; }
-/* A nested plan is a disclosure inside the plan it is nested in, so each level
-   indents once more; its summary carries the caption, which the table keeps
-   for assistive technology only. */
-.treebar-phase-disclosure {
-    margin: 0.25rem 0 0.25rem 1rem; padding-inline-start: 0.5rem;
-    border-inline-start: 2px solid var(--pico-muted-border-color, #ddd);
-}
-.treebar-phase-disclosure > summary { font-size: 0.85em; font-weight: 600; overflow-wrap: anywhere; cursor: pointer; }
-.treebar-phase-disclosure[open] > summary { margin-bottom: 0.25rem; }
-.treebar-phase-disclosure > .treebar-phase-plan caption {
-    position: absolute; width: 1px; height: 1px; overflow: hidden;
-    clip-path: inset(50%); white-space: nowrap;
-}
-.treebar-phase-overview-controls { display: flex; flex-wrap: wrap; gap: 0.4rem; justify-content: flex-end; }
-.treebar-phase-overview-controls button {
-    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
-    width: auto; cursor: pointer;
-}
-@media (max-width: 600px) {
-    .treebar-phase-plan table, .treebar-phase-plan caption, .treebar-phase-plan tbody { display: block; }
-    .treebar-phase-plan thead { display: none; }
-    .treebar-phase-plan tr { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin-bottom: 0.5rem; }
-    .treebar-phase-plan th[scope="row"] { grid-column: 1 / -1; min-width: 0; }
-    .treebar-phase-plan td { display: flex; flex-direction: column; align-items: flex-start; padding-inline: 0.25rem; }
-    .treebar-phase-plan td::before { content: attr(data-phase-state); font-size: 0.7rem; text-transform: capitalize; overflow-wrap: anywhere; }
-}
-.treebar-board-pause {
-    margin: 0; padding: 0.1rem 0.5rem; font-size: 0.7rem; line-height: 1.4;
-    width: auto; cursor: pointer;
-}
-.treebar-board-list { display: flex; flex-direction: column; gap: 0.4rem; }
-.treebar-board-item {
-    min-width: 0;
-    padding: 0.35rem 0.6rem;
-    border-left: 3px solid color-mix(in srgb, var(--pico-muted-color, #888) 45%, transparent);
-    border-radius: 0.25rem;
-    background: color-mix(in srgb, var(--pico-muted-color, #888) 7%, transparent);
-    transition: opacity 0.3s;
-}
-.treebar-board-item[data-treebar-state="running"] { border-left-color: var(--pico-primary, #1095c1); }
-.treebar-board-item[data-treebar-state="done"] { border-left-color: var(--pico-ins-color, #2e7d32); }
-.treebar-board-item[data-treebar-state="failed"] { border-left-color: var(--pico-del-color, #c62828); }
-/* Queued renders like a pending node: dim, not yet started. */
-.treebar-board-item[data-treebar-state="queued"] { opacity: 0.55; }
-.treebar-board-item.treebar-board-leaving { opacity: 0.45; }
-.treebar-board-item-header { display: flex; gap: 0.5ch; align-items: baseline; flex-wrap: wrap; overflow-wrap: anywhere; }
-.treebar-board-label { font-weight: 600; }
-.treebar-board-meta {
-    display: flex; flex-wrap: wrap; gap: 0 0.9rem; width: 100%;
-    font-size: 0.8em; color: var(--pico-muted-color, #888);
-}
-.treebar-board-meta-key { opacity: 0.75; }
-.treebar-board-tree { margin: 0.25rem 0 0; }
-.treebar-board-tree > summary { cursor: pointer; font-size: 0.8em; color: var(--pico-muted-color, #888); }
-.treebar-board-tree > .treebar-node { margin-top: 0.25rem; }
-.treebar-board-empty { margin: 0; color: var(--pico-muted-color, #888); }
-.treebar-board-empty[hidden] { display: none; }
-
-/* Demo helpers */
-.tb-input-narrow { max-width: 6rem; }
-.tb-input-narrow-7 { max-width: 7rem; }
-"""))
-
-# Client-side duration ticker. Anchors each running .treebar-duration on first
-# sight (and re-anchors the spans a swap delivered, since their data-elapsed-ms
-# comes back fresh from the server) then ticks textContent every 100ms locally —
-# so the counter advances smoothly between server polls instead of stuttering.
-# Tracking is incremental: two live sets (running spans, poller wrappers)
-# seeded once and kept current by a MutationObserver, so ticks and swaps cost
-# work proportional to the active nodes / changed fragment, never the document.
-# The same script owns poller Pause/terminalization, the keyed board
-# reconciler (`htmx_render_board`), carrying viewer choices (overview
-# disclosures, WebSocket-frame pill toggles) onto the markup each live update
-# swaps in, and each live region's freshness: how old its shown state is, and
-# whether its connection is lost.
-htmx_treebar_script() = h.script(Raw("""
-(function(){
-    // Band-based formatter mirroring the server-side short_duration: sub-100ms
-    // show whole milliseconds, sub-minute shows one-decimal seconds at 0.1s
-    // resolution ("13.9s"; FLOOR, so server-render and ticker never disagree at
-    // poll boundaries), and minute-and-up show the two most-significant units.
-    // Each band's smallest displayed unit steps by a fixed amount (per-100ms
-    // below 1min, per-second up to 1h, per-minute up to 1d, per-hour beyond) so
-    // the rendered string changes at most once per step and length stays stable
-    // within a band.
-    // The words this script writes, in English. A live region (poller
-    // wrapper, WebSocket frame, board) or a standalone tree rendered in
-    // another language carries its own in `data-treebar-texts` (the server's
-    // `treebar_texts`), and the nearest one wins.
-    var EN = {running: '{elapsed} so far', eta: 'ETA ~{eta}', polling: 'Polling', paused: 'Paused',
-        pause: 'Pause live updates', resume: 'Resume live updates', stale: 'Updated {age} ago',
-        updated: 'updated {age} ago', connection_lost: 'Connection lost',
-        updates_failing: 'Updates failing ({why})', retrying: 'retrying', ended: 'ended ({elapsed})',
-        board_pause: 'Pause', board_resume: 'Resume', unit_ms: 'ms', unit_s: 's', unit_min: 'm',
-        unit_h: 'h', unit_d: 'd', unit_space: '', decimal: '.'};
-    var parsedTexts = {};
-    function textsOf(el){
-        var src = el.closest('[data-treebar-texts]') || (el.querySelector && el.querySelector('[data-treebar-texts]'));
-        if (!src) return EN;
-        var json = src.getAttribute('data-treebar-texts');
-        if (!(json in parsedTexts)){
-            var t = {};
-            try { t = JSON.parse(json); } catch (e) {}
-            parsedTexts[json] = Object.assign({}, EN, t);
-        }
-        return parsedTexts[json];
-    }
-    function fill(template, values){
-        return template.replace(/\\{([A-Za-z_]+)\\}/g, function(m, k){ return k in values ? values[k] : m; });
-    }
-    function unit(n, u, T){ return n + T.unit_space + u; }
-    function fmt(ms, T){
-        T = T || EN;
-        if (ms < 0) ms = 0;
-        if (ms < 100)         return unit(ms, T.unit_ms, T);
-        if (ms < 60_000)      return unit(String(Math.floor(ms / 100) / 10).replace('.', T.decimal), T.unit_s, T);
-        if (ms < 3_600_000){
-            var m = Math.floor(ms / 60_000);
-            var s = Math.floor(ms / 1000) % 60;
-            return unit(m, T.unit_min, T) + ' ' + unit(s, T.unit_s, T);
-        }
-        if (ms < 86_400_000){
-            var h = Math.floor(ms / 3_600_000);
-            var m = Math.floor(ms / 60_000) % 60;
-            return unit(h, T.unit_h, T) + ' ' + unit(m, T.unit_min, T);
-        }
-        var d = Math.floor(ms / 86_400_000);
-        var h = Math.floor(ms / 3_600_000) % 24;
-        return unit(d, T.unit_d, T) + ' ' + unit(h, T.unit_h, T);
-    }
-    function anchor(el){
-        var ms = parseInt(el.dataset.elapsedMs, 10);
-        if (isNaN(ms)) ms = 0;
-        el._tbAnchor = Date.now() - ms;
-        el._tbAnchoredFrom = el.dataset.elapsedMs;
-        el._tbTexts = textsOf(el);
-        el._tbLast = undefined;
-        // ETA (running determinate nodes only): anchor an ABSOLUTE finish target
-        // so the estimate counts down smoothly between polls; each server poll
-        // re-anchors with a fresh data-eta-ms as the position advances.
-        var eta = el.dataset.etaMs === undefined ? NaN : parseInt(el.dataset.etaMs, 10);
-        el._tbEtaTarget = isNaN(eta) ? undefined : Date.now() + eta;
-    }
-    function tick(el){
-        if (el.dataset.treebarStatus !== 'running') return;
-        // Never tick inside a kept snapshot (.treebar-frozen, see _kept_progress):
-        // a terminal tree may still carry a "running" node, and a post-hoc
-        // inspection view must be static, not counting up forever.
-        if (el.closest('.treebar-frozen')) return;
-        // Freeze the duration while this span's poller is paused, so the
-        // inspected snapshot is genuinely still. On resume the ticker
-        // catches up to true elapsed (the work kept running — pause is not
-        // cancel) and the next server poll re-anchors.
-        var p = el.closest('.treebar-poller');
-        if (p && p.dataset.paused === '1') return;
-        // Same for a paused board (htmx_render_board): pause freezes it whole.
-        var b = el.closest('.treebar-board');
-        if (b && b.dataset.paused === '1') return;
-        // And for a region whose connection is lost (see freshness below):
-        // the server can no longer confirm the work is still running, so
-        // its clocks hold the last known state until an update arrives.
-        if (el.closest('[data-treebar-freshness="lost"]')) return;
-        if (el._tbAnchor === undefined) anchor(el);
-        var T = el._tbTexts || EN;
-        var s = ' — ' + fill(T.running, {elapsed: fmt(Date.now() - el._tbAnchor, T)});
-        // A determinate node also counts its ETA down (fmt clamps negatives to
-        // 0; the next server poll re-anchors to the new estimate).
-        if (el._tbEtaTarget !== undefined){
-            s += ' · ' + fill(T.eta, {eta: fmt(el._tbEtaTarget - Date.now(), T)});
-        }
-        // Only touch the DOM when the rendered string actually changes —
-        // below 1min the value steps every 100ms (matching the tick cadence,
-        // so each tick updates), while minute-and-up only change once per
-        // integer minute/hour, so those ticks are mostly no-ops.
-        if (el._tbLast !== s){ el.textContent = s; el._tbLast = s; }
-    }
-    // True when it turned a live poller into a finished one.
-    function terminalizePoller(evt){
-        var el = evt && evt.detail && evt.detail.elt;
-        if (!el || !el.classList || !el.classList.contains('treebar-terminal-content')) return false;
-        var p = el.parentElement;
-        if (!p || !p.classList.contains('treebar-poller')) return false;
-        p.classList.replace('treebar-poller', 'treebar-terminal');
-        ['paused', 'showFinished', 'showPending', 'showFailed', 'showSkipped', 'showReused', 'treebarFreshness'].forEach(function(key){
-            delete p.dataset[key];
-        });
-        var badge = p.querySelector(':scope > .treebar-badge');
-        if (badge) badge.remove();
-        return true;
-    }
-    // Mirror the live inner into the wrapper's badge: the badge lives on the
-    // never-swapped wrapper (so the pause control keeps focus and state across
-    // polls), which means its status line would go stale without this. Reads
-    // the same nodes the tree renders — the first determinate bar, the first
-    // duration span — so the badge can never disagree with the tree it
-    // summarizes. Also re-derives the pause glyph from data-paused, so a
-    // hand-edited dataset (DevTools) shows the matching control, exactly as a
-    // click would. Exposed as window.__tbSyncBadge so the pause onclick can
-    // refresh the badge in the same frame as the toggle.
-    function syncBadge(p){
-        var badge = p.querySelector(':scope > .treebar-badge');
-        if (!badge) return;
-        var paused = p.dataset.paused === '1';
-        var T = textsOf(p);
-        var btn = badge.querySelector('.treebar-pause');
-        if (btn){
-            btn.textContent = paused ? '▶' : '❚❚';
-            btn.setAttribute('aria-label', paused ? T.resume : T.pause);
-        }
-        var st = badge.querySelector('.treebar-badge-status');
-        if (st){
-            var s = paused ? T.paused : T.polling;
-            if (st._tbLast !== s){ st.textContent = s; st._tbLast = s; }
-        }
-        var inner = p.querySelector(':scope > .treebar-poller-inner');
-        var bar = badge.querySelector('.treebar-badge-bar');
-        if (bar){
-            var src = inner ? inner.querySelector('progress.treebar-progress') : null;
-            if (src && src.hasAttribute('value') && src.hasAttribute('max')){
-                bar.setAttribute('value', src.getAttribute('value'));
-                bar.setAttribute('max', src.getAttribute('max'));
-            } else {
-                bar.removeAttribute('value');
-                bar.removeAttribute('max');
-            }
-        }
-        var el = badge.querySelector('.treebar-badge-elapsed');
-        if (el){
-            var d = inner ? inner.querySelector('.treebar-duration') : null;
-            var t = d ? d.textContent : '';
-            if (el._tbLast !== t){ el.textContent = t; el._tbLast = t; }
-        }
-        paintFreshness(p, Date.now());
-    }
-    // Incremental active-progress tracking: the ticker NEVER scans the
-    // document. Two live sets — running duration spans and poller wrappers —
-    // are seeded once at startup and kept current by a MutationObserver
-    // below, so each tick costs work proportional to the active progress
-    // nodes and each swap costs work proportional to the changed fragment;
-    // settled hidden trees cost nothing. (Was: document-wide
-    // querySelectorAll on every 100ms tick and every swap — ~0.3 CPU-s per
-    // 30s on a 16k-node page. Snag browser-progress-573fb052.)
-    var liveRunning = new Set();
-    var livePollers = new Set();
-    // Boards and WebSocket sources whose freshness is shown (a poller's is
-    // shown by its badge sync, so pollers stay in livePollers).
-    var liveRegions = new Set();
-    var RUNNING_SEL = '.treebar-duration[data-treebar-status="running"]';
-    var POLLER_SEL = '.treebar-poller';
-    // A live board renders a freshness span in its header; a WebSocket
-    // source is the [ws-connect] element its frames arrive in.
-    var BOARD_FRESH_SEL = '.treebar-board-header > .treebar-freshness';
-    var FRAME_SEL = '.treebar-ws-frame';
-    var SOCKET_SEL = '[ws-connect], [data-ws-connect]';
-    var TRACK_SEL = [RUNNING_SEL, POLLER_SEL, BOARD_FRESH_SEL, FRAME_SEL].join(', ');
-    function trackRunning(el){
-        if (el._tbAnchor === undefined) anchor(el);
-        liveRunning.add(el);
-    }
-    function track(el){
-        if (el.matches(RUNNING_SEL)) trackRunning(el);
-        else if (el.matches(POLLER_SEL)) livePollers.add(el);
-        else {
-            var r = el.closest(el.matches(FRAME_SEL) ? SOCKET_SEL : '.treebar-board');
-            if (r) liveRegions.add(r);
-        }
-    }
-    // One selector pass per inserted fragment, whatever it holds.
-    function collect(root){
-        if (root.nodeType === 1 && root.matches(TRACK_SEL)) track(root);
-        if (root.nodeType !== 1 && root.nodeType !== 9) return;
-        var q = root.querySelectorAll(TRACK_SEL);
-        for (var i = 0; i < q.length; i++) track(q[i]);
-    }
-    // --- Freshness ----------------------------------------------------------
-    // A live region shows the server's state as of its last update, so it
-    // says how old that state is. Each region keeps, on the client clock,
-    // when the server last confirmed it (_tbOkAt; first sight counts, as the
-    // server just rendered it) and since when its updates have been failing
-    // (_tbFailSince). Every tick turns those into data-treebar-freshness on
-    // the region and the text of the hidden .treebar-freshness span the
-    // server renders in its chrome:
-    //   absent  live: confirmed recently; the span stays hidden.
-    //   stale   nothing confirmed for STALE_MS or five poll intervals,
-    //           whichever is longer: a backgrounded tab that stopped
-    //           polling, a slow or hung server. "Updated 1m 4s ago".
-    //   lost    every attempt has failed for LOST_MS straight: a dead
-    //           server, a gateway 5xx, a dropped socket. "Connection lost ·
-    //           updated 1m 4s ago · retrying". A failure the next update
-    //           recovers from is a blip and shows nothing; once lost, a
-    //           region stays lost until an update succeeds.
-    // Failure never stops a region: htmx keeps its `every` timer, and the ws
-    // extension reconnects after an abnormal close, so the region heals by
-    // itself when the server returns. Regions: a .treebar-poller (the
-    // requests of its own .treebar-poller-inner, or the answers a push
-    // source hands to treebarUpdatePoller), a live .treebar-board (its
-    // .treebar-board-poll requests, or the boards a WebSocket pushes), and a
-    // WebSocket source carrying .treebar-ws-frame frames.
-    var STALE_MS = 5000, LOST_MS = 5000;
-    // `at` is when the server confirmed the region, if not just now.
-    function markOk(r, at){
-        r._tbOkAt = at === undefined ? Date.now() : at;
-        r._tbFailSince = 0;
-        r._tbSettled = false;
-    }
-    // `why` is empty when the server is unreachable (no response, or a
-    // gateway that cannot reach it) and names the status otherwise.
-    function markFail(r, why, retrying){
-        if (!r._tbFailSince) r._tbFailSince = Date.now();
-        r._tbFailWhy = why;
-        r._tbRetrying = retrying;
-        r._tbSettled = false;
-    }
-    // Five missed polls before an old state counts as stale; never sooner
-    // than STALE_MS. Same interval grammar as htmx's `every`.
-    function staleAfter(r){
-        if (r._tbStaleMs === undefined){
-            var el = r.querySelector(':scope > .treebar-poller-inner, :scope > .treebar-board-poll');
-            var m = el && /every\\s+(\\d+(?:\\.\\d+)?)(ms|s|m)?/.exec(el.getAttribute('hx-trigger') || '');
-            var ms = m ? parseFloat(m[1]) * (m[2] === 's' ? 1000 : m[2] === 'm' ? 60000 : 1) : 0;
-            r._tbStaleMs = Math.max(STALE_MS, 5 * ms);
-        }
-        return r._tbStaleMs;
-    }
-    function freshness(r, now){
-        if (r._tbOkAt === undefined) r._tbOkAt = now;
-        if (r._tbFailSince && now - r._tbFailSince >= LOST_MS) return 'lost';
-        if (r._tbSettled) return '';
-        return now - r._tbOkAt >= staleAfter(r) ? 'stale' : '';
-    }
-    function freshnessText(r, state, now){
-        if (!state) return '';
-        var T = textsOf(r);
-        var ms = now - r._tbOkAt;
-        var age = ms < 60_000 ? unit(Math.floor(ms / 1000), T.unit_s, T) : fmt(ms, T);
-        if (state === 'stale') return fill(T.stale, {age: age});
-        return (r._tbFailWhy ? fill(T.updates_failing, {why: r._tbFailWhy}) : T.connection_lost) +
-            ' · ' + fill(T.updated, {age: age}) +
-            (r._tbRetrying && r.dataset.paused !== '1' ? ' · ' + T.retrying : '');
-    }
-    function freshnessSpans(r){
-        if (r.classList.contains('treebar-poller')) return r.querySelectorAll(':scope > .treebar-badge .treebar-freshness');
-        if (r.classList.contains('treebar-board')) return r.querySelectorAll(':scope > .treebar-board-header > .treebar-freshness');
-        return r.querySelectorAll('.treebar-ws-frame > .treebar-freshness');
-    }
-    function paintFreshness(r, now){
-        var state = freshness(r, now);
-        if ((r.dataset.treebarFreshness || '') !== state){
-            if (state) r.dataset.treebarFreshness = state; else delete r.dataset.treebarFreshness;
-        }
-        // Repaint only when the text changes (at most once a second while
-        // stale or lost, never while live). A frame or snapshot arriving
-        // later brings its own hidden span and confirms the region live, so
-        // no span can miss a change.
-        var text = freshnessText(r, state, now);
-        if (r._tbFreshText === text) return;
-        r._tbFreshText = text;
-        var spans = freshnessSpans(r);
-        for (var i = 0; i < spans.length; i++){ spans[i].textContent = text; spans[i].hidden = !text; }
-    }
-    function paintRegions(){
-        var now = Date.now();
-        liveRegions.forEach(function(r){
-            if (!r.isConnected){ liveRegions.delete(r); return; }
-            paintFreshness(r, now);
-        });
-    }
-    // The region a poll request belongs to. A poller's inner replaces itself
-    // before htmx fires afterRequest, so htmx re-fires the event on the
-    // nearest element still in the document — the poller wrapper.
-    function pollRegion(el){
-        if (!el || !el.classList) return null;
-        if (el.classList.contains('treebar-board-poll')) return el.closest('.treebar-board');
-        if (!el.classList.contains('treebar-poller-inner')) return null;
-        var p = el.parentElement;
-        return p && p.classList.contains('treebar-poller') ? p : null;
-    }
-    function requestRegion(d){
-        var req = d.requestConfig && d.requestConfig.elt;
-        var r = pollRegion(req);
-        if (r) return r;
-        return req && req.classList && req.classList.contains('treebar-poller-inner') &&
-            d.elt && d.elt.classList && d.elt.classList.contains('treebar-poller') ? d.elt : null;
-    }
-    // Failures arrive as their own events; an aborted request or a dropped
-    // poll answer (see "Pushed pollers") is neither.
-    document.addEventListener('htmx:afterRequest', function(evt){
-        var d = evt.detail || {};
-        if (d.successful !== true) return;
-        var r = requestRegion(d);
-        if (r) markOk(r);
-    });
-    function pollFailed(evt){
-        var d = evt.detail || {};
-        var r = requestRegion(d);
-        // While pushed, only a poll left running at the first push can fail,
-        // and that says nothing about the push source.
-        if (!r || r._tbPushed) return;
-        var s = evt.type === 'htmx:responseError' && d.xhr ? d.xhr.status : 0;
-        markFail(r, s === 0 || s === 502 || s === 503 || s === 504 ? '' : 'HTTP ' + s, true);
-    }
-    ['htmx:sendError', 'htmx:timeout', 'htmx:responseError'].forEach(function(name){
-        document.addEventListener(name, pollFailed);
-    });
-    // WebSocket sources (htmx ws extension). A frame message confirms its
-    // source; board messages are confirmed by the reconciler (they never
-    // reach wsAfterMessage). A close or error fails the source and every
-    // live board on it, except the server ending a stream normally after
-    // its last update: when nothing shown is still running there is nothing
-    // left to go stale.
-    function socketRegions(s){
-        var out = [];
-        if (s.querySelector(FRAME_SEL)){ liveRegions.add(s); out.push(s); }
-        var boards = s.querySelectorAll('.treebar-board');
-        for (var i = 0; i < boards.length; i++) if (liveRegions.has(boards[i])) out.push(boards[i]);
-        return out;
-    }
-    document.addEventListener('htmx:wsAfterMessage', function(evt){
-        if (evt.target.querySelector && evt.target.querySelector(FRAME_SEL)){
-            liveRegions.add(evt.target);
-            markOk(evt.target);
-        }
-    });
-    document.addEventListener('htmx:wsClose', function(evt){
-        var e = evt.detail && evt.detail.event, code = e ? e.code : 0;
-        // The codes the ws extension reconnects after.
-        var retrying = [1006, 1011, 1012, 1013].indexOf(code) >= 0;
-        socketRegions(evt.target).forEach(function(r){
-            if ((code === 1000 || code === 1005) && !r.querySelector(RUNNING_SEL)){ markOk(r); r._tbSettled = true; }
-            else markFail(r, '', retrying);
-        });
-    });
-    document.addEventListener('htmx:wsError', function(evt){
-        socketRegions(evt.target).forEach(function(r){ markFail(r, '', true); });
-    });
-    // --- Pushed pollers -----------------------------------------------------
-    // A push source (a server-sent-events stream, a custom socket) can feed
-    // a poller in place of its own polls. window.treebarUpdatePoller(el,
-    // html) applies one pushed answer, the response a poll would have
-    // received, exactly as htmx applies a poll answer (so a page's
-    // htmx:beforeSwap gate or rewrite, terminalization and every
-    // htmx:afterSwap listener run unchanged), and confirms the poller live,
-    // also when a listener skips the answer, as a skipped poll answer does.
-    // Called without html it only confirms that the shown
-    // answer is still current: a heartbeat. The first call puts the poller
-    // in push mode: its own polls are suspended (see the pause hook below)
-    // and the answer of a poll already in flight is dropped, so a late poll
-    // answer cannot replace a newer pushed one. That poll is left to finish:
-    // htmx reports every aborted request as an error (console.error and
-    // htmx:error), however deliberate the abort, and has no setting for it.
-    // While the viewer has paused the poller, the newest pushed answer is
-    // held and shown on resume; meanwhile the shown state ages as a paused
-    // polled one does.
-    // window.treebarPollerLost(el, why) ends push mode: the poller falls
-    // back to its own polls, which retry by themselves, and reads
-    // "Connection lost" (empty `why`) or "Updates failing (why)" once those
-    // have failed for 5s too. `el` is the poller wrapper or any element in
-    // it. Both return false once it is no longer a live poller (finished,
-    // failed or removed), which tells the source to stop pushing to it.
-    var heldPollers = new Set();
-    // The polling inner of the live poller `el` is in, or null. A finished
-    // poller nested in a live one must not resolve to the outer one.
-    function pushTarget(el){
-        var p = el.closest('.treebar-poller, .treebar-terminal');
-        if (!p || !p.isConnected || !p.classList.contains('treebar-poller')) return null;
-        return p.querySelector(':scope > .treebar-poller-inner[hx-trigger]');
-    }
-    // htmx fires htmx:beforeSwap only for the response to a request, and
-    // htmx.swap fires none, so this offers a pushed answer the way htmx offers
-    // a poll answer. The detail has a poll answer's fields, without xhr since
-    // no request ran, plus treebarPushed. What a listener changes is read back
-    // as htmx reads it, except that isError does nothing (no request to fail)
-    // and only swapOverride's style counts (htmx has no public way to parse
-    // its modifiers).
-    function swapPushed(inner, html){
-        var url = inner.getAttribute('hx-get');
-        var d = {shouldSwap: true, serverResponse: html, isError: false,
-            ignoreTitle: htmx.config.ignoreTitle, selectOverride: undefined, swapOverride: undefined,
-            target: inner, boosted: false, select: undefined, etc: {},
-            requestConfig: {elt: inner, target: inner, verb: 'get', path: url},
-            pathInfo: {requestPath: url, finalRequestPath: url},
-            treebarPushed: true};
-        if (!htmx.trigger(inner, 'htmx:beforeSwap', d) || !d.shouldSwap) return;
-        // The settle delay htmx gives the inner's own hx-swap="outerHTML".
-        htmx.swap(d.target, d.serverResponse,
-            {swapStyle: d.swapOverride ? String(d.swapOverride).trim().split(/\\s+/)[0] : 'outerHTML',
-             settleDelay: htmx.config.defaultSettleDelay, ignoreTitle: d.ignoreTitle},
-            {select: d.selectOverride === 'unset' ? null : d.selectOverride || inner.getAttribute('hx-select'),
-             contextElement: inner});
-    }
-    function applyPushed(inner, html, at){
-        var p = inner.parentElement;
-        if (html != null) swapPushed(inner, html);
-        markOk(p, at);
-    }
-    // Registered on the polling element, not the document: a pushed answer
-    // replaces that element, and a detached element's events never reach the
-    // document. htmx returns before parsing an answer dropped here, so its
-    // out-of-band content and response headers do nothing, and it still ends
-    // the request, so the element can poll again if it is handed back. The
-    // answer stops here too: to the page's own listeners (HTMXObjects marks
-    // an operation finished on seeing its last answer) this poll was never
-    // answered, and a poller handed back asks again. A request of an element
-    // inside the inner passes through; a handed-back poller's answer is an
-    // ordinary poll answer.
-    function dropLatePoll(evt){
-        if (evt.target !== this) return;
-        if (this.isConnected && !this.parentElement._tbPushed) return;
-        evt.preventDefault();
-        evt.stopPropagation();
-    }
-    window.treebarUpdatePoller = function(el, html){
-        var inner = pushTarget(el);
-        if (!inner) return false;
-        var p = inner.parentElement, at = Date.now();
-        if (!p._tbPushed){
-            p._tbPushed = true;
-            inner.addEventListener('htmx:beforeOnLoad', dropLatePoll);
-        }
-        if (p.dataset.paused === '1'){
-            p._tbHeld = {html: html != null ? html : p._tbHeld && p._tbHeld.html, at: at};
-            heldPollers.add(p);
-        } else applyPushed(inner, html, at);
-        return true;
-    };
-    window.treebarPollerLost = function(el, why){
-        var inner = pushTarget(el);
-        if (!inner) return false;
-        var p = inner.parentElement;
-        if (p._tbPushed){
-            p._tbPushed = false;
-            // The resumed polls bring the next answer.
-            p._tbHeld = undefined;
-            heldPollers.delete(p);
-            markFail(p, why || '', true);
-        }
-        return true;
-    };
-    // Run by the ticker: show what was held for a poller the viewer resumed.
-    function flushHeld(){
-        heldPollers.forEach(function(p){
-            if (p.isConnected && p.dataset.paused === '1') return;
-            heldPollers.delete(p);
-            var held = p._tbHeld, inner = pushTarget(p);
-            p._tbHeld = undefined;
-            if (inner) applyPushed(inner, held.html, held.at);
-        });
-    }
-    // Lazy prune: removals and terminalizations drop out on the next tick.
-    function runningAlive(el){
-        if (!el.isConnected || el.dataset.treebarStatus !== 'running'){ liveRunning.delete(el); return false; }
-        return true;
-    }
-    function syncBadgeLive(p){
-        if (!p.isConnected || !p.classList.contains('treebar-poller')){ livePollers.delete(p); return; }
-        syncBadge(p);
-    }
-    function syncAllBadges(){
-        livePollers.forEach(syncBadgeLive);
-    }
-    window.__tbSyncBadge = syncBadge;
-    // Re-anchor only spans whose server value changed (or that are new). A swap
-    // replaces the spans it delivers, so fresh ones anchor from their own
-    // data-elapsed-ms; a span the swap did NOT touch keeps its anchor. Blindly
-    // re-reading every span on every swap would reset an untouched span (a
-    // board item between its 1s polls, a sibling poller) back to the
-    // server value it was rendered with, so it would jump backwards.
-    function reanchorAll(){
-        liveRunning.forEach(function(el){
-            if (runningAlive(el) && (el._tbAnchoredFrom === undefined || el._tbAnchoredFrom !== el.dataset.elapsedMs)) anchor(el);
-        });
-    }
-    function tickAll(){
-        flushHeld();
-        liveRunning.forEach(function(el){ if (runningAlive(el)) tick(el); });
-        syncAllBadges();
-        paintRegions();
-    }
-    function reanchorAndTick(evt){
-        // Scope the synchronous refresh to the swapped target; the observer
-        // below backstops every other insertion path (OOB inserts outside
-        // the target, ws frames, in-place morphs), so this never needs a
-        // document-wide scan.
-        var t = evt && evt.detail && (evt.detail.target || evt.detail.elt);
-        if (t && (t.nodeType === 1 || t.nodeType === 9)) collect(t);
-        reanchorAll();
-        tickAll();
-    }
-    // Backstop: every DOM insertion and every status/estimate edit lands
-    // here, so nodes the swap handler cannot see still join or leave the
-    // live sets. Each callback costs work proportional to the changed nodes
-    // only. Poller wrappers are born by insertion (childList) and die by
-    // terminalization or removal (lazy prune in syncBadgeLive) — never by a
-    // class flip a filter would need to watch, so `class` stays unobserved.
-    // Viewer choices carried across live updates. A poll swap, a WebSocket
-    // frame and a board update each replace rendered markup wholesale, and
-    // the old markup leaves in the same observer batch that brings its
-    // replacement, so a choice the viewer made on the old markup is moved
-    // onto the new one before it paints: a disclosure's open state, matched
-    // by data-treebar-disclosure in document order, and a WebSocket frame's
-    // pill toggles (data-show-*), matched by the frame's id. Server defaults
-    // apply only to markup that replaces nothing. Costs work proportional to
-    // the changed fragments, like the live sets above.
-    var CARRY_SEL = 'details[data-treebar-disclosure], .treebar-ws-frame[id]';
-    function eachCarried(root, fn){
-        if (root.nodeType !== 1) return;
-        if (root.matches(CARRY_SEL)) fn(root);
-        var q = root.querySelectorAll(CARRY_SEL);
-        for (var i = 0; i < q.length; i++) fn(q[i]);
-    }
-    function carryViewerState(removed, added){
-        if (!removed.length || !added.length) return;
-        var open = {}, frames = {}, any = false;
-        removed.forEach(function(root){ eachCarried(root, function(el){
-            any = true;
-            if (el.tagName !== 'DETAILS'){ frames[el.id] = el; return; }
-            var key = el.dataset.treebarDisclosure;
-            (open[key] = open[key] || []).push(el.open);
-        }); });
-        if (!any) return;
-        added.forEach(function(root){
-            if (!root.isConnected) return;
-            eachCarried(root, function(el){
-                if (el.tagName !== 'DETAILS'){
-                    var from = frames[el.id];
-                    if (from) Object.keys(from.dataset).forEach(function(k){
-                        if (k.indexOf('show') === 0) el.dataset[k] = from.dataset[k];
-                    });
-                    return;
-                }
-                var was = open[el.dataset.treebarDisclosure];
-                if (was && was.length){ var o = was.shift(); if (el.open !== o) el.open = o; }
-            });
-        });
-    }
-    var tbObserver = new MutationObserver(function(records){
-        var removed = [], added = [];
-        for (var i = 0; i < records.length; i++){
-            var r = records[i];
-            if (r.type === 'childList'){
-                for (var j = 0; j < r.addedNodes.length; j++){ collect(r.addedNodes[j]); added.push(r.addedNodes[j]); }
-                for (var k = 0; k < r.removedNodes.length; k++) removed.push(r.removedNodes[k]);
-            } else if (r.type === 'attributes' && r.target.nodeType === 1){
-                var el = r.target;
-                if (!el.classList.contains('treebar-duration')) continue;
-                if (r.attributeName === 'data-treebar-status'){
-                    if (el.dataset.treebarStatus === 'running') trackRunning(el);
-                    else liveRunning.delete(el);
-                } else if ((r.attributeName === 'data-elapsed-ms' || r.attributeName === 'data-eta-ms') &&
-                           el.dataset.treebarStatus === 'running'){
-                    // A morph refreshed the server estimate in place:
-                    // re-anchor so the ticker counts from the fresh value.
-                    anchor(el);
-                    liveRunning.add(el);
-                }
-            }
-        }
-        carryViewerState(removed, added);
-    });
-    // htmx 2 announces each swap on every element its answer has settled so
-    // far, all with one shared detail: an answer with N out-of-band elements
-    // fires htmx:afterSwap N+1 times and htmx:oobAfterSwap N(N+3)/2 times (its
-    // k-th out-of-band swap k+1 times). Announcements of one swap differ only
-    // in detail.elt, which only terminalization reads, so that runs on every
-    // announcement; the refresh reads detail.target and runs once per swap,
-    // and again after a terminalization, which it must follow. Without a
-    // detail.target the refresh is scoped by detail.elt, so each of those
-    // announcements refreshes. An answer then costs work linear in its swaps,
-    // not in their square.
-    function onSwapAnnounced(){
-        var refreshed = new WeakSet();
-        return function(evt){
-            var d = evt && evt.detail;
-            var ended = terminalizePoller(evt);
-            if (d && d.target){
-                if (!ended && refreshed.has(d)) return;
-                refreshed.add(d);
-            }
-            reanchorAndTick(evt);
-        };
-    }
-    document.addEventListener('htmx:afterSwap', onSwapAnnounced());
-    document.addEventListener('htmx:oobAfterSwap', onSwapAnnounced());
-
-    // --- Keyed board (htmx_render_board) -----------------------------------
-    // Every update — a poll response, a WebSocket frame, treebarUpdateBoard —
-    // carries the FULL current list, so reconciling is idempotent and a dropped
-    // update costs nothing. Items are matched by data-treebar-key: an existing
-    // item keeps its wrapper (and the UI state on it) and swaps only its
-    // .treebar-board-item-content; a new item is inserted in server order; an
-    // item that left the list shows its final state for the board's linger
-    // time and is then removed. The server decides how long a done/failed item
-    // stays listed, so a board can also hold recent history.
-    function isTerminalState(s){ return s === 'done' || s === 'failed' || s === 'ended'; }
-    function boardList(board){ return board.querySelector(':scope > .treebar-board-list'); }
-    function boardItems(list){
-        return Array.prototype.filter.call(list.children, function(c){
-            return c.classList.contains('treebar-board-item');
-        });
-    }
-    function boardEmpty(board){
-        var list = boardList(board), empty = board.querySelector(':scope > .treebar-board-empty');
-        if (list && empty) empty.hidden = boardItems(list).length > 0;
-    }
-    function boardLinger(board, item){
-        var ms = parseInt(item.dataset.treebarLingerMs || board.dataset.treebarLingerMs, 10);
-        return isNaN(ms) ? 3000 : Math.max(0, ms);
-    }
-    function scheduleLeave(board, item){
-        if (item._tbLeave) return;
-        var leave = function(){
-            // A paused board is frozen: lingering items wait for Resume.
-            if (board.dataset.paused === '1'){ item._tbLeave = setTimeout(leave, 250); return; }
-            item.remove();
-            boardEmpty(board);
-        };
-        item._tbLeave = setTimeout(leave, boardLinger(board, item));
-    }
-    function cancelLeave(item){
-        if (!item._tbLeave) return;
-        clearTimeout(item._tbLeave);
-        item._tbLeave = null;
-        item.classList.remove('treebar-board-leaving');
-    }
-    // An item that left the list lingers, then leaves. If the server never
-    // showed it terminal it ends where it stands: clocks freeze, it reads
-    // "ended".
-    function endItem(board, item){
-        if (!isTerminalState(item.dataset.treebarState)){
-            item.dataset.treebarState = 'ended';
-            var hd = item.querySelector('.treebar-board-duration');
-            if (hd){
-                var ms = hd._tbAnchor !== undefined ? Date.now() - hd._tbAnchor : parseInt(hd.dataset.elapsedMs, 10) || 0;
-                hd.dataset.treebarStatus = 'ended';
-                var T = textsOf(board);
-                hd.textContent = ' — ' + fill(T.ended, {elapsed: fmt(ms, T)});
-            }
-            var tree = item.querySelector('.treebar-board-tree');
-            if (tree) tree.classList.add('treebar-frozen');
-        }
-        item.classList.add('treebar-board-leaving');
-        scheduleLeave(board, item);
-    }
-    function updateItem(item, next){
-        var content = next.querySelector(':scope > .treebar-board-item-content');
-        if (!content) return;
-        content = document.importNode(content, true);
-        // The tree's expanded state belongs to the wrapper, not the response.
-        var tree = content.querySelector(':scope > .treebar-board-tree');
-        if (tree) tree.open = item.dataset.open === '1';
-        var old = item.querySelector(':scope > .treebar-board-item-content');
-        old ? item.replaceChild(content, old) : item.appendChild(content);
-        ['treebarState', 'treebarLingerMs'].forEach(function(k){
-            if (next.dataset[k] === undefined) delete item.dataset[k]; else item.dataset[k] = next.dataset[k];
-        });
-        if (window.htmx) htmx.process(content);
-    }
-    function reconcileBoard(board, incoming){
-        var list = boardList(board), next = boardList(incoming);
-        if (!list || !next) return;
-        var live = {}, seen = {}, prev = null;
-        boardItems(list).forEach(function(it){ live[it.dataset.treebarKey] = it; });
-        boardItems(next).forEach(function(n){
-            var key = n.dataset.treebarKey, state = n.dataset.treebarState, item = live[key];
-            seen[key] = true;
-            if (!item){
-                item = document.importNode(n, true);
-                if (window.htmx) htmx.process(item);
-            } else {
-                // Listed again after dropping out (a flapping filter): it stays.
-                cancelLeave(item);
-                updateItem(item, n);
-            }
-            var at = prev ? prev.nextSibling : list.firstChild;
-            if (item !== at) list.insertBefore(item, at);
-            prev = item;
-        });
-        Object.keys(live).forEach(function(key){ if (!seen[key]) endItem(board, live[key]); });
-        var count = board.querySelector(':scope > .treebar-board-header > .treebar-board-count');
-        var ncount = incoming.querySelector(':scope > .treebar-board-header > .treebar-board-count');
-        if (count && ncount) count.replaceWith(document.importNode(ncount, true));
-        var overview = board.querySelector(':scope > .treebar-board-overview');
-        var noverview = incoming.querySelector(':scope > .treebar-board-overview');
-        if (noverview) {
-            var freshOverview = document.importNode(noverview, true);
-            if (overview) overview.replaceWith(freshOverview);
-            else board.insertBefore(freshOverview, list);
-        } else if (overview) overview.remove();
-        boardEmpty(board);
-        // The reconciler inserts spans through DOM APIs, not an htmx swap, so
-        // track them synchronously (scoped to the board); the observer below
-        // backstops the same insertions idempotently.
-        collect(board);
-        reanchorAll(); tickAll();
-    }
-    function parseBoards(html){
-        if (typeof html !== 'string' || html.indexOf('treebar-board') === -1) return [];
-        var t = document.createElement('template');
-        t.innerHTML = html;
-        return Array.prototype.slice.call(t.content.querySelectorAll('.treebar-board'));
-    }
-    // Apply every board in `html` to the live board with the same id; returns
-    // how many were applied (or dropped because that board is paused). The
-    // single client entry point for any transport — polls and htmx WebSocket
-    // frames route through it; SSE or custom sockets can call it directly.
-    function updateBoards(html){
-        var n = 0;
-        parseBoards(html).forEach(function(incoming){
-            var board = incoming.id && document.getElementById(incoming.id);
-            if (!board || !board.classList.contains('treebar-board')) return;
-            n += 1;
-            if (board.dataset.paused === '1') return;
-            reconcileBoard(board, incoming);
-            markOk(board);
-        });
-        return n;
-    }
-    window.treebarUpdateBoard = updateBoards;
-    // Board polls: htmx would replace the board (the no-script fallback the
-    // poll element's hx-target/hx-select describe); hand the response to the
-    // reconciler instead.
-    document.addEventListener('htmx:beforeSwap', function(evt){
-        var d = evt.detail || {};
-        if (!d.shouldSwap) return;
-        // detail.elt is the swap TARGET here; the requester is on requestConfig.
-        var el = (d.requestConfig && d.requestConfig.elt) || d.elt;
-        var board = el && el.classList && el.classList.contains('treebar-board-poll') ?
-            el.closest('.treebar-board') : d.target;
-        if (!board || !board.classList || !board.classList.contains('treebar-board')) return;
-        d.shouldSwap = false;
-        if (board.dataset.paused === '1') return;
-        var incoming = parseBoards(d.serverResponse).filter(function(b){ return b.id === board.id; })[0];
-        if (incoming) reconcileBoard(board, incoming);
-    });
-    // WebSocket boards (htmx ws extension, see ws_board): same reconciler.
-    document.addEventListener('htmx:wsBeforeMessage', function(evt){
-        if (updateBoards(evt.detail && evt.detail.message) > 0) evt.preventDefault();
-    });
-    // Remember a board item's tree expansion on its wrapper (toggle does not
-    // bubble, hence the capture listener).
-    document.addEventListener('toggle', function(evt){
-        var d = evt.target;
-        if (!d.classList || !d.classList.contains('treebar-board-tree')) return;
-        var item = d.closest('.treebar-board-item');
-        if (item) item.dataset.open = d.open ? '1' : '0';
-    }, true);
-    // Pause: cancel a poller's own `every Xs` poll request while its wrapper
-    // is data-paused, or while a push source feeds it (see "Pushed pollers").
-    // Scoped to the .treebar-poller-inner element, so the
-    // Stop/cancel request (a different element) still fires when paused. The
-    // `every` timer keeps rescheduling, so resume needs no re-arming. Keyed
-    // on closest('.treebar-poller') → self-contained per poller (nested
-    // pollers each govern their own polling).
-    document.addEventListener('htmx:beforeRequest', function(evt){
-        var el = evt.detail && evt.detail.elt;
-        if (el && el.classList.contains('treebar-poller-inner')){
-            var p = el.closest('.treebar-poller');
-            if (p && (p.dataset.paused === '1' || p._tbPushed)) evt.preventDefault();
-        }
-        // A board's poll element pauses the same way, keyed on its board.
-        if (el && el.classList.contains('treebar-board-poll')){
-            var b = el.closest('.treebar-board');
-            if (b && b.dataset.paused === '1') evt.preventDefault();
-        }
-    });
-    function start(){
-        // The ONE full-document pass: seeds both live sets. Everything
-        // after this is incremental (scoped swap refresh + observer).
-        collect(document);
-        if (!window.__tbObserverStarted){
-            window.__tbObserverStarted = true;
-            tbObserver.observe(document.documentElement, {childList: true, subtree: true,
-                attributes: true, attributeFilter: ['data-treebar-status', 'data-elapsed-ms', 'data-eta-ms']});
-        }
-        reanchorAndTick();
-        if (!window.__tbTickerStarted){ window.__tbTickerStarted = true; setInterval(tickAll, 100); }
-    }
-    if (document.readyState === 'loading'){
-        document.addEventListener('DOMContentLoaded', start);
-    } else {
-        start();
-    }
-})();
-"""))
-
-# `_flatten_displayed_children` now lives in Treebars core (src/implementation.jl)
-# and is imported above — the core text renderer (`render_text`) shares it, so
-# the text dump and this HTML render can never disagree about which nodes exist.
+include("treebar_styles.jl")
+include("treebar_script.jl")
 
 # A plan nested in another plan's phase renders as a disclosure inside that
 # plan's output, captioned with the declaring phase's label: open for
@@ -1329,18 +260,18 @@ end
 htmx_render(node::ProgressNode; texts=nothing, kwargs...) =
     (t = _texts(texts); _with_client_texts(_htmx_render(node, t; kwargs...), t))
 
-function _htmx_render(node::ProgressNode{<:StateProgress}, t::TreebarTexts; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
+function _htmx_render(node::ProgressNode{<:StateProgress}, t::TreebarTexts; article=false, scoped=true, state::_RenderState=_render_state(node), seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     is_displayed(node) || return ""
-    sp = node.impl
-    children_node = isempty(node.children) ? "" : _htmx_render_children(node, t; scoped, seen, max_finished)
+    sp = state
+    children_node = isempty(node.children) ? "" : _htmx_render_children(node, t; scoped, seen, walk, max_finished)
     overview = _phase_overview_html(node, phase_overview, t)
-    tree = lock(sp.lock) do
+    tree = begin
         duration_node = _duration_span(sp, t)
-        interrupt_node = _interrupt_span(node, t)
-        pending = is_pending(sp)
+        interrupt_node = sp.interrupt ? h.span(class="treebar-interrupt")(t.interrupt) : ""
+        pending = sp.status == "pending"
         node_class = pending      ? "treebar-node treebar-pending" :
-                     is_skipped(sp) ? "treebar-node treebar-skipped" :
-                     is_reused(sp)  ? "treebar-node treebar-reused"  :
+                     sp.status == "skipped" ? "treebar-node treebar-skipped" :
+                     sp.status == "reused"  ? "treebar-node treebar-reused"  :
                                     "treebar-node"
         if !isnothing(sp.N)
             # Progress bar with counter (pending → value=0, max=N, dim)
@@ -1387,9 +318,9 @@ end
 # flattened away — their grandchildren render in their place. Same per-pass
 # `seen` dedup as the StateProgress method above (kept in sync for any
 # non-StateProgress backend that reaches this fallback).
-function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), phase_overview::Union{Bool,Symbol}=false, kwargs...)
-    children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
-    children_html = [_htmx_render(child, t; scoped, seen, kwargs...) for child in children]
+function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, state=nothing, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), phase_overview::Union{Bool,Symbol}=false, kwargs...)
+    children, _ = _displayed_children(node, walk)
+    children_html = [_htmx_render(child, t; scoped, seen, walk, kwargs...) for child in children]
     h.div(class="treebar-root")(_phase_overview_html(node, phase_overview, t), children_html)
 end
 
@@ -1440,14 +371,14 @@ _pill_onclick(key) = """var s = this.closest('.treebar-poller, .treebar-board-it
 # of each group's first elided child, the one-line note standing in for the
 # elided ones. The note carries that group's `treebar-child-*` class, so it
 # shows and hides with the group's pill. `nothing` keeps everything.
-function _elide_finished(children, max_finished, t::TreebarTexts)
-    keep = trues(length(children))
+function _elide_finished(statuses, max_finished, t::TreebarTexts)
+    keep = trues(length(statuses))
     notes = Dict{Int,Node}()
     isnothing(max_finished) && return keep, notes
-    for (pred, word, text) in ((is_finished, "finished", t.elided_finished),
-                               (is_reused, "reused", t.elided_reused),
-                               (is_skipped, "skipped", t.elided_skipped))
-        idx = findall(pred, children)
+    for (word, text) in (("finished", t.elided_finished),
+                         ("reused", t.elided_reused),
+                         ("skipped", t.elided_skipped))
+        idx = findall(==(word), statuses)
         n = length(idx) - max_finished
         n > 0 || continue
         keep[idx[1:n]] .= false
@@ -1455,6 +386,13 @@ function _elide_finished(children, max_finished, t::TreebarTexts)
     end
     keep, notes
 end
+
+# Backends without StateProgress retain their public lifecycle predicates.
+_child_status(::ProgressNode, state::_RenderState) = state.status
+_child_status(node::ProgressNode, ::Nothing) =
+    is_pending(node) ? "pending" : is_skipped(node) ? "skipped" :
+    is_reused(node) ? "reused" : is_finished(node) ? "finished" :
+    is_failed(node) ? "failed" : "running"
 
 htmx_render_children(::Nothing; texts=nothing, kwargs...) =
     h.p(_texts(texts).starting; class="u-text-muted", aria_busy="true")
@@ -1464,7 +402,7 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; texts=nothing
     _with_client_texts(Treebars._overview_enabled(phase_overview) ?
         h.div(class="treebar-with-overview")(_phase_overview_html(node, phase_overview, t), tree) : tree, t)
 end
-function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
+function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), max_finished=nothing)
     isnothing(max_finished) || max_finished >= 0 ||
         throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl
@@ -1473,8 +411,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     # CSS classes all see the hoisted view, which is the whole point of
     # the transparent flag. Then dedup (first-seen-wins) against this pass's
     # `seen` set.
-    raw = _flatten_displayed_children(node)
-    children = filter(c -> _first_seen!(seen, c), raw)
+    children, had_visible = _displayed_children(node, walk)
     # All of this node's children were already rendered elsewhere in this same
     # pass (DO's shared-substatus co-tree case) — the children SECTION is
     # empty, but unlike "genuinely no children yet" this isn't a pending/
@@ -1482,7 +419,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     # "Starting..." fallback below. The node's own header/duration still
     # render via the caller (`htmx_render`) — only this children section is
     # suppressed.
-    isempty(children) && !isempty(raw) && return ""
+    isempty(children) && had_visible && return ""
     # A terminal node cannot still be starting or busy. This is reachable when
     # raw children exist but every one flattens away (for example, hidden leaf
     # nodes); the caller sees a non-empty `node.children` and therefore asks us
@@ -1498,11 +435,16 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     end
     isempty(children) && return h.p(t.starting; class="u-text-muted", aria_busy="true")
 
-    n_finished = count(c -> is_finished(c), children)
-    n_failed = count(c -> is_failed(c), children)
-    n_pending = count(c -> is_pending(c), children)
-    n_skipped = count(c -> is_skipped(c), children)
-    n_reused = count(c -> is_reused(c), children)
+    states = [_render_state(c) for c in children]
+    statuses = [_child_status(c, state) for (c, state) in zip(children, states)]
+    n_finished = n_failed = n_pending = n_skipped = n_reused = 0
+    for status in statuses
+        n_finished += status == "finished"
+        n_failed += status == "failed"
+        n_pending += status == "pending"
+        n_skipped += status == "skipped"
+        n_reused += status == "reused"
+    end
 
     pills = Node[]
     if n_pending > 0
@@ -1526,26 +468,15 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
             onclick=_pill_onclick("showFailed"))(_fill_text(t.pill_failed; n=n_failed)))
     end
 
-    # Every terminal state is named EXPLICITLY and `running` is the residual.
-    # This used to be an if/elseif chain whose bare `else` meant *failed*, so
-    # any state added later fell into it and rendered as a failure in the
-    # browser while `render_text` rendered it correctly — a fifth state would
-    # have silently inverted its own meaning. Running is the right residual:
-    # it is the one state that legitimately renders with no wrapper div.
-    _child_class(c) =
-        is_pending(c)  ? "treebar-child-pending"  :
-        is_skipped(c)  ? "treebar-child-skipped"  :
-        is_reused(c)   ? "treebar-child-reused"   :
-        is_finished(c) ? "treebar-child-finished" :
-        is_failed(c)   ? "treebar-child-failed"   :
-                         ""
-    keep, notes = _elide_finished(children, max_finished, t)
+    keep, notes = isnothing(max_finished) ? (nothing, nothing) : _elide_finished(statuses, max_finished, t)
     rendered = Any[]
     for (i, child) in enumerate(children)
-        haskey(notes, i) && push!(rendered, notes[i])
-        keep[i] || continue
-        cls = _child_class(child)
-        inner = _htmx_render(child, t; scoped, seen, max_finished)
+        if !isnothing(keep)
+            haskey(notes, i) && push!(rendered, notes[i])
+            keep[i] || continue
+        end
+        cls = statuses[i] == "running" ? "" : "treebar-child-$(statuses[i])"
+        inner = _htmx_render(child, t; scoped, seen, walk, max_finished, state=states[i])
         push!(rendered, isempty(cls) ? inner : h.div(class=cls)(inner))
     end
 
@@ -2546,5 +1477,7 @@ end
 # Convenience: WS form with no render_result defaults to identity.
 polling_fetchindex(ws::WebSocket, ip::HTMXObjects.DynamicObjects.IndexableProperty, keys...; kwargs...) =
     polling_fetchindex(ws, identity, ip, keys...; kwargs...)
+
+include("htmx_precompile.jl")
 
 end

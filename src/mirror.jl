@@ -31,7 +31,7 @@ const _FORGET = Int8(3)   # `child` left the mirrored tree; its id is not used a
 const _Op = Tuple{Int8,Int,Int}
 
 # One node's membership in one mirror.
-mutable struct _Track
+mutable struct _Track <: _ProgressTrack
     const mirror::Any       # the ProgressMirror
     const id::Int
     # `nothing` once the node left the mirrored tree: a track still queued for
@@ -136,6 +136,7 @@ mutable struct ProgressMirror
     # The plans sent so far: `lock`, like the four below.
     next_group::Int
     const group_ids::IdDict{_PhaseGroup,Int}
+    const groups::Dict{Int,_PhaseGroup}
     const group_host::Dict{Int,Int}
     const group_sent::Dict{Int,Any}
     const host_groups::Dict{Int,Vector{Int}}
@@ -148,56 +149,8 @@ _mirror_source() = hash((getpid(), time_ns(), Threads.atomic_add!(_MIRROR_IDS, 1
 
 # ── tracking ─────────────────────────────────────────────────────────────────
 
-# A node's tracks (one per mirror following it): `nothing`, one `_Track`, or a
-# vector of them, replaced (never mutated) so the hooks read it with one load.
-_tracks_with(old, t) = isnothing(old) ? t : old isa _Track ? _Track[old, t] : vcat(old, t)
-function _tracks_without(old, t)
-    old === t && return nothing
-    old isa Vector || return old
-    rest = filter(x -> x !== t, old)
-    length(rest) == 1 ? only(rest) : rest
-end
-function _add_track!(holder, t)
-    old = @atomic holder.track
-    while true
-        res = @atomicreplace holder.track old => _tracks_with(old, t)
-        res.success && return nothing
-        old = res.old
-    end
-end
-function _remove_track!(holder, t)
-    old = @atomic holder.track
-    while true
-        res = @atomicreplace holder.track old => _tracks_without(old, t)
-        res.success && return nothing
-        old = res.old
-    end
-end
-
-_node_tracks(node::ProgressNode{<:StateProgress}) = @atomic node.impl.track
-_node_tracks(node::ProgressNode) = node.children isa ThreadsafeSet ? (@atomic node.children.track) : nothing
-
-function _track_for(node::ProgressNode, m)
-    tracks = _node_tracks(node)
-    tracks isa _Track && return tracks.mirror === m ? tracks : nothing
-    isnothing(tracks) && return nothing
-    for t in tracks
-        t.mirror === m && return t
-    end
-    nothing
-end
-
-_children_lock(node) = node.children isa ThreadsafeSet ? node.children.lock : nothing
-_lock_children(node) = (l = _children_lock(node); isnothing(l) || lock(l); l)
-_unlock_children(l) = isnothing(l) || unlock(l)
-# A snapshot of `node`'s children; no allocation for a leaf, the common case
-# when a finished item leaves the tree.
-function _mirrored_children(node)
-    kids = node.children
-    kids isa ThreadsafeSet || return ProgressNode[]
-    @lock kids.lock isempty(kids.inner) ? _NO_CHILDREN : collect(kids.inner)
-end
-const _NO_CHILDREN = ProgressNode[]
+_track_owner(t::_Track) = t.mirror
+_track_for(node::ProgressNode, m) = _find_track(node, m, _Track)
 
 # `x` was added to the children of `c`'s node; called inside that children
 # lock. Holding `x`'s own children lock while deciding makes one id per node
@@ -296,28 +249,17 @@ end
 
 # The children-set hooks (src/threadsafe.jl), inside the set's lock.
 _tracked_append(t::_Track, x) = _mirror_append!(t.mirror::ProgressMirror, t, x)
-_tracked_append(ts::Vector, x) = foreach(t -> _tracked_append(t, x), ts)
 _tracked_remove(t::_Track, x) = _mirror_remove!(t.mirror::ProgressMirror, t, x)
-_tracked_remove(ts::Vector, x) = foreach(t -> _tracked_remove(t, x), ts)
-
-# The state hook: runs after every change to a node's state, outside its lock
-# (src/implementation.jl). With nothing open it is two atomic loads.
-@inline function _progress_changed(sp::StateProgress)
-    tracks = @atomic :acquire sp.track
-    isnothing(tracks) || _tracks_changed(tracks)
-    _snapshot_changed()
-end
-_progress_changed(::Any) = _snapshot_changed()
-
-_tracks_changed(t::_Track) = _track_changed(t)
-_tracks_changed(ts::Vector) = foreach(_track_changed, ts)
 
 @inline function _track_changed(t::_Track)
+    _track_changed(t, time_ns())
+end
+@inline function _track_changed(t::_Track, tick::UInt64)
     m = t.mirror::ProgressMirror
     (@atomic :acquire t.dirty) || _mark_dirty!(m, t)
     # Like a snapshot: the changing thread sends once the last frame is
     # `interval` old, so a run whose threads are all busy still sends.
-    time_ns() >= (@atomic m.last_ns) + m.interval_ns && _send_due(m)
+    tick >= (@atomic m.last_ns) + m.interval_ns && _send_due(m)
     nothing
 end
 
@@ -475,7 +417,7 @@ function _group_host(m::ProgressMirror, group::_PhaseGroup, from::ProgressNode)
     node = from
     inside = true
     while node isa ProgressNode
-        if group in _phase_group_records(node)
+        if _holds_group(node, group)
             t = _track_for(node, m)
             isnothing(t) || return (t.id, node)
             return inside ? (0, node) : (1, m.root)
@@ -484,6 +426,14 @@ function _group_host(m::ProgressMirror, group::_PhaseGroup, from::ProgressNode)
         node = node.parent
     end
     (0, from)
+end
+
+_holds_group(::ProgressNode, ::_PhaseGroup) = false
+function _holds_group(node::ProgressNode{<:StateProgress}, group::_PhaseGroup)
+    sp = node.impl
+    lock(sp.lock) do
+        !isnothing(sp.phase_groups) && get(sp.phase_groups, group.key, nothing) === group
+    end
 end
 
 # The plans among `plans` that are new or changed since they were last sent
@@ -502,6 +452,7 @@ function _group_states(m::ProgressMirror, plans, full::Bool)
             host == 0 && continue
             if id == 0
                 id = m.group_ids[group] = (m.next_group += 1)
+                m.groups[id] = group
                 m.group_host[id] = host
                 push!(get!(Vector{Int}, m.host_groups, host), id)
             end
@@ -531,17 +482,17 @@ function _host_order(m::ProgressMirror, host::Int, node::ProgressNode)
     own = Int[]
     for group in _phase_group_records(node)
         id = get(m.group_ids, group, 0)
-        id != 0 && id in ids && push!(own, id)
+        id != 0 && get(m.group_host, id, 0) == host && push!(own, id)
     end
-    vcat(own, filter(id -> !(id in own), ids))
+    present = Set(own)
+    append!(own, (id for id in ids if !(id in present)))
 end
 
 function _forget_host_groups!(m::ProgressMirror, host::Int)
     ids = pop!(m.host_groups, host, nothing)
     isnothing(ids) && return nothing
-    gone = Set(ids)
-    filter!(((group, id),) -> !(id in gone), m.group_ids)
     for id in ids
+        delete!(m.group_ids, pop!(m.groups, id))
         delete!(m.group_host, id)
         delete!(m.group_sent, id)
     end
@@ -635,7 +586,7 @@ function mirror_progress(send, node::ProgressNode; interval::Real=0.05)
     m = ProgressMirror(node, send, Float64(interval), round(UInt64, interval * 1e9), _mirror_source(),
         ReentrantLock(), Threads.SpinLock(), Base.Event(true), UInt64(0), true, false, 0, 0,
         _Op[], _Track[], Tuple{_PhaseGroup,ProgressNode}[], Int[], 0, IdDict{_PhaseGroup,Int}(),
-        Dict{Int,Int}(), Dict{Int,Any}(), Dict{Int,Vector{Int}}())
+        Dict{Int,_PhaseGroup}(), Dict{Int,Int}(), Dict{Int,Any}(), Dict{Int,Vector{Int}}())
     lock(m.lock) do
         held = _lock_children(node)
         try
@@ -724,6 +675,7 @@ mutable struct ProgressReplica
     const nodes::Dict{Int,ProgressNode}
     const ids::IdDict{ProgressNode,Int}
     const groups::Dict{Int,_PhaseGroup}
+    const group_ids::IdDict{_PhaseGroup,Int}
     const host_groups::Dict{Int,Vector{Int}}   # node id => the plans it holds
 end
 
@@ -772,7 +724,7 @@ from the mirror are left alone.
 function progress_replica(target::ProgressNode{<:StateProgress}; on_interrupt=nothing)
     r = ProgressReplica(target, on_interrupt, ReentrantLock(), UInt64(0), 0, false, 0, false,
         Dict{Int,ProgressNode}(1 => target), IdDict{ProgressNode,Int}(target => 1), Dict{Int,_PhaseGroup}(),
-        Dict{Int,Vector{Int}}())
+        IdDict{_PhaseGroup,Int}(), Dict{Int,Vector{Int}}())
     if !isnothing(on_interrupt)
         _register!(r)
         interrupt_requested(target) && _forward_root!(r)
@@ -922,7 +874,7 @@ function _forget_replica_node!(r::ProgressReplica, id::Int)
     node = pop!(r.nodes, id, nothing)
     isnothing(node) || delete!(r.ids, node)
     for gid in pop!(r.host_groups, id, Int[])
-        delete!(r.groups, gid)
+        delete!(r.group_ids, pop!(r.groups, gid))
     end
 end
 
@@ -935,6 +887,7 @@ function _apply_groups!(r::ProgressReplica, groups, order)
             group = _PhaseGroup(ReentrantLock(), nothing, g.key, g.declarer, g.host_label, g.keys,
                 copy(g.labels), copy(g.counts), g.items)
             r.groups[g.id] = group
+            r.group_ids[group] = g.id
             push!(get!(Vector{Int}, r.host_groups, g.host), g.id)
             sp = host.impl::StateProgress
             lock(sp.lock) do
@@ -966,14 +919,13 @@ end
 # The host's plans of this process first, then the mirrored ones in the
 # source's order.
 function _order_groups!(r::ProgressReplica, host::ProgressNode, ids)
-    mirrored = Base.IdSet{_PhaseGroup}(values(r.groups))
     sp = host.impl::StateProgress
     lock(sp.lock) do
         plans = sp.phase_groups
         isnothing(plans) && return nothing
         ordered = OrderedDict{Any,_PhaseGroup}()
         for (key, group) in plans
-            group in mirrored || (ordered[key] = group)
+            haskey(r.group_ids, group) || (ordered[key] = group)
         end
         for id in ids
             group = get(r.groups, id, nothing)

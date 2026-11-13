@@ -27,7 +27,15 @@ canonical parts for longer durations. Subsecond values below 100 milliseconds
 retain millisecond precision; longer subminute values use tenths of a second,
 truncated rather than rounded.
 """
-function short_duration(dt)
+function short_duration(dt::Millisecond)
+    ms = value(dt)
+    ms == 0 && return "0s"
+    ms < 60_000 && return _short_subminute(ms)
+    _short_duration_parts(dt)
+end
+
+short_duration(dt) = _short_duration_parts(dt)
+function _short_duration_parts(dt)
     cp = canonicalize(dt)
     parts = cp.periods
     isempty(parts) && return "0s"

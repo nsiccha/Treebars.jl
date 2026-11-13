@@ -172,7 +172,7 @@ fail_progress!(pjob::ProgressJob, args...; kwargs...) = finalize_progress!(pjob)
 function duration(node::TermProgressNode{ProgressJob})
     job = node.impl
     isnothing(job.startime) && return Millisecond(0)
-    something(job.stoptime, now()) - job.startime
+    (isnothing(job.stoptime) ? now() : job.stoptime) - job.startime
 end
 # The root bar carries no timestamps in Term.jl, so any value would be a lie —
 # say so rather than returning one. Query a job node instead.

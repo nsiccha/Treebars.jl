@@ -361,17 +361,69 @@ _renders_self(::Nothing) = false
 # dump that disagreed with the browser about which nodes exist is worse than
 # no text dump at all: the whole point of the text form is to verify what the
 # live render will show.
-function _flatten_displayed_children(node::ProgressNode)
-    out = ProgressNode[]
-    for child in node.children
+# Visible siblings are claimed before descending into any of them. Remember
+# transparent nodes too: flattening first and deduplicating afterwards expands
+# every path through a shared hidden DAG, potentially exponentially many times.
+# The Bool remembers whether a hidden branch contains a visible node, even if
+# that node was already claimed. HTML uses this to distinguish an empty branch
+# ("Starting...") from a branch whose contents are shown elsewhere.
+struct _DisplayTraversal
+    seen::Base.IdSet{ProgressNode}
+    hidden::IdDict{ProgressNode,Bool}
+end
+_DisplayTraversal(seen=Base.IdSet{ProgressNode}()) =
+    _DisplayTraversal(seen, IdDict{ProgressNode,Bool}())
+
+function _append_hidden!(out, node, walk::_DisplayTraversal)
+    haskey(walk.hidden, node) && return walk.hidden[node]
+    walk.hidden[node] = false # also breaks cycles through transparent nodes
+    # An explicit stack avoids both recursive vector copying and call-stack
+    # growth for long chains of transparent wrappers.
+    stack = Tuple{ProgressNode,Vector{ProgressNode},Int,Bool}[
+        (node, collect(node.children), 1, false)]
+    found = false
+    while !isempty(stack)
+        parent, children, i, found = pop!(stack)
+        if i > length(children)
+            walk.hidden[parent] = found
+            if !isempty(stack)
+                p, cs, j, previous = pop!(stack)
+                push!(stack, (p, cs, j, previous | found))
+            end
+            continue
+        end
+        child = children[i]
         if _renders_self(child)
-            push!(out, child)
+            _first_seen!(walk.seen, child) && push!(out, child)
+            push!(stack, (parent, children, i + 1, true))
+        elseif haskey(walk.hidden, child)
+            push!(stack, (parent, children, i + 1, found | walk.hidden[child]))
         else
-            append!(out, _flatten_displayed_children(child))
+            push!(stack, (parent, children, i + 1, found))
+            walk.hidden[child] = false
+            push!(stack, (child, collect(child.children), 1, false))
         end
     end
-    out
+    found
 end
+
+function _displayed_children(node::ProgressNode, walk::_DisplayTraversal)
+    push!(walk.seen, node)
+    out = ProgressNode[]
+    found = false
+    for child in node.children
+        if _renders_self(child)
+            found = true
+            _first_seen!(walk.seen, child) && push!(out, child)
+        else
+            found |= _append_hidden!(out, child, walk)
+        end
+    end
+    out, found
+end
+
+_flatten_displayed_children(node::ProgressNode) =
+    first(_displayed_children(node, _DisplayTraversal()))
 
 """
     is_pending(s)
@@ -464,7 +516,7 @@ that were entered, returns the frozen `finalized_at - started_at`.
 """
 function duration(s::StateProgress)
     isnothing(s.started_at) && return Millisecond(0)
-    something(s.finalized_at, now()) - s.started_at
+    (isnothing(s.finalized_at) ? now() : s.finalized_at) - s.started_at
 end
 
 """
@@ -484,8 +536,12 @@ already hold it).
 """
 function eta(s::StateProgress)
     (isnothing(s.N) || !is_running(s) || s.i <= 0 || s.i >= s.N) && return nothing
-    elapsed_ms = value(duration(s))
-    Millisecond(round(Int, elapsed_ms * (s.N - s.i) / s.i))
+    _eta(s, duration(s))
+end
+
+function _eta(s::StateProgress, elapsed::Millisecond)
+    (isnothing(s.N) || !is_running(s) || s.i <= 0 || s.i >= s.N) && return nothing
+    Millisecond(round(Int, value(elapsed) * (s.N - s.i) / s.i))
 end
 
 is_pending(node::ProgressNode{<:StateProgress}) = is_pending(node.impl)

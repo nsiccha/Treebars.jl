@@ -45,6 +45,44 @@ using TestItemRunner
     end # let (restores @testset hard scope)
 end
 
+@testitem "closing snapshots while shared children attach leaves no observers" setup=[TreebarsTestImports] tags=[:unit, :snapshot, :concurrency] begin
+    let
+    dir = mktempdir()
+    for round in 1:10
+        root = initialize_progress!(:state; description="root")
+        parents = [initialize_progress!(root; description="parent $i") for i in 1:4]
+        shared = initialize_progress!(:state; description="shared")
+        leaf = initialize_progress!(shared; description="leaf")
+        s = snapshot_progress(root, joinpath(dir, "round-$round"); interval=60)
+        gate = Base.Event()
+        @sync begin
+            for parent in parents
+                Threads.@spawn begin
+                    wait(gate)
+                    for _ in 1:40
+                        add_child!(parent, shared)
+                        yield()
+                        update_progress!(leaf)
+                        pop!(parent.children, shared)
+                    end
+                end
+            end
+            Threads.@spawn begin
+                wait(gate)
+                for _ in 1:10
+                    yield()
+                end
+                close(s)
+            end
+            notify(gate)
+        end
+        @test !isopen(s)
+        @test all(n -> isnothing(@atomic n.impl.track) && isnothing(@atomic n.children.track),
+            [root; parents; shared; leaf])
+    end
+    end
+end
+
 @testitem "snapshot_progress: handle form, phase overview, nothing, bad arguments" setup=[TreebarsTestImports] tags=[:unit, :snapshot] begin
     let
     dir = mktempdir()
@@ -101,7 +139,79 @@ end
     @test is_finished(only(root.children))
     close(s)  # already stopped: nothing more is written or logged
     @test !isdir(dir)
+    @test isnothing(@atomic root.impl.track)
+    @test isnothing(@atomic root.children.track)
     end # let (restores @testset hard scope)
+end
+
+@testitem "snapshot observation follows shared graphs and ignores unrelated ticks" setup=[TreebarsTestImports] tags=[:unit, :snapshot] begin
+    let
+    dir = mktempdir()
+    a = initialize_progress!(:state; description="a")
+    b = initialize_progress!(:state; description="b")
+    sa = snapshot_progress(a, joinpath(dir, "a"); interval=60)
+    sb = snapshot_progress(b, joinpath(dir, "b"); interval=60)
+    m = mirror_progress(_ -> nothing, a; interval=60)
+    try
+        # Hold both writer locks to exclude background writes on other threads.
+        # The tick can reenter them, so a process-wide notification would still
+        # write b and fail this check; only a's snapshot should be touched.
+        lock(sa.lock) do
+            lock(sb.lock) do
+                due = time_ns() - sa.interval_ns
+                @atomic sa.last_ns = due
+                @atomic sb.last_ns = due
+                before_b = read(sb.path, String)
+                update_progress!(a, "changed a")
+                @test occursin("changed a", read(sa.path, String))
+                @test (@atomic sb.last_ns) == due
+                @test read(sb.path, String) == before_b
+            end
+        end
+
+        left = initialize_progress!(a; description="left")
+        right = initialize_progress!(a; description="right")
+        shared = initialize_progress!(left; description="shared")
+        leaf = initialize_progress!(shared; description="leaf")
+        add_child!(right, shared)
+        add_child!(b, shared)
+        # Snapshot and mirror tracks coexist, including nodes attached later.
+        @test Treebars._snapshot_track_for(shared, sa).refs == 2
+        @test Treebars._snapshot_track_for(leaf, sa) !== nothing
+        @test Treebars._snapshot_track_for(shared, sb) !== nothing
+        @test Treebars._track_for(shared, m) !== nothing
+        pop!(left.children, shared)
+        @test Treebars._snapshot_track_for(shared, sa).refs == 1
+        pop!(right.children, shared)
+        @test Treebars._snapshot_track_for(shared, sa) === nothing
+        @test Treebars._snapshot_track_for(leaf, sa) === nothing
+        @test Treebars._track_for(shared, m) === nothing
+        @test Treebars._snapshot_track_for(shared, sb) !== nothing
+        @atomic sb.last_ns = time_ns() - sb.interval_ns
+        update_progress!(leaf, "still observed")
+        @test occursin("still observed", read(sb.path, String))
+        empty!(b.children)
+        @test isnothing(@atomic shared.impl.track)
+        @test isnothing(@atomic leaf.children.track)
+        add_child!(a, shared)
+        close(sa)
+        @test Treebars._snapshot_track_for(shared, sa) === nothing
+        @test Treebars._track_for(shared, m) !== nothing
+        close(m)
+        @test isnothing(@atomic shared.impl.track)
+    finally
+        close(sa)
+        close(sb)
+        close(m)
+    end
+    @test isnothing(@atomic a.impl.track)
+    @test isnothing(@atomic b.impl.track)
+
+    # An opening write that fails must undo graph registration too.
+    @test_throws Exception snapshot_progress(a, joinpath(dir, "missing", "file"))
+    @test isnothing(@atomic a.impl.track)
+    @test isnothing(@atomic a.children.track)
+    end
 end
 
 @testitem "a run that never yields still updates its snapshot; exit marks it final" setup=[TreebarsTestImports] tags=[:unit, :snapshot] begin
