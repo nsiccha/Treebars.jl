@@ -71,22 +71,22 @@ _text_summary(node::ProgressNode) = join(filter(!isempty, [
     _state_marker(node), _impl_summary_bits(node)...,
     _shows_interrupt_request(node) ? _INTERRUPT_TEXT : ""]), " ")
 
-function _print_text_children(io::IO, node::ProgressNode, prefix::String, seen)
-    children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
+function _print_text_children(io::IO, node::ProgressNode, prefix::String, walk)
+    children, _ = _displayed_children(node, walk)
     for (i, child) in enumerate(children)
         last = i == length(children)
         print(io, "\n", prefix, last ? "└─ " : "├─ ", _text_summary(child))
-        _print_text_children(io, child, prefix * (last ? "   " : "│  "), seen)
+        _print_text_children(io, child, prefix * (last ? "   " : "│  "), walk)
     end
 end
 
 function _print_text_tree(io::IO, node::ProgressNode)
-    seen = Base.IdSet{ProgressNode}()
+    walk = _DisplayTraversal()
     # Seed with the root so a node reachable from itself terminates rather
     # than recursing forever.
-    _first_seen!(seen, node)
+    _first_seen!(walk.seen, node)
     print(io, _text_summary(node))
-    _print_text_children(io, node, "", seen)
+    _print_text_children(io, node, "", walk)
 end
 
 """

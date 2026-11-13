@@ -9,7 +9,7 @@ import Treebars: htmx_render, htmx_render_children, htmx_treebar_styles, htmx_tr
     ws_progress, htmx_ws_render, htmx_ws_progress, polling_fetchindex,
     htmx_render_board, htmx_ws_render_board, ws_board,
     ProgressNode, StateProgress, root, is_pending, is_running, is_finished, is_failed, is_skipped, is_reused, is_displayed, _renders_self, duration, eta, short_duration, _first_seen!,
-    _flatten_displayed_children, _shows_interrupt_request
+    _displayed_children, _DisplayTraversal, _shows_interrupt_request
 import Treebars: TreebarTexts, _EN_TEXTS, _lang_texts, _fill_text, _duration_text, _note_text, _isempty_text
 import Treebars: add_child!
 import Treebars: initialize_progress!, update_progress!, start_progress!, finalize_progress!, fail_progress!
@@ -1329,10 +1329,10 @@ end
 htmx_render(node::ProgressNode; texts=nothing, kwargs...) =
     (t = _texts(texts); _with_client_texts(_htmx_render(node, t; kwargs...), t))
 
-function _htmx_render(node::ProgressNode{<:StateProgress}, t::TreebarTexts; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
+function _htmx_render(node::ProgressNode{<:StateProgress}, t::TreebarTexts; article=false, scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), max_finished=nothing, phase_overview::Union{Bool,Symbol}=false, kwargs...)
     is_displayed(node) || return ""
     sp = node.impl
-    children_node = isempty(node.children) ? "" : _htmx_render_children(node, t; scoped, seen, max_finished)
+    children_node = isempty(node.children) ? "" : _htmx_render_children(node, t; scoped, seen, walk, max_finished)
     overview = _phase_overview_html(node, phase_overview, t)
     tree = lock(sp.lock) do
         duration_node = _duration_span(sp, t)
@@ -1387,9 +1387,9 @@ end
 # flattened away — their grandchildren render in their place. Same per-pass
 # `seen` dedup as the StateProgress method above (kept in sync for any
 # non-StateProgress backend that reaches this fallback).
-function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), phase_overview::Union{Bool,Symbol}=false, kwargs...)
-    children = filter(c -> _first_seen!(seen, c), _flatten_displayed_children(node))
-    children_html = [_htmx_render(child, t; scoped, seen, kwargs...) for child in children]
+function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), phase_overview::Union{Bool,Symbol}=false, kwargs...)
+    children, _ = _displayed_children(node, walk)
+    children_html = [_htmx_render(child, t; scoped, seen, walk, kwargs...) for child in children]
     h.div(class="treebar-root")(_phase_overview_html(node, phase_overview, t), children_html)
 end
 
@@ -1464,7 +1464,7 @@ function htmx_render_children(node::ProgressNode{<:StateProgress}; texts=nothing
     _with_client_texts(Treebars._overview_enabled(phase_overview) ?
         h.div(class="treebar-with-overview")(_phase_overview_html(node, phase_overview, t), tree) : tree, t)
 end
-function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), max_finished=nothing)
+function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTexts; scoped=true, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), max_finished=nothing)
     isnothing(max_finished) || max_finished >= 0 ||
         throw(ArgumentError("max_finished must be a non-negative integer or `nothing`, got $max_finished"))
     sp = node.impl
@@ -1473,8 +1473,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     # CSS classes all see the hoisted view, which is the whole point of
     # the transparent flag. Then dedup (first-seen-wins) against this pass's
     # `seen` set.
-    raw = _flatten_displayed_children(node)
-    children = filter(c -> _first_seen!(seen, c), raw)
+    children, had_visible = _displayed_children(node, walk)
     # All of this node's children were already rendered elsewhere in this same
     # pass (DO's shared-substatus co-tree case) — the children SECTION is
     # empty, but unlike "genuinely no children yet" this isn't a pending/
@@ -1482,7 +1481,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
     # "Starting..." fallback below. The node's own header/duration still
     # render via the caller (`htmx_render`) — only this children section is
     # suppressed.
-    isempty(children) && !isempty(raw) && return ""
+    isempty(children) && had_visible && return ""
     # A terminal node cannot still be starting or busy. This is reachable when
     # raw children exist but every one flattens away (for example, hidden leaf
     # nodes); the caller sees a non-empty `node.children` and therefore asks us
@@ -1545,7 +1544,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
         haskey(notes, i) && push!(rendered, notes[i])
         keep[i] || continue
         cls = _child_class(child)
-        inner = _htmx_render(child, t; scoped, seen, max_finished)
+        inner = _htmx_render(child, t; scoped, seen, walk, max_finished)
         push!(rendered, isempty(cls) ? inner : h.div(class=cls)(inner))
     end
 
