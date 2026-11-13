@@ -1319,7 +1319,7 @@ _pause_button(t::TreebarTexts) = h.button(class="treebar-pause", type="button",
 # the server owns it outright and the mirror never touches it.
 _badge_elapsed(::Nothing, t::TreebarTexts) = t.badge_starting
 _badge_elapsed(node::ProgressNode, t::TreebarTexts) =
-    node.impl isa StateProgress ? _initial_duration_text(node.impl, t) : ""
+    node.impl isa StateProgress ? _initial_duration_text(_render_state(node), t) : ""
 
 function _poll_badge(label, status, t::TreebarTexts; pause::Bool=true)
     h.span(class="treebar-badge")(
