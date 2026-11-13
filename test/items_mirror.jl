@@ -161,14 +161,20 @@ end
     let
     root = initialize_progress!(:state; description="Run")
     frames = ProgressFrame[]
-    m = mirror_progress(f -> push!(frames, roundtrip(f)), root; interval=0)
+    # Explicit flushes keep the lost creation frame separate from a later
+    # delta. With interval=0 the background sender can coalesce them, leaving
+    # only the final frame after the loss (and no gap to count yet).
+    m = mirror_progress(f -> push!(frames, roundtrip(f)), root; interval=60)
     a = initialize_progress!(root; description="a", N=3)
     update_progress!(a)
+    flush(m)
     b = initialize_progress!(root; description="b")
+    flush(m)
     update_progress!(b, "step one")
     update_progress!(a)
     finalize_progress!(a)
     finalize_progress!(root)
+    flush(m)
     close(m)
     @test frames[1].full && !frames[1].final
     @test frames[end].full && frames[end].final
