@@ -262,7 +262,7 @@ check("nested pollers nest selected regions (the duplication precondition)", () 
         poll_url="/inner", poll_interval="200ms", cancel_url="")
     outer = ext._polling_wrap(
         ext._polling_inner_running("/outer", "200ms", nested);
-        pausable=true, badge=ext._poll_badge("outer", status))
+        pausable=true, badge=ext._poll_badge("outer", status, Treebars.treebar_texts()))
     html = ext.node_to_html(outer)
     # Outer inner CONTAINS a nested poller wrapper + inner: the shape whose
     # double match the top-level-only selector rules out (browser-verified).
@@ -339,7 +339,7 @@ check("terminal failure keeps the recorded error first with no live chrome", () 
     node = ext._polling_wrap(
         ext._polling_inner_done(
             ext._caught_error_ex(ErrorException("boom"), nothing, nothing),
-            ext._kept_progress(status; open=true));
+            ext._kept_progress(status, Treebars.treebar_texts(); open=true));
         terminal=true)
     html = ext.node_to_html(node)
     occursin("class=\"treebar-terminal\"", html) || error("terminal wrapper missing")
