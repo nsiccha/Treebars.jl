@@ -136,6 +136,7 @@ mutable struct ProgressMirror
     # The plans sent so far: `lock`, like the four below.
     next_group::Int
     const group_ids::IdDict{_PhaseGroup,Int}
+    const groups::Dict{Int,_PhaseGroup}
     const group_host::Dict{Int,Int}
     const group_sent::Dict{Int,Any}
     const host_groups::Dict{Int,Vector{Int}}
@@ -475,7 +476,7 @@ function _group_host(m::ProgressMirror, group::_PhaseGroup, from::ProgressNode)
     node = from
     inside = true
     while node isa ProgressNode
-        if group in _phase_group_records(node)
+        if _holds_group(node, group)
             t = _track_for(node, m)
             isnothing(t) || return (t.id, node)
             return inside ? (0, node) : (1, m.root)
@@ -484,6 +485,14 @@ function _group_host(m::ProgressMirror, group::_PhaseGroup, from::ProgressNode)
         node = node.parent
     end
     (0, from)
+end
+
+_holds_group(::ProgressNode, ::_PhaseGroup) = false
+function _holds_group(node::ProgressNode{<:StateProgress}, group::_PhaseGroup)
+    sp = node.impl
+    lock(sp.lock) do
+        !isnothing(sp.phase_groups) && get(sp.phase_groups, group.key, nothing) === group
+    end
 end
 
 # The plans among `plans` that are new or changed since they were last sent
@@ -502,6 +511,7 @@ function _group_states(m::ProgressMirror, plans, full::Bool)
             host == 0 && continue
             if id == 0
                 id = m.group_ids[group] = (m.next_group += 1)
+                m.groups[id] = group
                 m.group_host[id] = host
                 push!(get!(Vector{Int}, m.host_groups, host), id)
             end
@@ -531,17 +541,17 @@ function _host_order(m::ProgressMirror, host::Int, node::ProgressNode)
     own = Int[]
     for group in _phase_group_records(node)
         id = get(m.group_ids, group, 0)
-        id != 0 && id in ids && push!(own, id)
+        id != 0 && get(m.group_host, id, 0) == host && push!(own, id)
     end
-    vcat(own, filter(id -> !(id in own), ids))
+    present = Set(own)
+    append!(own, (id for id in ids if !(id in present)))
 end
 
 function _forget_host_groups!(m::ProgressMirror, host::Int)
     ids = pop!(m.host_groups, host, nothing)
     isnothing(ids) && return nothing
-    gone = Set(ids)
-    filter!(((group, id),) -> !(id in gone), m.group_ids)
     for id in ids
+        delete!(m.group_ids, pop!(m.groups, id))
         delete!(m.group_host, id)
         delete!(m.group_sent, id)
     end
@@ -635,7 +645,7 @@ function mirror_progress(send, node::ProgressNode; interval::Real=0.05)
     m = ProgressMirror(node, send, Float64(interval), round(UInt64, interval * 1e9), _mirror_source(),
         ReentrantLock(), Threads.SpinLock(), Base.Event(true), UInt64(0), true, false, 0, 0,
         _Op[], _Track[], Tuple{_PhaseGroup,ProgressNode}[], Int[], 0, IdDict{_PhaseGroup,Int}(),
-        Dict{Int,Int}(), Dict{Int,Any}(), Dict{Int,Vector{Int}}())
+        Dict{Int,_PhaseGroup}(), Dict{Int,Int}(), Dict{Int,Any}(), Dict{Int,Vector{Int}}())
     lock(m.lock) do
         held = _lock_children(node)
         try
@@ -724,6 +734,7 @@ mutable struct ProgressReplica
     const nodes::Dict{Int,ProgressNode}
     const ids::IdDict{ProgressNode,Int}
     const groups::Dict{Int,_PhaseGroup}
+    const group_ids::IdDict{_PhaseGroup,Int}
     const host_groups::Dict{Int,Vector{Int}}   # node id => the plans it holds
 end
 
@@ -772,7 +783,7 @@ from the mirror are left alone.
 function progress_replica(target::ProgressNode{<:StateProgress}; on_interrupt=nothing)
     r = ProgressReplica(target, on_interrupt, ReentrantLock(), UInt64(0), 0, false, 0, false,
         Dict{Int,ProgressNode}(1 => target), IdDict{ProgressNode,Int}(target => 1), Dict{Int,_PhaseGroup}(),
-        Dict{Int,Vector{Int}}())
+        IdDict{_PhaseGroup,Int}(), Dict{Int,Vector{Int}}())
     if !isnothing(on_interrupt)
         _register!(r)
         interrupt_requested(target) && _forward_root!(r)
@@ -922,7 +933,7 @@ function _forget_replica_node!(r::ProgressReplica, id::Int)
     node = pop!(r.nodes, id, nothing)
     isnothing(node) || delete!(r.ids, node)
     for gid in pop!(r.host_groups, id, Int[])
-        delete!(r.groups, gid)
+        delete!(r.group_ids, pop!(r.groups, gid))
     end
 end
 
@@ -935,6 +946,7 @@ function _apply_groups!(r::ProgressReplica, groups, order)
             group = _PhaseGroup(ReentrantLock(), nothing, g.key, g.declarer, g.host_label, g.keys,
                 copy(g.labels), copy(g.counts), g.items)
             r.groups[g.id] = group
+            r.group_ids[group] = g.id
             push!(get!(Vector{Int}, r.host_groups, g.host), g.id)
             sp = host.impl::StateProgress
             lock(sp.lock) do
@@ -966,14 +978,13 @@ end
 # The host's plans of this process first, then the mirrored ones in the
 # source's order.
 function _order_groups!(r::ProgressReplica, host::ProgressNode, ids)
-    mirrored = Base.IdSet{_PhaseGroup}(values(r.groups))
     sp = host.impl::StateProgress
     lock(sp.lock) do
         plans = sp.phase_groups
         isnothing(plans) && return nothing
         ordered = OrderedDict{Any,_PhaseGroup}()
         for (key, group) in plans
-            group in mirrored || (ordered[key] = group)
+            haskey(r.group_ids, group) || (ordered[key] = group)
         end
         for id in ids
             group = get(r.groups, id, nothing)

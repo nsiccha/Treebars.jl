@@ -516,6 +516,8 @@ end
     @test length(replica.nodes) == count_nodes(root)
     @test length(replica.groups) <= 2
     @test length(m.group_ids) <= 2
+    @test length(m.groups) == length(m.group_ids)
+    @test length(replica.group_ids) == length(replica.groups)
     @test length(m.group_sent) <= 2
     # Finished first: a running root's duration is read off the clock, so two
     # renders of it a moment apart can differ by a millisecond.
@@ -523,5 +525,43 @@ end
     close(m)
     apply_all!()
     @test render_text(target; phase_overview=true) == render_text(root; phase_overview=true)
+    end
+end
+
+@testitem "mirror plan indexes preserve order and release departed hosts" setup=[TreebarsTestImports, MirrorHelpers] tags=[:unit, :mirror] begin
+    let
+    root = initialize_progress!(:state; description="plans")
+    # Many plans on one host used to copy and scan that host for each plan.
+    for i in 1:1600
+        with_prepared_phases(_ -> nothing, root, ["plan $i"])
+    end
+    frames = ProgressFrame[]
+    m = mirror_progress(f -> push!(frames, f), root; interval=1e6)
+    full() = lock(() -> Treebars._build_frame(m; full=true), m.lock)
+    frame = full()
+    @test length(frame.groups) == 1600
+    @test @allocated(full()) < 8_000_000
+    @test frame.group_order == first(frames).group_order
+    close(m)
+
+    # Many hosts used to rebuild a global membership set for each one.
+    root = initialize_progress!(:state; description="hosts")
+    for i in 1:800
+        host = initialize_progress!(root; description="host $i")
+        with_prepared_phases(_ -> nothing, host, ["plan $i"])
+    end
+    (; m, target, replica, sync!, apply_all!) = mirrored(root)
+    apply_all!()
+    frame = lock(() -> Treebars._build_frame(m; full=true), m.lock)
+    reorder() = Treebars._apply_groups!(replica, Treebars._GroupState[], frame.group_order)
+    reorder()
+    @test @allocated(reorder()) < 8_000_000
+    @test phase_overview(target) == phase_overview(root)
+    empty!(root.children)
+    sync!()
+    @test isempty(m.groups) && isempty(m.group_ids) && isempty(m.group_host)
+    @test isempty(replica.groups) && isempty(replica.group_ids)
+    @test isempty(m.host_groups) && isempty(replica.host_groups)
+    close(m)
     end
 end
