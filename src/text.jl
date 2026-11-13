@@ -48,11 +48,12 @@ function _text_summary(node::ProgressNode{<:StateProgress})
         # imply the phase has run. For a skipped or reused node that 0s would
         # be actively misleading: it is the one number that made a bypassed or
         # cached phase look like an instantaneous one.
+        elapsed = duration(sp)
         isnothing(sp.started_at) ||
-            push!(parts, "[$(short_duration(duration(sp)))]")
+            push!(parts, "[$(short_duration(elapsed))]")
         # ETA — non-nothing only for a running determinate node (0 < i < N),
         # so it never appears on a pending/skipped/finished/indeterminate one.
-        let e = eta(sp)
+        let e = _eta(sp, elapsed)
             isnothing(e) || push!(parts, "· ETA ~$(short_duration(e))")
         end
         _shows_interrupt_request(node) && push!(parts, _INTERRUPT_TEXT)

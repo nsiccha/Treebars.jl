@@ -464,8 +464,16 @@ end
 # significant of minutes, hours and days.
 function _duration_text(d, t::TreebarTexts)
     _english_units(t) && return short_duration(d)
+    _localized_duration_text(max(0, _duration_ms(d)), t)
+end
+
+_duration_ms(d::Millisecond) = value(d)
+function _duration_ms(d)
     parts = canonicalize(d).periods
-    ms = isempty(parts) ? 0 : max(0, sum(p -> value(convert(Millisecond, p)), parts))
+    isempty(parts) ? 0 : sum(p -> value(convert(Millisecond, p)), parts)
+end
+
+function _localized_duration_text(ms, t::TreebarTexts)
     u(n, unit) = string(n, t.unit_space, unit)
     ms < 100 && return u(ms, t.unit_ms)
     if ms < 60_000

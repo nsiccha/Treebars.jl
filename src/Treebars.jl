@@ -71,4 +71,6 @@ function polling_fetchindex end
 # A snapshot file the program never closed is marked final when Julia exits.
 __init__() = atexit(_close_open_snapshots)
 
+include("precompile.jl")
+
 end # module Treebars

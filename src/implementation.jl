@@ -516,7 +516,7 @@ that were entered, returns the frozen `finalized_at - started_at`.
 """
 function duration(s::StateProgress)
     isnothing(s.started_at) && return Millisecond(0)
-    something(s.finalized_at, now()) - s.started_at
+    (isnothing(s.finalized_at) ? now() : s.finalized_at) - s.started_at
 end
 
 """
@@ -536,8 +536,12 @@ already hold it).
 """
 function eta(s::StateProgress)
     (isnothing(s.N) || !is_running(s) || s.i <= 0 || s.i >= s.N) && return nothing
-    elapsed_ms = value(duration(s))
-    Millisecond(round(Int, elapsed_ms * (s.N - s.i) / s.i))
+    _eta(s, duration(s))
+end
+
+function _eta(s::StateProgress, elapsed::Millisecond)
+    (isnothing(s.N) || !is_running(s) || s.i <= 0 || s.i >= s.N) && return nothing
+    Millisecond(round(Int, value(elapsed) * (s.N - s.i) / s.i))
 end
 
 is_pending(node::ProgressNode{<:StateProgress}) = is_pending(node.impl)
