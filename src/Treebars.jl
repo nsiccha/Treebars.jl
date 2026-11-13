@@ -33,6 +33,7 @@ include("tracking.jl")
 include("snapshot.jl")
 include("mirror.jl")
 include("convenience.jl")
+include("macros.jl")
 include("busy_retry.jl")
 include("dispatch_parent.jl")
 

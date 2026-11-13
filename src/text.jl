@@ -5,7 +5,7 @@
 # HTMXObjects/HTTP extensions and produces HTML for a browser. That leaves an
 # author of new `@progress` instrumentation with no way to check their work:
 # markers that silently render nothing (the docstring trap — see
-# `_warn_swallowed_markers` in convenience.jl) are parse-clean and
+# `_warn_swallowed_markers` in macro_syntax.jl) are parse-clean and
 # precompile-clean, so the FIRST observation of a broken phase tree happens in
 # a browser, on a real run. `render_text` closes that loop — run the work under
 # a `:state` root, dump the tree, assert on it:
