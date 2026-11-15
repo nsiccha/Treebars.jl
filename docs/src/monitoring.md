@@ -73,6 +73,21 @@ scheduling opportunity or a change. An interactive thread, selected with
 `julia -t auto,1`, gives the background task a separate place to run. Closing
 writes the final snapshot; a killed process may leave an old live record.
 
+### Processes without Julia
+
+A Python process writes the same file with the module in the repository's
+`python/` directory. It uses only the Python standard library and the names
+used here: `with_progress`, `with_prepared_phases`, `with_prepared_progress`,
+`update_progress`, `reuse_progress`, `snapshot_progress` and `render_text`.
+Its renderer prints a tree exactly as `render_text` does, which the test
+suite checks, so `bin/treebars` reads either writer's file. The module's
+README shows a complete run and its snapshot. Install it at the commit you
+build against, or put the directory on `sys.path`.
+
+```sh
+pip install "treebars @ git+https://github.com/nsiccha/Treebars.jl@<commit>#subdirectory=python"
+```
+
 ## Replicas
 
 A mirror emits `ProgressFrame` values. A replica applies those frames to a
