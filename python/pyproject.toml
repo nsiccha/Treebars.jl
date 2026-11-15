@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "treebars"
+dynamic = ["version"]
+description = "Treebars progress trees and live snapshot files for Python processes"
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Nikolas Siccha" }]
+
+[project.urls]
+Source = "https://github.com/nsiccha/Treebars.jl"
+
+[tool.setuptools]
+py-modules = ["treebars"]
+
+[tool.setuptools.dynamic]
+version = { attr = "treebars.__version__" }

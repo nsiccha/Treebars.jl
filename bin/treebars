@@ -1,6 +1,7 @@
 #!/bin/sh
-# treebars — read a progress snapshot that Treebars.snapshot_progress keeps up
-# to date, from any shell, while the run that writes it goes on.
+# treebars — read a progress snapshot that Treebars.snapshot_progress (or the
+# Python writer, python/treebars.py) keeps up to date, from any shell, while
+# the run that writes it goes on.
 #
 #   treebars show FILE             print the snapshot once, with its age
 #   treebars watch FILE [SECONDS]  redraw it every SECONDS (default 1) until

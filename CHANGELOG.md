@@ -11,6 +11,21 @@ floor, for example `[compat] Treebars = "0.1.1"`, so an environment that pins
 an older Treebars commit is refused when it resolves instead of failing at run
 time. Changes before 0.1.1 are recorded in the git history only.
 
+## 0.1.7
+
+- New: a Python process can report a Treebars tree and keep a live snapshot
+  file of it without Julia. `python/treebars.py` (standard library only,
+  Python 3.8+, installable with `pip install "treebars @
+  git+https://github.com/nsiccha/Treebars.jl@<commit>#subdirectory=python"`)
+  offers `with_progress`, `with_prepared_phases`, `with_prepared_progress`,
+  `update_progress`, `IncrementBy`, `reuse_progress`, `snapshot_progress` and
+  `render_text` with Treebars.jl's meanings, and writes the same file
+  `snapshot_progress` writes, so `bin/treebars` and the KB's `/compute` page
+  (`KB_PROGRESS_FILE`) read it unchanged. `with_progress("state", …,
+  snapshot=path)` opens a root that writes its final snapshot after the root
+  ended; `snapshot=None` writes no file. The test suite checks that the Python
+  renderer prints exactly what `render_text` prints.
+
 ## 0.1.6
 
 - New: a progress tree can be shown live in another process.
