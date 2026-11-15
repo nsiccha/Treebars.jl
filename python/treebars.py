@@ -41,7 +41,9 @@ import socket
 import threading
 import time
 
-__version__ = "0.1.7"
+# The Python module's own version; the Treebars.jl commit it is installed from
+# fixes its behaviour, and its test suite pins it to that commit's render_text.
+__version__ = "0.1.0"
 
 __all__ = [
     "IncrementBy",

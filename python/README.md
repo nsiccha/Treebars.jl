@@ -24,7 +24,9 @@ or install it with pip at the Treebars.jl commit you want:
 pip install "treebars @ git+https://github.com/nsiccha/Treebars.jl@<commit>#subdirectory=python"
 ```
 
-The Python version equals the Treebars.jl version it was released with.
+The commit you install from fixes what you get; Treebars.jl 0.1.7 is the first
+release that carries this module. The module's own version (`treebars.__version__`)
+changes only when its Python interface does.
 
 ## Use
 

@@ -148,11 +148,3 @@ end
         end # let
     end
 end
-
-@testitem "Python writer's version is the package version" setup=[TreebarsTestImports, PythonWriter] tags=[:unit, :snapshot, :python] begin
-    # pyproject.toml reads its version from `treebars.__version__`, so a pip
-    # install names the Treebars.jl release it renders like.
-    m = match(r"^__version__ = \"([^\"]+)\"$"m, read(joinpath(PYDIR, "treebars.py"), String))
-    @test !isnothing(m)
-    @test VersionNumber(m[1]) == pkgversion(Treebars)
-end
