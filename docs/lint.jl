@@ -37,3 +37,8 @@ function lint_docs(pages)
     isempty(generated) || error("Review committed regenerable docs assets: $(join(generated, ", "))")
     nothing
 end
+
+if abspath(PROGRAM_FILE) == @__FILE__
+    include("pages.jl")
+    lint_docs(pages)
+end
