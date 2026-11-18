@@ -588,6 +588,20 @@ git-tree-sha1 = "0533e564aae234aff59ab625543145446d8b6ec2"
 uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 version = "1.7.1"
 
+[[deps.JSON]]
+deps = ["Dates", "Logging", "Parsers", "PrecompileTools", "StructUtils", "UUIDs", "Unicode"]
+git-tree-sha1 = "06d90f699285d055e34f0b014636a75a17ff2252"
+uuid = "682c06a0-de6a-54ab-a142-c8b1cf79cde6"
+version = "1.13.4"
+
+    [deps.JSON.extensions]
+    JSONArrowExt = ["ArrowTypes"]
+    JSONSerializationExt = ["Serialization"]
+
+    [deps.JSON.weakdeps]
+    ArrowTypes = "31f734f8-188a-4ce0-8406-c8a06bd891cd"
+    Serialization = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
+
 [[deps.Jieko]]
 deps = ["ExproniconLite"]
 git-tree-sha1 = "2f05ed29618da60c06a87e9c033982d4f71d0b6c"
@@ -765,7 +779,7 @@ version = "1.7.1"
 [[deps.OpenBLAS_jll]]
 deps = ["Artifacts", "CompilerSupportLibraries_jll", "Libdl"]
 uuid = "4536629a-c528-5b80-bd46-f80d51c5b363"
-version = "0.3.23+5"
+version = "0.3.34+1"
 
 [[deps.OpenLibm_jll]]
 deps = ["Artifacts", "Libdl"]
@@ -876,6 +890,12 @@ deps = ["OrderedCollections", "UnPack"]
 git-tree-sha1 = "34c0e9ad262e5f7fc75b10a9952ca7692cfc5fbe"
 uuid = "d96e819e-fc66-5662-9728-84c9c7592b0a"
 version = "0.12.3"
+
+[[deps.Parsers]]
+deps = ["Dates", "PrecompileTools"]
+git-tree-sha1 = "e5ae52d1f4f19a9591d615cb0f1ef8d415b40933"
+uuid = "69de0a69-1ddd-5017-9359-2bf0b02dc9f0"
+version = "3.0.6"
 
 [[deps.Pathfinder]]
 deps = ["ADTypes", "Distributions", "Folds", "ForwardDiff", "IrrationalConstants", "LinearAlgebra", "LogDensityProblems", "Optim", "Optimization", "OptimizationBase", "OptimizationOptimJL", "PDMats", "PSIS", "ProgressLogging", "Random", "Requires", "SciMLBase", "Statistics", "StatsBase", "Transducers"]
@@ -1314,6 +1334,28 @@ version = "0.4.6"
     JLArrays = "27aeb0d3-9eb9-45fb-866b-73c2ecf80fcb"
     PtrArrays = "43287f4e-b6f4-7ad1-bb20-aadabca52c3d"
 
+[[deps.StructUtils]]
+deps = ["Dates", "UUIDs"]
+git-tree-sha1 = "d9cfc07e1d1a8985aa9d03870d642b5d7ab2cf33"
+uuid = "ec057cc2-7a8d-4b58-b3b3-92acb9f63b42"
+version = "2.12.1"
+
+    [deps.StructUtils.extensions]
+    StructUtilsDBInterfaceExt = ["DBInterface", "Tables"]
+    StructUtilsDataFramesExt = ["DataFrames"]
+    StructUtilsLazilyInitializedFieldsExt = ["LazilyInitializedFields"]
+    StructUtilsMeasurementsExt = ["Measurements"]
+    StructUtilsStaticArraysCoreExt = ["StaticArraysCore"]
+    StructUtilsTablesExt = ["Tables"]
+
+    [deps.StructUtils.weakdeps]
+    DBInterface = "a10d1c49-ce27-4219-8d33-6db1a4562965"
+    DataFrames = "a93c6f00-e57d-5684-b7b6-d8193f3e46c0"
+    LazilyInitializedFields = "0e77f7df-68c5-4e49-93ce-4cd80f5598bf"
+    Measurements = "eff96d63-e80a-5855-80a2-b1b0885c5ab7"
+    StaticArraysCore = "1e83bf80-4336-4d27-bf5d-d5a4f845583c"
+    Tables = "bd369af6-aec1-5ad0-b16a-f7cc5008161c"
+
 [[deps.SuiteSparse]]
 deps = ["Libdl", "LinearAlgebra", "Serialization", "SparseArrays"]
 uuid = "4607b0f0-06f3-5cda-b6b1-a6196a1729e9"
@@ -1425,10 +1467,10 @@ uuid = "24ddb15e-299a-5cc3-8414-dbddc482d9ca"
 version = "0.1.17"
 
 [[deps.Treebars]]
-deps = ["Dates", "OrderedCollections"]
+deps = ["Dates", "JSON", "OrderedCollections", "PrecompileTools"]
 path = "../.."
 uuid = "e1e568c4-3a56-40a4-95fa-9b9c6c16fccb"
-version = "0.1.0"
+version = "0.1.7"
 weakdeps = ["HTMXObjects", "HTTP", "Term"]
 
     [deps.Treebars.extensions]
