@@ -54,31 +54,35 @@ result_article(title, body...; rerun_url=nothing) = h.article(
 
 # Demo-index input form helpers. The index page wires ~7 single-key/param input
 # fieldsets, each with the same shape: <fieldset role=group> with <input> + <button>,
-# where the button's hx-get points at `url_prefix/<input value>` and a hyperscript
+# where the button's hx-get points at `base_url/<input value>` and a hyperscript
 # `_=` hook rewrites @hx-get on click using the current input value(s). Pulled
 # out so the index reads as a list of inputs, not as repeated boilerplate.
+# `base_url` must come from the route body as `__self__/"<feature>/<route>"`: that
+# string already carries the request's mount (`X-Forwarded-Prefix`, e.g.
+# `/p/Treebars`), so both the initial hx-get and the click rewrite stay inside it.
+# A literal "/feature/route" would resolve outside any /p/ mount.
 
-"Single-key input + run button. Wires `_=` so the button rebuilds `url_prefix/<value>` on click before HTMX fires."
-key_input_form(button_text, url_prefix, key_id, key_value, target_id) = h.fieldset(; role="group")(
+"Single-key input + run button. Wires `_=` so the button rebuilds `base_url/<value>` on click before HTMX fires."
+key_input_form(button_text, base_url, key_id, key_value, target_id) = h.fieldset(; role="group")(
     h.input(; type="text", id=key_id, value=key_value, placeholder="Key"),
     h.button(button_text;
-        hx_get = "$url_prefix/$key_value",
+        hx_get = "$base_url/$key_value",
         hx_target = "#$target_id",
         hx_swap = "innerHTML",
-        _ = "on click set my @hx-get to '$url_prefix/' + #$key_id.value",
+        _ = "on click set my @hx-get to '$base_url/' + #$key_id.value",
     ),
 )
 
-"Two-number-param input + run button. Wires `_=` so the button rebuilds `url_prefix/<steps>/<sleep>` on click."
-param_input_form(button_text, url_prefix, steps_id, sleep_id, target_id;
+"Two-number-param input + run button. Wires `_=` so the button rebuilds `base_url/<steps>/<sleep>` on click."
+param_input_form(button_text, base_url, steps_id, sleep_id, target_id;
                  steps_default=100, sleep_default=20) = h.fieldset(; role="group")(
     h.input(; type="number", id=steps_id, value=string(steps_default), placeholder="Steps", class="tb-input-narrow"),
     h.input(; type="number", id=sleep_id, value=string(sleep_default), placeholder="ms", class="tb-input-narrow"),
     h.button(button_text;
-        hx_get = "$url_prefix/$steps_default/$sleep_default",
+        hx_get = "$base_url/$steps_default/$sleep_default",
         hx_target = "#$target_id",
         hx_swap = "innerHTML",
-        _ = "on click set my @hx-get to '$url_prefix/' + #$steps_id.value + '/' + #$sleep_id.value",
+        _ = "on click set my @hx-get to '$base_url/' + #$steps_id.value + '/' + #$sleep_id.value",
     ),
 )
 
@@ -128,9 +132,9 @@ const APPDATA = AppData()
 
     @get index() = h.div(
         h.h1("Treebars Web Demo"),
-        h.p(h.a(href="/tests")("Tests"), " | ",
-            h.a(href="/pills")("Pill demos"), " | ",
-            h.a(href="/autocleanup")("Auto-cleanup demo"),
+        h.p(h.a(href=__self__/"tests")("Tests"), " | ",
+            h.a(href=__self__/"pills")("Pill demos"), " | ",
+            h.a(href=__self__/"autocleanup")("Auto-cleanup demo"),
             " | HTTP polling, WebSockets, inline child substatus, phase markers."),
 
         h.hr(),
@@ -138,7 +142,7 @@ const APPDATA = AppData()
         h.p("All phases (Load / Preprocess / Fit / Evaluate / Save) are pre-enumerated as ",
             h.em("pending"), " children — they appear greyed-out from the outset and transition pending → running → done as execution reaches each marker.";
             class="u-text-sm u-text-muted"),
-        h.div(key_input_form("Run pipeline", "/phases/demo", "macro-key", "macro-demo", "macro-result")),
+        h.div(key_input_form("Run pipeline", __self__/"phases/demo", "macro-key", "macro-demo", "macro-result")),
         h.div(; id="macro-result"),
 
         h.hr(),
@@ -148,7 +152,7 @@ const APPDATA = AppData()
             "sorts its child ", h.em("above"), " the labeled phases (Phase A / Phase B); ",
             "without the fix it rendered below them.";
             class="u-text-sm u-text-muted"),
-        h.div(key_input_form("Run leading pipeline", "/phases/leading", "lead-key", "lead-demo", "lead-result")),
+        h.div(key_input_form("Run leading pipeline", __self__/"phases/leading", "lead-key", "lead-demo", "lead-result")),
         h.div(; id="lead-result"),
 
         h.hr(),
@@ -169,9 +173,9 @@ const APPDATA = AppData()
                     h.option("fail at :analyze"; value="analyze"),
                     h.option("fail at :process"; value="process"),
                 ),
-                h.button("Run dynamic"; hx_get="/phases/dynamic/medium",
+                h.button("Run dynamic"; hx_get=__self__/"phases/dynamic/medium",
                     hx_target="#dynamic-result", hx_swap="innerHTML",
-                    _="on click set my @hx-get to '/phases/dynamic/' + #dyn-preset.value + '?fail_at=' + #dyn-fail.value"),
+                    _="on click set my @hx-get to '$(__self__/"phases/dynamic")/' + #dyn-preset.value + '?fail_at=' + #dyn-fail.value"),
             ),
         ),
         h.div(; id="dynamic-result"),
@@ -179,13 +183,13 @@ const APPDATA = AppData()
         h.hr(),
         h.h3("1. HTTP polling"),
         h.p("Client polls every 200ms via hx-get + hx-trigger."; class="u-text-sm u-text-muted"),
-        h.div(key_input_form("Run (polling)", "/async/compute", "poll-key", "poll-demo", "poll-result")),
+        h.div(key_input_form("Run (polling)", __self__/"async/compute", "poll-key", "poll-demo", "poll-result")),
         h.div(; id="poll-result"),
 
         h.hr(),
         h.h3("2. WebSocket (server push)"),
         h.p("Server pushes HTML updates over a persistent connection."; class="u-text-sm u-text-muted"),
-        h.div(; hx_ext="ws", ws_connect="/websockets/ws")(
+        h.div(; hx_ext="ws", ws_connect=__self__/"websockets/ws")(
             h.form(; ws_send="true")(
                 h.fieldset(; role="group")(
                     h.input(; type="text", name="key", value="ws-demo", placeholder="Key"),
@@ -198,7 +202,7 @@ const APPDATA = AppData()
         h.hr(),
         h.h3("3. Inline child substatus"),
         h.p("Inline Sub struct gets its own ProgressNode under the parent's status. No manual __substatus__ needed."; class="u-text-sm u-text-muted"),
-        h.div(key_input_form("Run (nested)", "/nested/compute", "nested-key", "nested-demo", "nested-result")),
+        h.div(key_input_form("Run (nested)", __self__/"nested/compute", "nested-key", "nested-demo", "nested-result")),
         h.div(; id="nested-result"),
 
         h.hr(),
@@ -207,12 +211,12 @@ const APPDATA = AppData()
         h.div(; class="u-grid-2")(
             h.div(
                 h.h5("Without docstring"),
-                key_input_form("Run", "/async/compute", "doc-cmp-key", "compare", "doc-cmp-left"),
+                key_input_form("Run", __self__/"async/compute", "doc-cmp-key", "compare", "doc-cmp-left"),
                 h.div(; id="doc-cmp-left"),
             ),
             h.div(
                 h.h5("With docstring"),
-                key_input_form("Run", "/dsdemo/compute", "doc-cmp-key2", "compare", "doc-cmp-right"),
+                key_input_form("Run", __self__/"dsdemo/compute", "doc-cmp-key2", "compare", "doc-cmp-right"),
                 h.div(; id="doc-cmp-right"),
             ),
         ),
@@ -220,12 +224,12 @@ const APPDATA = AppData()
         h.div(; class="u-grid-2")(
             h.div(
                 h.h5("Without docstring"),
-                param_input_form("Run", "/async/param", "doc-steps-l", "doc-sleep-l", "doc-param-left"),
+                param_input_form("Run", __self__/"async/param", "doc-steps-l", "doc-sleep-l", "doc-param-left"),
                 h.div(; id="doc-param-left"),
             ),
             h.div(
                 h.h5("With docstring"),
-                param_input_form("Run", "/dsdemo/param", "doc-steps-r", "doc-sleep-r", "doc-param-right"),
+                param_input_form("Run", __self__/"dsdemo/param", "doc-steps-r", "doc-sleep-r", "doc-param-right"),
                 h.div(; id="doc-param-right"),
             ),
         ),
