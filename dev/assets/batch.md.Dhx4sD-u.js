@@ -45,7 +45,7 @@ import{_ as h,C as n,o as e,c as t,an as i,E as p}from"./chunks/framework.eNAzln
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Exports: [:A =&gt; 4.0]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">✓ Sample batch [0.2s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">└─ ✓ Samples (3/3) [0.2s]</span></span>
-<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   ├─ ✓ — A [0.1s]</span></span>
+<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   ├─ ✓ — A [0.2s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  ├─ ✓ Validate [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  ├─ ✓ Summarize [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  └─ ✓ Export [0s]</span></span>
@@ -53,7 +53,7 @@ import{_ as h,C as n,o as e,c as t,an as i,E as p}from"./chunks/framework.eNAzln
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  ├─ ✓ Validate [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  ├─ ↺ Summarize</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   │  └─ ⊘ Export</span></span>
-<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   └─ ✓ — C [1ms]</span></span>
+<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">   └─ ✓ — C [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">      ├─ ✓ Validate [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">      ├─ ✓ Summarize [0s]</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">      └─ ⊘ Export</span></span></code></pre></div><p>The root is finished because its callback returned normally. A finished root does not imply that every prepared phase ran: reuse and a deliberate bypass are successful paths through this computation. Durations in the text are wall-clock observations of this documentation build. They include compilation and instrumentation and are not a performance comparison or an estimate for a larger dataset.</p><h2 id="Phase-counts" tabindex="-1">Phase counts <a class="header-anchor" href="#Phase-counts" aria-label="Permalink to &quot;Phase counts {#Phase-counts}&quot;">​</a></h2><p>The overview aggregates the declared plan. It preserves the distinction between finished, reused and skipped work instead of treating every terminal phase as an executed phase.</p><div class="language-julia vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang">julia</span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span style="--shiki-light:#D73A49;--shiki-dark:#F97583;">using</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;"> AlgebraOfVega</span></span>
@@ -86,5 +86,5 @@ import{_ as h,C as n,o as e,c as t,an as i,E as p}from"./chunks/framework.eNAzln
 <span class="line"><span style="--shiki-light:#005CC5;--shiki-dark:#79B8FF;">println</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">(</span><span style="--shiki-light:#032F62;--shiki-dark:#9ECBFF;">&quot;Input: literals in this page; no external data or fit cache&quot;</span><span style="--shiki-light:#24292E;--shiki-dark:#E1E4E8;">)</span></span></code></pre></div><div class="language- vp-adaptive-theme"><button title="Copy Code" class="copy"></button><span class="lang"></span><pre class="shiki shiki-themes github-light github-dark vp-code" tabindex="0"><code><span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Julia: 1.10.13</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Treebars: 0.1.7</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">AlgebraOfVega: 0.2.29</span></span>
-<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Source revision: f76e894758de89924d980ef74deb5a81575d148b</span></span>
+<span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Source revision: 7e1a63b92960215cad840d471086a529085377c7</span></span>
 <span class="line"><span style="--shiki-light:#24292e;--shiki-dark:#e1e4e8;">Input: literals in this page; no external data or fit cache</span></span></code></pre></div></details>`,10))])}const F=h(k,[["render",l]]);export{c as __pageData,F as default};
