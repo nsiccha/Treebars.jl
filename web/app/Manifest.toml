@@ -249,16 +249,12 @@ version = "0.1.2"
 git-tree-sha1 = "b4b092499347b18a015186eae3042f72267106cb"
 uuid = "187b0558-2788-49d3-abe0-74a17ed4e7c9"
 version = "1.6.0"
+weakdeps = ["IntervalSets", "LinearAlgebra", "StaticArrays"]
 
     [deps.ConstructionBase.extensions]
     ConstructionBaseIntervalSetsExt = "IntervalSets"
     ConstructionBaseLinearAlgebraExt = "LinearAlgebra"
     ConstructionBaseStaticArraysExt = "StaticArrays"
-
-    [deps.ConstructionBase.weakdeps]
-    IntervalSets = "8197267c-284f-5f27-9208-e0e47529a953"
-    LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
-    StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 
 [[deps.DataAPI]]
 git-tree-sha1 = "abe83f3a2f1b857aac70ef8b269080af17764bbe"
@@ -384,12 +380,12 @@ uuid = "bbc10e6e-7c05-544b-b16e-64fede858acb"
 version = "3.6.0"
 
 [[deps.DynamicObjects]]
-deps = ["Mmap", "SHA", "ScopedValues", "Serialization", "Treebars"]
-git-tree-sha1 = "80097f56265624f057e110f16f44af6800002732"
-repo-rev = "bad865e9a87f29116d5cfbcf36352a0555076e09"
-repo-url = "https://github.com/nsiccha/DynamicObjects.jl"
+deps = ["Malt", "Mmap", "OrderedCollections", "PrecompileTools", "SHA", "ScopedValues", "Serialization", "Treebars"]
+git-tree-sha1 = "7c1452ea798ebf850a8d9440a2bb3f1ec192fbe4"
+repo-rev = "81b30199b946381fd4c14b8c587c47f6516496f7"
+repo-url = "https://github.com/nsiccha/DynamicObjects.jl.git"
 uuid = "23d02862-63fe-4c6e-8fdb-1d52cbbd39d5"
-version = "0.5.0"
+version = "0.5.32"
 
     [deps.DynamicObjects.extensions]
     DataFramesArrowExt = ["Arrow", "DataFrames"]
@@ -511,20 +507,20 @@ uuid = "46192b85-c4d5-4398-a991-12ede77f4527"
 version = "0.2.0"
 
 [[deps.HTMX]]
-deps = ["Markdown", "OrderedCollections"]
-git-tree-sha1 = "c14e0176df5e89037acffebc175327f5bda6152f"
-repo-rev = "4ae6cd023b1db2a692d8c0612e989d7a02a0f661"
-repo-url = "https://github.com/nsiccha/HTMX.jl"
+deps = ["Markdown", "OrderedCollections", "PrecompileTools", "ScopedValues"]
+git-tree-sha1 = "24da805fc757b63aa60e90224197c3790d0e95ba"
+repo-rev = "ea15705fc3830acc921be0de2fe705775b43990a"
+repo-url = "https://github.com/nsiccha/HTMX.jl.git"
 uuid = "27f3e1ef-6ef8-44dc-9e9a-2fb23ed44e83"
-version = "1.1.0"
+version = "1.4.2"
 
 [[deps.HTMXObjects]]
-deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "LazyArtifacts", "LibGit2", "Random", "Sockets", "Tables"]
-git-tree-sha1 = "37bb3994fb5d063bd6d4d91b46c11379fe004ebd"
-repo-rev = "6ad33d8816c24881dc0eb5978c25b3dd1af05974"
-repo-url = "https://github.com/nsiccha/HTMXObjects.jl"
+deps = ["CodecZlib", "CommonMark", "Dates", "DynamicObjects", "HTMX", "HTTP", "IntervalSets", "JSON", "LazyArtifacts", "LibGit2", "MIMEs", "Markdown", "PrecompileTools", "REPL", "Random", "ScopedValues", "Sockets", "Tables"]
+git-tree-sha1 = "4d0c959a3a49b92a8cc9fed5492733f2388cbdab"
+repo-rev = "e3a1f26ff26c603c15e04045b83b2363d531cde1"
+repo-url = "https://github.com/nsiccha/HTMXObjects.jl.git"
 uuid = "b12ef442-5798-4353-80f3-9562b03a0cb6"
-version = "0.1.0"
+version = "0.1.178"
 weakdeps = ["Treebars"]
 
     [deps.HTMXObjects.extensions]
@@ -561,6 +557,23 @@ version = "0.3.1"
 [[deps.InteractiveUtils]]
 deps = ["Markdown"]
 uuid = "b77e0a4c-d291-57a0-90e8-8db25a27a240"
+
+[[deps.IntervalSets]]
+git-tree-sha1 = "0db6aea5b64caa1c47e9fdd27394f0296f05e8bf"
+uuid = "8197267c-284f-5f27-9208-e0e47529a953"
+version = "0.7.15"
+
+    [deps.IntervalSets.extensions]
+    IntervalSetsMakieExt = "Makie"
+    IntervalSetsRandomExt = "Random"
+    IntervalSetsRecipesBaseExt = "RecipesBase"
+    IntervalSetsStatisticsExt = "Statistics"
+
+    [deps.IntervalSets.weakdeps]
+    Makie = "ee78f7c6-11fb-53f2-987a-cfe4a2b5a57a"
+    Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+    RecipesBase = "3cdcf5f2-1ef4-517c-9805-6587b60abb01"
+    Statistics = "10745b16-79ce-11e8-11f9-7d13ad32a3b2"
 
 [[deps.InverseFunctions]]
 git-tree-sha1 = "a779299d77cd080bf77b97535acecd73e1c5e5cb"
@@ -698,6 +711,11 @@ git-tree-sha1 = "f90494689e927268dec7bbd1ece64f134ad251f4"
 uuid = "be115224-59cd-429b-ad48-344e309966f0"
 version = "0.3.16"
 
+[[deps.MIMEs]]
+git-tree-sha1 = "c64d943587f7187e751162b3b84445bbbd79f691"
+uuid = "6c6e2e6c-3030-632d-7369-2d6c69616d65"
+version = "1.1.0"
+
 [[deps.MLJModelInterface]]
 deps = ["InteractiveUtils", "REPL", "Random", "ScientificTypesBase", "StatisticalTraits"]
 git-tree-sha1 = "c275fae2e693206b4527dd9d2382aa15359ef3ed"
@@ -708,6 +726,12 @@ version = "1.12.1"
 git-tree-sha1 = "1e0228a030642014fe5cfe68c2c0a818f9e3f522"
 uuid = "1914dd2f-81c6-5fcd-8719-6d5c9610ff09"
 version = "0.5.16"
+
+[[deps.Malt]]
+deps = ["Distributed", "Logging", "RelocatableFolders", "Serialization", "Sockets"]
+git-tree-sha1 = "3b0e05e491f2b32da90009fc6669ab8281d64533"
+uuid = "36869731-bdee-424d-aa32-cab38c994e3b"
+version = "1.5.0"
 
 [[deps.Markdown]]
 deps = ["Base64"]
@@ -1046,6 +1070,12 @@ git-tree-sha1 = "02d31ad62838181c1a3a5fd23a1ce5914a643601"
 uuid = "42d2dcc6-99eb-4e98-b66c-637b7d73030e"
 version = "0.1.3"
 
+[[deps.RelocatableFolders]]
+deps = ["SHA", "Scratch"]
+git-tree-sha1 = "ffdaf70d81cf6ff22c2b6e733c900c3321cab864"
+uuid = "05181044-ff0b-4ac5-8273-598c1e38db00"
+version = "1.0.1"
+
 [[deps.Requires]]
 deps = ["UUIDs"]
 git-tree-sha1 = "62389eeff14780bfe55195b7204c0d8738436d64"
@@ -1164,6 +1194,12 @@ deps = ["HashArrayMappedTries", "Logging"]
 git-tree-sha1 = "67a144433c4ce877ee6d1ada69a124d6b1ecf7be"
 uuid = "7e506255-f358-4e82-b7e4-beb19740aa63"
 version = "1.6.2"
+
+[[deps.Scratch]]
+deps = ["Dates"]
+git-tree-sha1 = "9b81b8393e50b7d4e6d0a9f14e192294d3b7c109"
+uuid = "6c6a2e73-6563-6170-7368-637461726353"
+version = "1.3.0"
 
 [[deps.Serialization]]
 uuid = "9e88b42a-f829-5b0c-bbe9-9e923198166b"
