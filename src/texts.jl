@@ -234,7 +234,11 @@ function treebar_texts(locale::Symbol=:en, notes::Pair...; texts...)
     for name in _TEXT_NAMES
         _check_placeholders("treebar_texts: $name", merged[name], get(_TEXT_PLACEHOLDERS, name, ()))
     end
-    TreebarTexts((merged[name] for name in _TEXT_NAMES)..., locale, _note_overrides(notes))
+    # One concretely typed argument per text: splatting a generator passed them
+    # as `Any`, so the constructor compiled `convert(String, ::Any)`, which a
+    # package loaded later can invalidate (CategoricalArrays does).
+    TreebarTexts(ntuple(i -> merged[_TEXT_NAMES[i]]::String, Val(length(_TEXT_NAMES)))...,
+        locale, _note_overrides(notes))
 end
 
 const _PLACEHOLDER = r"\{([A-Za-z_]+)\}"

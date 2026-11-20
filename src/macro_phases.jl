@@ -105,8 +105,12 @@ end
 # its body, so the user's last statement stays the block's value.
 # Mirrors `_run_prepared_phases` for the dynamic form.
 function _emit_phases(phases, ctx)
-    labeled = [(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
-    pending_syms = [gensym(:phase) for _ in labeled]
+    # Typed containers (also `leading_stmts` below): untyped comprehensions
+    # compile `similar(::Type{Vector{T}} where T, …)` and an `Any` statement
+    # list `Base._any(f, ::Any, :)`, both of which packages loaded later can
+    # invalidate, recompiling the macro walker on the next expansion.
+    labeled = Tuple{Any,Vector{Any}}[(lbl, stmts) for (lbl, stmts) in phases if lbl !== nothing]
+    pending_syms = Symbol[gensym(:phase) for _ in labeled]
     group_sym = gensym(:phase_group)
     labels_sym = gensym(:phase_labels)
     plan_identity = QuoteNode((:macro, gensym(:phase_plan)))
@@ -143,7 +147,7 @@ function _emit_phases(phases, ctx)
     # finished child visible. The leading statements stay OUTSIDE any new
     # try/let scope (we only rebind `__progress__`, not the variable scope), so
     # their assignments still leak into the enclosing scope as before.
-    leading_stmts = first(phases)[2]
+    leading_stmts = first(phases)[2]::Vector{Any}
     if !isempty(pending_syms) && any(s -> !(s isa LineNumberNode), leading_stmts)
         leading_sym = gensym(:leading)
         leading_ctx = merge(ctx, (progress=leading_sym,))

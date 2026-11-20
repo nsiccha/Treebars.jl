@@ -40,8 +40,10 @@ function _short_duration_parts(dt)
     parts = cp.periods
     isempty(parts) && return "0s"
     # Total milliseconds — wall-clock durations are Millisecond-based, so every
-    # canonical part converts cleanly.
-    ms = sum(p -> value(convert(Millisecond, p)), parts)
+    # canonical part converts cleanly. Typed, because an untyped total reached
+    # `_short_subminute(::Any)` and its `endswith(::Any, ::String)` edge, which
+    # HTMXObjects' dependency Tables invalidates on load (todo `1w372fb`).
+    ms = sum(p -> value(convert(Millisecond, p))::Int64, parts)
     ms < 60_000 && return _short_subminute(ms)
     # ≥ 1 min: the two most-significant canonical parts. `parts` holds abstract
     # `Period`s, so an untyped `map` result leaves a method-table edge on

@@ -202,7 +202,7 @@ _ternary_source(a) = string(a)
 _ternary_source(a::AbstractString) = repr(a)
 _ternary_source(a::Expr) =
     a.head === :if && length(a.args) == 3 && !any(x -> Meta.isexpr(x, :block), @view a.args[2:3]) ?
-        join(_ternary_source.(a.args), " ? ", " : ") : string(a)
+        join(String[_ternary_source(x) for x in a.args], " ? ", " : ") : string(a)
 
 # True iff `@progress a` lowers exactly as `a` would without it. With no label,
 # `_build_body` only walks a body that is not one of its shapes, and that walk
