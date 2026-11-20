@@ -38,7 +38,10 @@ function _prepare_phase_group(parent::ProgressNode{<:StateProgress}, identity, k
     end
     # Name an outermost plan after that surviving owner, whichever groups a
     # snapshot happens to reach.
-    host = lock(() -> owner.impl.description, owner.impl.lock)
+    # `owner` is abstractly typed after the walk; the assertion keeps the
+    # `_PhaseGroup` constructor free of a `convert(::Type{String}, ::Any)` edge
+    # that loading CategoricalArrays would invalidate.
+    host = lock(() -> owner.impl.description, owner.impl.lock)::String
     ancestor = owner === parent ? nothing : _get_phase_group!(owner, key, declarer, host, keys, labels)
     group = _get_phase_group!(parent, key, declarer, host, keys, labels; ancestor)
     current = group
@@ -141,6 +144,14 @@ _phase_fallback_label(key::Integer) = "Phase $key"
 
 _merged_label(a, b) = a == b ? a : nothing
 
+# The label of the phase that declared `group`'s plan. `declarer` is untyped,
+# so reading `.label` straight into a `Ref{Union{Nothing,String}}` compiles a
+# `convert(::Type{String}, ::Any)` edge that a package adding `convert` methods
+# (CategoricalArrays) invalidates — and every HTML render reaches this code,
+# even with the overview off. The assertion keeps that native code valid.
+_declared_label(group::_PhaseGroup) =
+    isnothing(group.declarer) ? nothing : group.declarer.label::Union{Nothing,String}
+
 """
     phase_overview(node) -> Tuple
 
@@ -201,14 +212,13 @@ function _phase_overview_snapshot(nodes)
                 end
                 record.host[] = _merged_label(record.host[], group.host)
                 isnothing(group.declarer) ||
-                    (record.declared[] = _merged_label(record.declared[], group.declarer.label))
+                    (record.declared[] = _merged_label(record.declared[], _declared_label(group)))
             else
                 output[group.key] = (; keys=group.keys, labels=copy(group.labels),
                     counts=copy(group.counts), items=Ref(group.items),
                     declarer=group.declarer,
                     host=Ref{Union{Nothing,String}}(group.host),
-                    declared=Ref{Union{Nothing,String}}(
-                        isnothing(group.declarer) ? nothing : group.declarer.label))
+                    declared=Ref{Union{Nothing,String}}(_declared_label(group)))
             end
         end
     end

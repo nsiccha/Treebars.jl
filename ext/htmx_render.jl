@@ -238,7 +238,11 @@ end
 # non-StateProgress backend that reaches this fallback).
 function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, state=nothing, seen::Base.IdSet{ProgressNode}=Base.IdSet{ProgressNode}(), walk::_DisplayTraversal=_DisplayTraversal(seen), phase_overview::Union{Bool,Symbol}=false, kwargs...)
     children, _ = _displayed_children(node, walk)
-    children_html = [_htmx_render(child, t; scoped, seen, walk, kwargs...) for child in children]
+    # A typed vector, like `rendered` in `_htmx_render_children`: an untyped
+    # comprehension over abstract children compiles `similar(::Type{Vector{T}}
+    # where T, …)`, which loading CategoricalArrays invalidates — together with
+    # every StateProgress render, whose child calls also reach this method.
+    children_html = Any[_htmx_render(child, t; scoped, seen, walk, kwargs...) for child in children]
     h.div(class="treebar-root")(_phase_overview_html(node, phase_overview, t), children_html)
 end
 
