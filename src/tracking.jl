@@ -50,7 +50,10 @@ _unlock_children(l) = isnothing(l) || unlock(l)
 function _mirrored_children(node)
     kids = node.children
     kids isa ThreadsafeSet || return ProgressNode[]
-    @lock kids.lock isempty(kids.inner) ? _NO_CHILDREN : collect(kids.inner)
+    # `collect(ProgressNode, …)`, not `collect(…)`: for an abstractly typed node
+    # the latter compiles `similar(::UnitRange, ::Type, …)`, which a package
+    # loaded later can invalidate (CategoricalArrays does; todo `1w372fb`).
+    @lock kids.lock isempty(kids.inner) ? _NO_CHILDREN : collect(ProgressNode, kids.inner)
 end
 const _NO_CHILDREN = ProgressNode[]
 

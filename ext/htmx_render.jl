@@ -242,9 +242,22 @@ function _htmx_render(node::ProgressNode, t::TreebarTexts; scoped=true, state=no
     # comprehension over abstract children compiles `similar(::Type{Vector{T}}
     # where T, …)`, which loading CategoricalArrays invalidates — together with
     # every StateProgress render, whose child calls also reach this method.
-    children_html = Any[_htmx_render(child, t; scoped, seen, walk, kwargs...) for child in children]
+    children_html = Any[_render_child(child, t, (; scoped, seen, walk, kwargs...)) for child in children]
     h.div(class="treebar-root")(_phase_overview_html(node, phase_overview, t), children_html)
 end
+
+# Render one child of a tree. A child is an abstract `ProgressNode`, so this is
+# a runtime dispatch either way; the barrier only stops inference from
+# following it. Inferring `_htmx_render` for the abstract child re-entered
+# `_htmx_render_children` with a wider signature than the caller's, and Julia
+# 1.10 limits such recursion by discarding the inferred source of the frames in
+# between. For the root's `_htmx_render_children` that meant: image generation
+# inferred it again into a second code instance, and loading the image
+# revalidates only one code instance per method instance, here the one without
+# native code, so every process compiled the root's children render on its
+# first render (todo `1w372fb`).
+_render_child(child, t::TreebarTexts, kw::NamedTuple) =
+    Core.kwcall(kw, Base.inferencebarrier(_htmx_render), child, t)::Union{String,Node}
 
 node_to_html(node) = sprint(io -> show(io, MIME"text/html"(), node))
 
@@ -398,7 +411,7 @@ function _htmx_render_children(node::ProgressNode{<:StateProgress}, t::TreebarTe
             keep[i] || continue
         end
         cls = statuses[i] == "running" ? "" : "treebar-child-$(statuses[i])"
-        inner = _htmx_render(child, t; scoped, seen, walk, max_finished, state=states[i])
+        inner = _render_child(child, t, (; scoped, seen, walk, max_finished, state=states[i]))
         push!(rendered, isempty(cls) ? inner : h.div(class=cls)(inner))
     end
 
