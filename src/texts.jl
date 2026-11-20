@@ -419,7 +419,12 @@ const _LOCALE_TEXTS = Dict{Symbol,TreebarTexts}(k => treebar_texts(k) for k in k
 # The texts for a page language, a BCP 47 tag such as "de" or "de-CH": its
 # primary subtag picks the locale, and a language without one is English.
 _lang_texts(::Nothing) = _EN_TEXTS
-_lang_texts(lang::AbstractString) =
+# Split a `String`, never an abstract `AbstractString`: the abstract `split`
+# compiles an `isequal(::Any, ::Char)` edge that a package adding `isequal`
+# methods (CategoricalArrays) invalidates, together with every renderer that
+# resolves its texts from the page language.
+_lang_texts(lang::AbstractString) = _lang_texts(String(lang)::String)
+_lang_texts(lang::String) =
     get(_LOCALE_TEXTS, Symbol(lowercase(first(split(lang, '-')))), _EN_TEXTS)
 
 # A text with its `{placeholders}` filled in from `values`.

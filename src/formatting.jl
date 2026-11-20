@@ -43,8 +43,12 @@ function _short_duration_parts(dt)
     # canonical part converts cleanly.
     ms = sum(p -> value(convert(Millisecond, p)), parts)
     ms < 60_000 && return _short_subminute(ms)
-    # ≥ 1 min: the two most-significant canonical parts.
-    labels = map(_short_period, parts)
+    # ≥ 1 min: the two most-significant canonical parts. `parts` holds abstract
+    # `Period`s, so an untyped `map` result leaves a method-table edge on
+    # `similar(::Vector, ::Any, …)` that loading a package defining `similar`
+    # methods (CategoricalArrays) invalidates, and with it every renderer that
+    # formats a duration. A typed vector keeps that native code valid.
+    labels = String[_short_period(p) for p in parts]
     join(labels[1:min(2, length(labels))], " ")
 end
 
